@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "updated_at": "2025-11-24",
+  "unit_decl": {"time": "min", "distance": "km", "probability": "[0,1]"},
+  "mt_library": [
+    {"id": "MT01", "name": "无人诱饵前出", "precondition": "无人机可用", "effect": "诱使雷达开机", "typical_scenes": ["S1", "S4"], "phase": "detect"},
+    {"id": "MT02", "name": "无源电磁侦收", "precondition": "敌雷达开机", "effect": "获得辐射源方位", "typical_scenes": ["S1", "S4"], "phase": "detect"},
+    {"id": "MT03", "name": "多平台交叉定位", "precondition": "获取不少于两条方位", "effect": "获得精确坐标", "typical_scenes": ["S1", "S4"], "phase": "locate"},
+    {"id": "MT04", "name": "红外搜索与跟踪", "precondition": "已获取精确坐标且在探测范围", "effect": "维持目标航迹", "typical_scenes": ["S1"], "phase": "track"},
+    {"id": "MT05", "name": "预警机雷达搜索", "precondition": "无", "effect": "发现潜在目标列表", "typical_scenes": ["S1", "S2", "S3"], "phase": "detect"},
+    {"id": "MT06", "name": "目标数据链分发", "precondition": "已有目标列表", "effect": "全单元共享目标数据", "typical_scenes": ["S1", "S2", "S3"], "phase": "share"},
+    {"id": "MT07", "name": "接收目标数据", "precondition": "目标数据已分发", "effect": "后方平台获得目标数据", "typical_scenes": ["S1"], "phase": "aim"},
+    {"id": "MT08", "name": "导弹发射", "precondition": "完成接收与瞄准", "effect": "导弹脱离平台", "typical_scenes": ["S1", "S3", "S4"], "phase": "engage"},
+    {"id": "MT09", "name": "远程武器发射", "precondition": "发射决策完成", "effect": "武器脱离平台", "typical_scenes": ["S1", "S3"], "phase": "engage"},
+    {"id": "MT10", "name": "海上目标搜索识别", "precondition": "广域监视完成", "effect": "目标类型确认", "typical_scenes": ["S3"], "phase": "detect"},
+    {"id": "MT11", "name": "电子压制", "precondition": "目标识别完成", "effect": "敌雷达效能降低", "typical_scenes": ["S3", "S4"], "phase": "aim"},
+    {"id": "MT12", "name": "多平台协同攻击", "precondition": "电子压制完成", "effect": "饱和火力投放", "typical_scenes": ["S3"], "phase": "engage"},
+    {"id": "MT13", "name": "导弹中段制导", "precondition": "武器发射", "effect": "导弹轨迹修正", "typical_scenes": ["S3"], "phase": "engage"},
+    {"id": "MT14", "name": "协同电子压制", "precondition": "辐射源定位完成", "effect": "敌系统受干扰", "typical_scenes": ["S4"], "phase": "aim"},
+    {"id": "MT15", "name": "战果评估", "precondition": "攻击行动完成", "effect": "目标状态确认", "typical_scenes": ["S1", "S2", "S3", "S4"], "phase": "assess"}
+  ]
+}

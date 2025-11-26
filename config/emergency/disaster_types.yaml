@@ -1,0 +1,200 @@
+# 应急救灾 - 灾害类型与等级定义
+# version: emergency-2025-11-25
+
+disaster_types:
+  earthquake:
+    code: "EQ"
+    name: "地震"
+    subtypes: ["主震", "余震"]
+    typical_scenarios: ["建筑倒塌", "人员被埋", "基础设施损坏"]
+    golden_time_hours: 72
+    level_criteria:
+      I:  # 特别重大
+        magnitude: ">= 7.0"
+        intensity: ">= 9"
+        casualties: ">= 100"
+        affected_population: ">= 100000"
+      II: # 重大
+        magnitude: "6.0 - 6.9"
+        intensity: "7 - 8"
+        casualties: "50 - 99"
+        affected_population: "50000 - 99999"
+      III: # 较大
+        magnitude: "5.0 - 5.9"
+        intensity: "6"
+        casualties: "10 - 49"
+        affected_population: "10000 - 49999"
+      IV: # 一般
+        magnitude: "4.0 - 4.9"
+        intensity: "< 6"
+        casualties: "< 10"
+        affected_population: "< 10000"
+
+  flood:
+    code: "FL"
+    name: "洪涝"
+    subtypes: ["暴雨内涝", "江河洪水", "山洪"]
+    typical_scenarios: ["城市积水", "人员被困", "道路中断"]
+    level_criteria:
+      I:
+        water_depth_m: ">= 2.0"
+        affected_area_km2: ">= 50"
+        trapped_persons: ">= 1000"
+        road_disruption: "主干道全部"
+      II:
+        water_depth_m: "1.0 - 2.0"
+        affected_area_km2: "20 - 50"
+        trapped_persons: "500 - 1000"
+        road_disruption: "主干道部分"
+      III:
+        water_depth_m: "0.5 - 1.0"
+        affected_area_km2: "5 - 20"
+        trapped_persons: "100 - 500"
+        road_disruption: "次干道"
+      IV:
+        water_depth_m: "< 0.5"
+        affected_area_km2: "< 5"
+        trapped_persons: "< 100"
+        road_disruption: "支路"
+
+  fire:
+    code: "FI"
+    name: "火灾"
+    subtypes: ["建筑火灾", "森林火灾", "化工火灾"]
+    typical_scenarios: ["人员疏散", "灭火救援", "伤员救治"]
+    golden_time_min: 3
+    level_criteria:
+      I:
+        fire_area_m2: ">= 10000"
+        trapped_persons: ">= 50"
+        building_type: ["高层", "人员密集场所"]
+        spread_rate: "快速蔓延"
+      II:
+        fire_area_m2: "1000 - 10000"
+        trapped_persons: "10 - 50"
+        building_type: ["多层", "商业建筑"]
+      III:
+        fire_area_m2: "100 - 1000"
+        trapped_persons: "1 - 10"
+      IV:
+        fire_area_m2: "< 100"
+        trapped_persons: "0"
+
+  hazmat:
+    code: "HM"
+    name: "危化品事故"
+    subtypes: ["泄漏", "爆炸", "中毒"]
+    typical_scenarios: ["有毒气体扩散", "污染区域处置", "人员中毒救治"]
+    level_criteria:
+      I:
+        leak_amount_ton: ">= 10"
+        toxicity: "剧毒"
+        affected_radius_km: ">= 5"
+        affected_population: ">= 10000"
+      II:
+        leak_amount_ton: "1 - 10"
+        toxicity: "高毒"
+        affected_radius_km: "1 - 5"
+        affected_population: "1000 - 10000"
+      III:
+        leak_amount_ton: "0.1 - 1"
+        toxicity: "中毒"
+        affected_radius_km: "0.5 - 1"
+        affected_population: "100 - 1000"
+      IV:
+        leak_amount_ton: "< 0.1"
+        toxicity: "低毒"
+        affected_radius_km: "< 0.5"
+        affected_population: "< 100"
+
+  landslide:
+    code: "LS"
+    name: "地质灾害"
+    subtypes: ["滑坡", "泥石流", "崩塌"]
+    typical_scenarios: ["道路中断", "村庄掩埋", "堰塞湖"]
+    level_criteria:
+      I:
+        volume_m3: ">= 1000000"
+        casualties: ">= 30"
+        affected_area_km2: ">= 10"
+      II:
+        volume_m3: "100000 - 1000000"
+        casualties: "10 - 30"
+        affected_area_km2: "1 - 10"
+      III:
+        volume_m3: "10000 - 100000"
+        casualties: "3 - 10"
+        affected_area_km2: "0.1 - 1"
+      IV:
+        volume_m3: "< 10000"
+        casualties: "< 3"
+        affected_area_km2: "< 0.1"
+
+  typhoon:
+    code: "TY"
+    name: "台风"
+    subtypes: ["强风", "暴雨", "风暴潮"]
+    typical_scenarios: ["建筑损坏", "人员转移", "船只避风"]
+    level_criteria:
+      I:
+        wind_level: ">= 16"
+        rainfall_24h_mm: ">= 250"
+        storm_surge_m: ">= 3"
+      II:
+        wind_level: "14 - 15"
+        rainfall_24h_mm: "150 - 250"
+        storm_surge_m: "2 - 3"
+      III:
+        wind_level: "12 - 13"
+        rainfall_24h_mm: "100 - 150"
+        storm_surge_m: "1 - 2"
+      IV:
+        wind_level: "10 - 11"
+        rainfall_24h_mm: "50 - 100"
+        storm_surge_m: "< 1"
+
+# 响应等级定义
+response_levels:
+  I:
+    color: "红色"
+    name: "特别重大"
+    authority: "国家级"
+    response_time_min: 30
+    
+  II:
+    color: "橙色"
+    name: "重大"
+    authority: "省级"
+    response_time_min: 45
+    
+  III:
+    color: "黄色"
+    name: "较大"
+    authority: "市级"
+    response_time_min: 60
+    
+  IV:
+    color: "蓝色"
+    name: "一般"
+    authority: "区县级"
+    response_time_min: 90
+
+# 次生灾害关联
+secondary_hazard_chains:
+  earthquake:
+    - "fire"        # 燃气管道破裂
+    - "landslide"   # 山体滑坡
+    - "flood"       # 堰塞湖溃坝
+    - "hazmat"      # 危化品泄漏
+    
+  flood:
+    - "landslide"   # 土壤松软滑坡
+    - "hazmat"      # 污水污染
+    
+  fire:
+    - "hazmat"      # 燃烧产生有毒气体
+    - "explosion"   # 爆炸
+    
+  hazmat:
+    - "fire"        # 可燃物泄漏
+    - "explosion"   # 爆炸

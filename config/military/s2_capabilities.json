@@ -1,0 +1,16 @@
+{
+  "version": "demo-1.0",
+  "updated_at": "2025-11-24",
+  "metrics": [
+    {"id": "S2-M1", "name": "雷达探测距离", "type": "KPP", "target": ">=400", "unit": "km", "constraints": ["S2-CON1"]},
+    {"id": "S2-M2", "name": "中距导弹射程", "type": "KPP", "target": ">=70", "unit": "km", "constraints": ["S2-CON2"]},
+    {"id": "S2-M3", "name": "空战机动裕度", "type": "KPP", "target": ">=5", "unit": "g", "constraints": ["S2-CON3"]},
+    {"id": "S2-M4", "name": "数据链共享", "type": "KSA", "target": "必须支持", "unit": "-", "constraints": ["S2-CON4"]}
+  ],
+  "constraints": [
+    {"id": "S2-CON1", "name": "预警机支援约束", "category": "协同", "description": "需有预警机指挥链路", "priority": "高"},
+    {"id": "S2-CON2", "name": "射程占位约束", "category": "武器", "description": "需进入中距射程", "priority": "高"},
+    {"id": "S2-CON3", "name": "机动安全约束", "category": "安全", "description": "高过载机动限制燃油和疲劳", "priority": "中"},
+    {"id": "S2-CON4", "name": "数据链约束", "category": "协同", "description": "保持数据链连通", "priority": "高"}
+  ]
+}

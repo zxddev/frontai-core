@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "updated_at": "2025-11-24T12:00:00Z",
+  "platforms": {
+    "J-20_LIKE": {
+      "max_speed_mach": {"max": 2.5},
+      "radius_km": {"max": 2000},
+      "stealth": true
+    },
+    "UAV_F_8": {
+      "max_speed_mach": {"max": 0.9},
+      "endurance_min": {"max": 1200},
+      "stealth": true
+    },
+    "S2_FIGHTER": {
+      "max_speed_mach": {"max": 2.0},
+      "radius_km": {"max": 1200},
+      "risk": 0.25
+    },
+    "S3_STRIKE": {
+      "max_speed_mach": {"max": 1.5},
+      "radius_km": {"max": 1500},
+      "risk": 0.35
+    },
+    "S4_EW_UAV": {
+      "max_speed_mach": {"max": 0.8},
+      "endurance_min": {"max": 800},
+      "risk": 0.3,
+      "stealth": true
+    }
+  }
+}

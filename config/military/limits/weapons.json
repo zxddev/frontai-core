@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "updated_at": "2025-11-24T12:00:00Z",
+  "weapons": {
+    "PL-15_LIKE": {
+      "range_km": {"max": 200},
+      "p_hit": {"max": 0.95}
+    },
+    "S3_ASM": {
+      "range_km": {"max": 220},
+      "p_hit": {"max": 0.8}
+    },
+    "S4_HARM": {
+      "range_km": {"max": 120},
+      "p_hit": {"max": 0.75}
+    }
+  }
+}

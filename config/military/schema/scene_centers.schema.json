@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Scene Centers Schema",
+  "type": "object",
+  "required": ["version", "updated_at", "scene_centers"],
+  "properties": {
+    "version": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "scene_centers": {
+      "type": "object",
+      "patternProperties": {
+        "^S[1-4]$": {
+          "type": "object",
+          "required": ["target_type", "rcs", "radiation", "location", "speed"],
+          "properties": {
+            "target_type": { "type": "string" },
+            "rcs": { "type": "string" },
+            "radiation": { "type": "string" },
+            "location": { "type": "string" },
+            "speed": { "type": "string" },
+            "base_score": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

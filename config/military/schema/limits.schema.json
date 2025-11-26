@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Limits Schema",
+  "type": "object",
+  "required": ["version", "updated_at", "unit_decl"],
+  "properties": {
+    "version": { "type": "number" },
+    "updated_at": { "type": "string" },
+    "unit_decl": {
+      "type": "object",
+      "properties": {
+        "distance": { "type": "string" },
+        "altitude": { "type": "string" },
+        "speed": { "type": "string" },
+        "time": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": { "min": { "type": "number" }, "max": { "type": "number" } },
+        "additionalProperties": false
+      }
+    },
+    "scenes": {
+      "type": "object",
+      "patternProperties": {
+        "^S[1-4]$": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": { "min": { "type": "number" }, "max": { "type": "number" } },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "platforms": {
+      "type": "object",
+      "properties": {
+        "platforms": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "weapons": {
+      "type": "object",
+      "properties": {
+        "weapons": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

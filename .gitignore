@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+.venv-*/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.windsurf/
+
+# Factory
+.factory/
+
+# Data and temp files
+data/
+temp/
+*.log
+etl_output.log
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Environment
+.env
+.env.*
+
+# Misc
+=*
+*.bak
+.DS_Store
+config/private.yaml

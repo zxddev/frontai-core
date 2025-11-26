@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "updated_at": "2025-11-24",
+  "paths": [
+    {"scene": "S1", "path_id": "S1-P1", "tasks": ["MT01","MT02","MT03","MT04","MT15"], "allocation": ["J-20_01","UAV_01"], "score_hint": {"success":0.85,"time":0.8,"cost":0.6,"risk":0.3,"redundancy":0.5}},
+    {"scene": "S1", "path_id": "S1-P2", "tasks": ["MT02","MT03","MT04","MT15"], "allocation": ["J-20_02","UAV_02"], "score_hint": {"success":0.8,"time":0.75,"cost":0.65,"risk":0.32,"redundancy":0.4}},
+    {"scene": "S2", "path_id": "S2-P1", "tasks": ["MT21","MT22","MT15"], "allocation": ["J-11_01","J-11_02"], "score_hint": {"success":0.82,"time":0.85,"cost":0.55,"risk":0.35,"redundancy":0.6}},
+    {"scene": "S2", "path_id": "S2-P2", "tasks": ["MT21","MT22","MT15"], "allocation": ["J-11_01"], "score_hint": {"success":0.75,"time":0.9,"cost":0.5,"risk":0.4,"redundancy":0.3}},
+    {"scene": "S3", "path_id": "S3-P1", "tasks": ["MT31","MT32","MT15"], "allocation": ["J-15K_01","J-15K_02"], "score_hint": {"success":0.8,"time":0.7,"cost":0.6,"risk":0.4,"redundancy":0.5}},
+    {"scene": "S3", "path_id": "S3-P2", "tasks": ["MT31","MT32","MT15"], "allocation": ["J-15K_01"], "score_hint": {"success":0.72,"time":0.68,"cost":0.55,"risk":0.45,"redundancy":0.3}},
+    {"scene": "S4", "path_id": "S4-P1", "tasks": ["MT41","MT42","MT15"], "allocation": ["EW_UAV_01","HARM_01"], "score_hint": {"success":0.78,"time":0.65,"cost":0.5,"risk":0.38,"redundancy":0.4}},
+    {"scene": "S4", "path_id": "S4-P2", "tasks": ["MT41","MT42","MT15"], "allocation": ["HARM_01"], "score_hint": {"success":0.7,"time":0.6,"cost":0.45,"risk":0.42,"redundancy":0.2}}
+  ]
+}

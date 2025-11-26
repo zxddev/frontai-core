@@ -1,0 +1,224 @@
+# 应急救灾 - 无人设备能力库
+# version: emergency-2025-11-25
+
+uav:  # 无人机
+  - id: "UAV-001"
+    name: "侦察无人机"
+    type: "reconnaissance"
+    capabilities:
+      - "高空侦察"
+      - "热成像"
+      - "实时视频"
+      - "地图测绘"
+      - "通信中继"
+    specs:
+      flight_time_min: 45
+      range_km: 10
+      payload_kg: 2
+      max_altitude_m: 500
+      max_wind_level: 5
+      night_vision: true
+      thermal_imaging: true
+    suitable_scenarios:
+      - "灾情侦察"
+      - "人员搜索"
+      - "火点监控"
+      - "夜间搜救"
+      - "通信中继"
+    operation_constraints:
+      - "风力 <= 5级"
+      - "能见度 >= 1km"
+      - "非禁飞区"
+
+  - id: "UAV-002"
+    name: "喊话无人机"
+    type: "broadcast"
+    capabilities:
+      - "语音喊话"
+      - "警示灯"
+      - "紧急通知"
+      - "疏散引导"
+    specs:
+      flight_time_min: 30
+      range_km: 5
+      sound_db: 120
+      sound_range_m: 300
+    suitable_scenarios:
+      - "疏散引导"
+      - "紧急通知"
+      - "人群管控"
+      - "被困人员定位"
+    operation_constraints:
+      - "风力 <= 5级"
+
+  - id: "UAV-003"
+    name: "物资投送无人机"
+    type: "delivery"
+    capabilities:
+      - "物资空投"
+      - "精准投放"
+      - "夜间作业"
+    specs:
+      flight_time_min: 20
+      range_km: 8
+      payload_kg: 10
+      drop_accuracy_m: 5
+    suitable_scenarios:
+      - "孤岛投送"
+      - "药品投放"
+      - "食品投送"
+      - "救生圈投放"
+    deliverable_items:
+      - name: "急救药品"
+        weight_kg: 2
+        priority: 1
+      - name: "饮用水"
+        weight_kg: 5
+        priority: 2
+      - name: "食品"
+        weight_kg: 3
+        priority: 3
+      - name: "通信设备"
+        weight_kg: 1
+        priority: 4
+      - name: "救生圈"
+        weight_kg: 3
+        priority: 1
+
+  - id: "UAV-004"
+    name: "消防无人机"
+    type: "firefighting"
+    capabilities:
+      - "灭火弹投放"
+      - "火情监控"
+      - "热点定位"
+      - "破窗灭火"
+    specs:
+      flight_time_min: 15
+      range_km: 3
+      payload_kg: 20
+      fire_bomb_count: 4
+    suitable_scenarios:
+      - "高层火灾"
+      - "森林火灾"
+      - "化工火灾"
+
+ugv:  # 无人车/机器人
+  - id: "UGV-001"
+    name: "侦察机器人"
+    type: "reconnaissance"
+    capabilities:
+      - "狭小空间侦察"
+      - "有毒环境侦察"
+      - "视频传输"
+      - "气体检测"
+    specs:
+      battery_hours: 4
+      speed_kmh: 5
+      size_cm: "50x30x20"
+      waterproof: true
+      gas_sensors: ["CO", "H2S", "CH4", "O2"]
+    suitable_scenarios:
+      - "建筑倒塌"
+      - "危化品泄漏"
+      - "矿难救援"
+      - "高危区域探测"
+    operation_constraints:
+      - "坡度 <= 35度"
+      - "积水深度 <= 30cm"
+
+  - id: "UGV-002"
+    name: "搜救机器人"
+    type: "search_rescue"
+    capabilities:
+      - "生命探测"
+      - "语音通话"
+      - "物品递送"
+      - "狭小空间穿行"
+    specs:
+      battery_hours: 6
+      payload_kg: 5
+      life_detector: true
+      two_way_audio: true
+      min_passage_cm: "25x25"
+    suitable_scenarios:
+      - "废墟搜救"
+      - "被困人员联络"
+      - "物资递送"
+    deliverable_items:
+      - "水"
+      - "通信设备"
+      - "手电筒"
+      - "急救药品"
+
+  - id: "UGV-003"
+    name: "消防机器人"
+    type: "firefighting"
+    capabilities:
+      - "远程灭火"
+      - "侦察探测"
+      - "排烟"
+      - "破障"
+    specs:
+      water_flow_l_min: 80
+      range_m: 100
+      battery_hours: 3
+      heat_resistant_c: 300
+    suitable_scenarios:
+      - "危险火场"
+      - "石化火灾"
+      - "隧道火灾"
+      - "高温区域"
+
+usv:  # 无人船
+  - id: "USV-001"
+    name: "救援无人船"
+    type: "rescue"
+    capabilities:
+      - "水面搜救"
+      - "救生圈投放"
+      - "拖带救援"
+      - "水面侦察"
+    specs:
+      speed_knots: 15
+      range_km: 20
+      capacity_persons: 3
+      battery_hours: 4
+      wave_resistance_level: 4
+    suitable_scenarios:
+      - "溺水救援"
+      - "洪涝转移"
+      - "水面搜索"
+    operation_constraints:
+      - "浪高 <= 1.5m"
+      - "水流 <= 3m/s"
+
+# 无人设备协同规则
+cooperation_rules:
+  - id: "COOP-001"
+    name: "空地协同搜救"
+    pattern: "UAV-001 + UGV-002"
+    workflow:
+      - "UAV-001 大范围热成像搜索"
+      - "发现目标后标记GPS坐标"
+      - "UGV-002 前往精确定位"
+      - "UGV-002 建立语音联络"
+      - "引导救援队伍到达"
+
+  - id: "COOP-002"
+    name: "水面立体救援"
+    pattern: "UAV-001 + UAV-003 + USV-001"
+    workflow:
+      - "UAV-001 定位落水人员"
+      - "UAV-003 投放救生圈"
+      - "USV-001 前往接应"
+      - "UAV-001 持续跟踪监控"
+
+  - id: "COOP-003"
+    name: "危化品侦察"
+    pattern: "UAV-001 + UGV-001"
+    workflow:
+      - "UAV-001 高空侦察泄漏范围"
+      - "UGV-001 携带气体检测进入"
+      - "实时回传浓度数据"
+      - "划定安全边界"

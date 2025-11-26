@@ -1,0 +1,186 @@
+{
+  "version": "emergency-uav-2025-11-25",
+  "updated_at": "2025-11-25",
+  "source": "docs/emergency_rules_design.md",
+  "rules": [
+    {
+      "id": "UAV-RULE-001",
+      "name": "灾情侦察优先规则",
+      "if": [
+        "灾情态势 = unknown",
+        "人员进入风险 = high",
+        "侦察无人机可用 = true"
+      ],
+      "then": [
+        "立即起飞: UAV-001(侦察无人机)",
+        "任务: [全景侦察, 热成像搜索]",
+        "实时回传: 指挥中心",
+        "禁止: 人员先行进入"
+      ],
+      "equipment": "UAV-001",
+      "priority": "highest",
+      "description": "人员进入前必须先用无人机侦察"
+    },
+    {
+      "id": "UAV-RULE-002",
+      "name": "被困人员定位规则",
+      "if": [
+        "有被困人员报警 = true",
+        "具体位置 = unknown",
+        "通信中断 = true"
+      ],
+      "then": [
+        "起飞: UAV-001(侦察无人机) 热成像模式",
+        "起飞: UAV-002(喊话无人机) 喊话定位",
+        "搜索模式: grid_search",
+        "定位后: 标记GPS坐标传给救援队"
+      ],
+      "equipment": ["UAV-001", "UAV-002"],
+      "priority": "highest",
+      "description": "无人机可快速定位被困人员位置"
+    },
+    {
+      "id": "UAV-RULE-003",
+      "name": "孤岛物资投送规则",
+      "if": [
+        "受困区域 = isolated",
+        "地面通道 = unreachable",
+        "受困人员急需物资 = true"
+      ],
+      "then": [
+        "起飞: UAV-003(物资投送无人机)",
+        "投送物资优先级: [药品, 饮水, 食品, 通信设备]",
+        "投放精度: GPS定位 + 视觉引导",
+        "多架次轮换: 确保持续投送"
+      ],
+      "equipment": "UAV-003",
+      "priority": "high",
+      "description": "无人机是孤岛物资投送最快捷方式"
+    },
+    {
+      "id": "UAV-RULE-004",
+      "name": "危险区域侦察规则",
+      "if": [
+        "区域类型 in [hazmat_zone, radiation_zone, high_temp_zone]",
+        "人员进入 = forbidden"
+      ],
+      "then": [
+        "起飞: UAV-001(侦察无人机) + 气体检测载荷",
+        "部署: UGV-001(侦察机器人) 地面配合",
+        "数据采集: [浓度, 温度, 辐射值]",
+        "划定: 安全边界"
+      ],
+      "equipment": ["UAV-001", "UGV-001"],
+      "priority": "highest",
+      "description": "危险区域必须用无人设备先行侦察"
+    },
+    {
+      "id": "UAV-RULE-005",
+      "name": "水面救援规则",
+      "if": [
+        "灾害类型 in [flood, drowning]",
+        "水面有落水人员 = true",
+        "救援船艇未到达 = true"
+      ],
+      "then": [
+        "起飞: UAV-001(侦察无人机) 定位跟踪",
+        "起飞: UAV-003(物资无人机) 投放救生圈",
+        "启动: USV-001(救援无人船) 前往救援",
+        "持续喊话: 稳定情绪"
+      ],
+      "equipment": ["UAV-001", "UAV-003", "USV-001"],
+      "priority": "highest",
+      "description": "无人设备可先于有人船艇到达"
+    },
+    {
+      "id": "UAV-RULE-006",
+      "name": "火场侦察规则",
+      "if": [
+        "灾害类型 = fire",
+        "火场面积 >= 1000m²",
+        "烟雾浓度 = high"
+      ],
+      "then": [
+        "起飞: UAV-001(侦察无人机) 热成像",
+        "任务: [定位火点, 寻找被困人员, 监控蔓延]",
+        "起飞: UAV-004(消防无人机) 高层灭火",
+        "持续监控: 直至明火扑灭"
+      ],
+      "equipment": ["UAV-001", "UAV-004"],
+      "priority": "high",
+      "description": "无人机可穿透烟雾进行热成像侦察"
+    },
+    {
+      "id": "UAV-RULE-007",
+      "name": "废墟搜救规则",
+      "if": [
+        "灾害类型 in [earthquake, explosion]",
+        "建筑倒塌 = true",
+        "废墟空间狭小 = true"
+      ],
+      "then": [
+        "部署: UGV-002(搜救机器人)",
+        "任务: [狭小空间侦察, 生命探测, 语音联络]",
+        "配合: 生命探测仪定位",
+        "递送: [水, 通信设备]给被困者"
+      ],
+      "equipment": "UGV-002",
+      "priority": "highest",
+      "description": "搜救机器人可进入人员无法到达的狭小空间"
+    },
+    {
+      "id": "UAV-RULE-008",
+      "name": "疏散引导规则",
+      "if": [
+        "疏散任务 = active",
+        "人群密集 = true",
+        "引导人员不足 = true"
+      ],
+      "then": [
+        "起飞: UAV-002(喊话无人机) 多架次",
+        "播放内容: 疏散路线指引",
+        "显示: 警示灯引导方向",
+        "覆盖: 所有疏散路口"
+      ],
+      "equipment": "UAV-002",
+      "priority": "high",
+      "description": "无人机可覆盖大范围进行疏散引导"
+    },
+    {
+      "id": "UAV-RULE-009",
+      "name": "夜间热成像搜索规则",
+      "if": [
+        "时间段 in [18:00-06:00]",
+        "搜救任务 = ongoing",
+        "地面搜索效率低 = true"
+      ],
+      "then": [
+        "起飞: UAV-001(侦察无人机) 热成像模式",
+        "搜索模式: 网格化扫描",
+        "标记: 所有热源点位",
+        "引导: 地面搜救队前往"
+      ],
+      "equipment": "UAV-001",
+      "priority": "high",
+      "description": "热成像在夜间搜救中效率远高于人工"
+    },
+    {
+      "id": "UAV-RULE-010",
+      "name": "通信中继规则",
+      "if": [
+        "通信中断 = true",
+        "地面中继设备未到位 = true",
+        "通信需求紧急 = true"
+      ],
+      "then": [
+        "起飞: UAV-001(侦察无人机) + 通信中继载荷",
+        "任务: 空中通信中继",
+        "覆盖: 指挥中心与灾区",
+        "轮换: 确保持续在线"
+      ],
+      "equipment": "UAV-001",
+      "priority": "highest",
+      "description": "无人机可临时充当空中通信中继站"
+    }
+  ]
+}

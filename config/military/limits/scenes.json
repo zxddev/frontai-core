@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "updated_at": "2025-11-24T12:00:00Z",
+  "unit_decl": {
+    "distance": "km",
+    "altitude": "m",
+    "speed": "mach",
+    "time": "min"
+  },
+  "scenes": {
+    "S1": {"risk": {"max": 0.6}},
+    "S2": {"risk": {"max": 0.4}},
+    "S3": {"risk": {"max": 0.7}},
+    "S4": {"risk": {"max": 0.9}}
+  }
+}

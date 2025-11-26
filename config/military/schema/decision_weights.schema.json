@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Decision Weights Schema",
+  "type": "object",
+  "required": ["version", "updated_at", "profiles"],
+  "properties": {
+    "version": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "source": { "type": "string" },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["name", "weights", "interpretation"],
+        "properties": {
+          "name": { "type": "string" },
+          "weights": {
+            "type": "object",
+            "required": ["success", "time", "cost", "risk", "redundancy"],
+            "properties": {
+              "success": { "type": "number" },
+              "time": { "type": "number" },
+              "cost": { "type": "number" },
+              "risk": { "type": "number" },
+              "redundancy": { "type": "number" }
+            },
+            "additionalProperties": false
+          },
+          "interpretation": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "note": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

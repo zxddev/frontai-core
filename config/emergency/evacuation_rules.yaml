@@ -1,0 +1,209 @@
+# 应急救灾 - 疏散规则配置
+# version: emergency-2025-11-25
+
+# 安全地点选择标准
+safe_shelter_criteria:
+  mandatory:  # 必要条件 (全部满足)
+    - id: "SC-001"
+      name: "结构安全"
+      rule: "建筑抗震设防 >= 当地烈度 + 1度"
+      check_method: "建筑安全鉴定"
+      
+    - id: "SC-002"
+      name: "位置安全"
+      rules_by_disaster:
+        flood: "高于历史最高水位 2m"
+        hazmat: "位于上风向 + 距离 >= 扩散半径 * 2"
+        fire: "距火场 >= 500m + 有隔离带"
+        earthquake: "远离危险建筑和地质灾害区"
+        
+    - id: "SC-003"
+      name: "道路通达"
+      rule: "至少有 2 条可用道路连接"
+      check_method: "道路可通行大型车辆"
+      
+    - id: "SC-004"
+      name: "容量充足"
+      rule: "人均面积 >= 2m²"
+      check_method: "总容量 >= 计划疏散人数 * 1.2"
+
+  preferred:  # 优选条件 (尽量满足)
+    - id: "SP-001"
+      name: "配套设施"
+      items: ["供水", "供电", "卫生间", "通信"]
+      score_weight: 0.25
+      
+    - id: "SP-002"
+      name: "医疗条件"
+      rule: "有医疗点或距医院 < 5km"
+      score_weight: 0.20
+      
+    - id: "SP-003"
+      name: "物资储备"
+      items: ["饮用水", "食品", "帐篷", "被褥"]
+      score_weight: 0.15
+      
+    - id: "SP-004"
+      name: "停车场地"
+      rule: "可停放救援车辆 >= 10辆"
+      score_weight: 0.15
+      
+    - id: "SP-005"
+      name: "无障碍设施"
+      rule: "有坡道、扶手等"
+      score_weight: 0.15
+      
+    - id: "SP-006"
+      name: "照明条件"
+      rule: "有应急照明或发电设备"
+      score_weight: 0.10
+
+# 疏散路线规划规则
+evacuation_route_rules:
+  selection_principles:
+    - id: "ER-001"
+      name: "远离危险源"
+      rule: "路线与危险源最小距离 >= 安全距离"
+      priority: 1
+      
+    - id: "ER-002"
+      name: "道路条件"
+      rule: "优先选择宽度 >= 6m 的主干道"
+      priority: 2
+      
+    - id: "ER-003"
+      name: "路程最短"
+      rule: "在满足安全前提下选择最短路径"
+      priority: 3
+      
+    - id: "ER-004"
+      name: "避免拥堵"
+      rule: "单一路线容量不超过设计容量的 80%"
+      priority: 4
+      
+    - id: "ER-005"
+      name: "备用路线"
+      rule: "每个疏散方向至少规划 2 条路线"
+      priority: 5
+
+  safety_distance:  # 不同灾害的安全距离
+    fire: 500               # 米
+    hazmat_low: 300         # 米
+    hazmat_medium: 1000     # 米
+    hazmat_high: 3000       # 米
+    flood: "高于水位2m"
+    landslide: 500          # 米
+
+# 人群流量控制
+flow_control:
+  walking_speed_m_s:
+    normal: 1.2
+    elderly: 0.8
+    children: 0.9
+    with_luggage: 0.9
+    panic: 0.6
+    wheelchair: 0.5
+    
+  road_capacity_person_m_min:
+    sidewalk: 80
+    road_lane: 120
+    stairway_up: 45
+    stairway_down: 60
+    corridor: 70
+    
+  bottleneck_rules:
+    - rule: "瓶颈口宽度每减少1m，通过能力下降约30%"
+    - rule: "转弯处通过能力为直道的70%"
+    - rule: "上坡通过能力为平地的80%"
+    - rule: "下坡通过能力为平地的90%"
+
+# 疏散优先级
+evacuation_priority:
+  # 人员分类优先级 (1最高, 5最低)
+  priority_groups:
+    1:
+      name: "重伤员"
+      description: "需要担架或急救的伤员"
+      transport: "救护车优先"
+      special_needs: ["担架", "急救设备"]
+      
+    2:
+      name: "弱势群体A"
+      description: "婴幼儿、孕妇、重症患者"
+      transport: "专车接送"
+      special_needs: ["婴儿座椅", "轮椅"]
+      
+    3:
+      name: "弱势群体B"
+      description: "老年人(≥70岁)、残疾人、行动不便者"
+      transport: "安排志愿者协助"
+      special_needs: ["轮椅", "拐杖", "助行器"]
+      
+    4:
+      name: "一般人员"
+      description: "健康成年人"
+      transport: "步行或公共交通"
+      
+    5:
+      name: "机动人员"
+      description: "青壮年志愿者"
+      transport: "最后撤离，协助他人"
+      role: "协助疏散"
+
+  # 区域疏散优先级
+  zone_priority:
+    general: "危险区核心 → 危险区边缘 → 缓冲区 → 安全区"
+    hazmat: "下风向 → 侧风向 → 上风向"
+    flood: "低洼区 → 高地"
+    fire_with_elevator: "高层 → 低层"
+    fire_no_elevator: "低层 → 高层"
+
+# 特殊场景疏散规则
+special_scenarios:
+  high_rise_building:
+    - "优先使用消防电梯(如可用)"
+    - "分层分批疏散，避免楼梯拥堵"
+    - "行动不便者集中至避难层等待救援"
+    - "楼层疏散顺序：着火层→着火层上层→着火层下层→其他楼层"
+    
+  underground_space:
+    - "立即切断非应急电源"
+    - "开启应急照明和排烟系统"
+    - "引导人群向上疏散"
+    - "优先开放所有出口"
+    
+  mass_gathering:
+    - "控制疏散速度，防止踩踏"
+    - "多出口同时疏散"
+    - "分流引导，避免人流对冲"
+    - "广播持续引导"
+    
+  school:
+    - "教师负责班级学生"
+    - "低年级优先疏散"
+    - "点名确认人数"
+    - "家长接领点统一设置"
+    
+  hospital:
+    - "按病情分类疏散"
+    - "ICU/手术室患者最后转移"
+    - "携带必要医疗设备"
+    - "医护人员陪同"
+
+# 疏散时间估算模型
+time_estimation:
+  model: "流体动力学模型"
+  formula: "T = N / (W * v * k)"
+  parameters:
+    N: "疏散人数"
+    W: "通道有效宽度(m)"
+    v: "人员流动速度(人/m/min)"
+    k: "瓶颈系数(0.7-1.0)"
+  safety_factor: 1.5  # 安全系数
+
+# 疏散完成标准
+completion_criteria:
+  - "所有区域人员清点完成"
+  - "特殊人群全部转移"
+  - "无人员滞留危险区域"
+  - "安置点接收登记完成"

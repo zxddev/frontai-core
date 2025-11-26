@@ -1,0 +1,34 @@
+{
+  "version": "docx-2025-11-24",
+  "updated_at": "2025-11-24",
+  "source": "docs/TO XIAOMA 20251124(2).docx",
+  "gaps": {
+    "capability_metrics": {
+      "S1": { "missing_ids": [], "status": "已抄录 docx S1-M1~M22" },
+      "S2": { "missing_ids": "全部指标待抄录", "status": "待抄录" },
+      "S3": { "missing_ids": "全部指标待抄录", "status": "待抄录" },
+      "S4": { "missing_ids": "全部指标待抄录", "status": "待抄录" }
+    },
+    "constraints": {
+      "S2": "约束列表待抄录",
+      "S3": "约束列表待抄录",
+      "S4": "约束列表待抄录"
+    },
+    "grouping_rules": {
+      "additional_groups": "GROUP-002 及其他编组规则未抄录，需从 docx 表格提取角色分工/pattern/features/场景范围",
+      "status": "待抄录"
+    },
+    "mt_library": {
+      "mt_ids_beyond_15": "docx 未提供 MT16+，如有新增需补充来源",
+      "status": "已确认 docx 仅 MT01~MT15"
+    },
+    "scene_centers": {
+      "numerical_values": "docx 场景中心数值/权重/刷新频率未录入，需抄录后替换占位",
+      "status": "待抄录"
+    },
+    "afsim_units": {
+      "fields": "已补 afsim_config.json，包含单位与刷新率",
+      "status": "已补充"
+    }
+  }
+}

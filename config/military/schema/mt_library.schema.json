@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MT Library Schema",
+  "type": "object",
+  "required": ["version", "updated_at", "unit_decl", "mt_library"],
+  "properties": {
+    "version": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "unit_decl": {
+      "type": "object",
+      "properties": {
+        "time": { "type": "string" },
+        "distance": { "type": "string" },
+        "probability": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "mt_library": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "precondition", "effect", "typical_scenes", "phase"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^MT\\d{2}$" },
+          "name": { "type": "string" },
+          "precondition": { "type": "string" },
+          "effect": { "type": "string" },
+          "typical_scenes": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^S[1-4]$" },
+            "minItems": 1
+          },
+          "phase": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

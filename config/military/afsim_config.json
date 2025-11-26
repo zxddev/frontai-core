@@ -1,0 +1,25 @@
+{
+  "version": "1.0",
+  "updated_at": "2025-11-24",
+  "unit_decl": {
+    "distance": "km",
+    "height": "m",
+    "speed_air": "km/h",
+    "speed_sea": "knots",
+    "angle": "deg",
+    "probability": "%"
+  },
+  "refresh_rate": "每10秒",
+  "fields": {
+    "position": "坐标（纬度，经度）",
+    "altitude": "米",
+    "heading": "度",
+    "speed_air": "km/h",
+    "speed_sea": "knots",
+    "rcs": "m²",
+    "threat_level": "高/极高",
+    "confidence": "%",
+    "range": "km",
+    "height_ceiling": "m"
+  }
+}

@@ -1,0 +1,92 @@
+# 应急救灾 - 决策权重配置
+# version: emergency-2025-11-25
+
+# 方案评估维度权重
+evaluation_dimensions:
+  life_safety: 0.40       # 生命安全 (最高权重)
+  time_efficiency: 0.25   # 时间效率
+  resource_cost: 0.15     # 资源消耗
+  success_rate: 0.15      # 成功概率
+  secondary_risk: 0.05    # 次生风险
+
+# 场景优先级仲裁权重 (TOPSIS算法使用)
+scene_priority:
+  life_threat: 0.35       # 生命威胁程度
+  time_urgency: 0.25      # 时间紧迫性
+  affected_people: 0.20   # 影响人数
+  success_prob: 0.20      # 救援成功率
+
+# 资源分配偏好
+resource_preference:
+  professional_first: 0.7  # 优先使用专业队伍
+  local_first: 0.6         # 优先使用就近资源
+  reserve_ratio: 0.2       # 保留20%资源应对次生灾害
+
+# 路径规划权重
+routing_weights:
+  distance: 0.3           # 距离最短
+  time: 0.4               # 时间最快
+  safety: 0.3             # 路线安全
+
+# 疏散优先级权重
+evacuation_priority:
+  vulnerability: 0.4      # 人员脆弱性
+  zone_risk: 0.35         # 区域风险
+  mobility: 0.25          # 行动能力
+
+# 黄金救援时间(分钟)
+golden_time:
+  earthquake: 4320        # 72小时
+  drowning: 6             # 6分钟
+  fire_escape: 3          # 3分钟
+  hazmat_exposure: 15     # 15分钟
+  cardiac_arrest: 4       # 4分钟
+
+# 风险阈值
+risk_thresholds:
+  rescue_team_casualty: 0.10    # 救援人员伤亡率上限 10%
+  secondary_disaster: 0.30      # 次生灾害概率警戒线 30%
+  resource_shortage: 0.20       # 资源短缺警戒线 20%
+
+# 约束松弛规则
+constraint_relaxation:
+  - id: "RELAX-001"
+    constraint: "响应时间"
+    original: "< 30分钟"
+    relaxed: "< 60分钟"
+    condition: "所有就近资源已派出"
+    compensation: "派遣更多远距资源"
+    
+  - id: "RELAX-002"
+    constraint: "专业队伍"
+    original: "必须派遣专业队伍"
+    relaxed: "志愿者 + 远程专业指导"
+    condition: "专业队伍全部占用"
+    compensation: "视频连线专业人员指导"
+    
+  - id: "RELAX-003"
+    constraint: "无人机数量"
+    original: ">= 3架"
+    relaxed: ">= 1架"
+    condition: "无人机资源不足"
+    compensation: "增加地面侦察力量"
+
+# 多目标优化参数 (NSGA-II/III)
+optimization_params:
+  population_size: 100
+  n_generations: 100
+  crossover_prob: 0.9
+  mutation_prob: 0.1
+  objectives:
+    - name: "response_time"
+      direction: "minimize"
+      weight: 0.3
+    - name: "coverage_rate"
+      direction: "maximize"
+      weight: 0.3
+    - name: "resource_cost"
+      direction: "minimize"
+      weight: 0.2
+    - name: "risk_level"
+      direction: "minimize"
+      weight: 0.2

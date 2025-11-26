@@ -1,0 +1,144 @@
+{
+  "version": "emergency-grouping-2025-11-25",
+  "updated_at": "2025-11-25",
+  "source": "docs/emergency_rules_design.md",
+  "grouping_rules": [
+    {
+      "id": "GROUP-EM-001",
+      "pattern": "USAR+MEDICAL",
+      "definition": "1搜救队 + 1医疗队 (生命救援小组)",
+      "roles": {
+        "rescue_team": "搜索定位、破拆救出",
+        "medical_team": "现场急救、伤员转运"
+      },
+      "min_personnel": 28,
+      "features": "搜救医疗一体化，发现即救治",
+      "scenarios": ["earthquake", "building_collapse", "mine_accident"],
+      "equipment": ["生命探测仪", "液压破拆", "急救包", "担架", "救护车"]
+    },
+    {
+      "id": "GROUP-EM-002",
+      "pattern": "FIRE+MEDICAL+COMM",
+      "definition": "2消防车 + 1救护车 + 1通信车 (标准火灾编组)",
+      "roles": {
+        "fire_team": "灭火、人员疏散",
+        "medical_team": "伤员救治",
+        "comm_team": "现场通信保障"
+      },
+      "min_personnel": 30,
+      "features": "功能完整的火灾处置单元",
+      "scenarios": ["building_fire", "factory_fire"],
+      "equipment": ["消防车", "水罐车", "救护车", "通信车"]
+    },
+    {
+      "id": "GROUP-EM-003",
+      "pattern": "UAV+UGV+COMMAND",
+      "definition": "2无人机 + 1机器人 + 1指挥车 (无人协同编组)",
+      "roles": {
+        "uav": "空中侦察、定位标记",
+        "ugv": "地面侦察、狭小空间探测",
+        "command": "远程操控、数据汇聚"
+      },
+      "min_personnel": 6,
+      "features": "先无人后有人，降低人员风险",
+      "scenarios": ["hazmat_recon", "high_risk_area", "rubble_search"],
+      "equipment": ["侦察无人机x2", "搜救机器人x1", "指挥车x1"]
+    },
+    {
+      "id": "GROUP-EM-004",
+      "pattern": "HAZMAT+FIRE+MEDICAL+MONITOR",
+      "definition": "1危化队 + 1消防队 + 1医疗队 + 1环保监测 (危化品处置全编组)",
+      "roles": {
+        "hazmat": "堵漏、洗消",
+        "fire": "警戒、稀释",
+        "medical": "中毒救治",
+        "monitor": "环境监测"
+      },
+      "min_personnel": 42,
+      "features": "多专业协同处置",
+      "scenarios": ["chemical_leak", "toxic_gas"],
+      "equipment": ["防化服", "堵漏器材", "洗消车", "气体检测仪", "消防车", "救护车"]
+    },
+    {
+      "id": "GROUP-EM-005",
+      "pattern": "WATER+USV+UAV+MEDICAL",
+      "definition": "2冲锋舟 + 1无人船 + 1无人机 + 1救护车 (水域救援编组)",
+      "roles": {
+        "boats": "人员转运、水面搜救",
+        "usv": "远距侦察、物资投送",
+        "uav": "空中定位、指挥引导",
+        "medical": "岸边待命救治"
+      },
+      "min_personnel": 18,
+      "features": "水陆空立体救援",
+      "scenarios": ["flood_rescue", "drowning_rescue"],
+      "equipment": ["冲锋舟x2", "救援无人船x1", "侦察无人机x1", "救护车x1", "救生衣"]
+    },
+    {
+      "id": "GROUP-EM-006",
+      "pattern": "FIRE+UAV",
+      "definition": "1消防队 + 1消防无人机 (高层火灾编组)",
+      "roles": {
+        "fire_team": "地面灭火、内攻救人",
+        "uav": "高层侦察、灭火弹投放"
+      },
+      "min_personnel": 22,
+      "features": "地空配合，解决高层火灾",
+      "scenarios": ["high_rise_fire"],
+      "equipment": ["云梯车", "消防无人机", "热成像设备"]
+    },
+    {
+      "id": "GROUP-EM-007",
+      "pattern": "COMMUNITY+UAV",
+      "definition": "50志愿者 + 2喊话无人机 (大规模疏散编组)",
+      "roles": {
+        "volunteers": "现场引导、老弱扶助",
+        "uav": "空中喊话、路线指引"
+      },
+      "min_personnel": 52,
+      "features": "人机协同大规模疏散",
+      "scenarios": ["mass_evacuation"],
+      "equipment": ["喊话无人机x2", "扩音器", "反光背心", "引导牌"]
+    },
+    {
+      "id": "GROUP-EM-008",
+      "pattern": "POWER+COMM",
+      "definition": "1电力队 + 1通信队 (基础设施抢修编组)",
+      "roles": {
+        "power": "电力线路抢修、临时供电",
+        "comm": "通信恢复、应急通信"
+      },
+      "min_personnel": 18,
+      "features": "保障救援指挥基础设施",
+      "scenarios": ["infrastructure_damage"],
+      "equipment": ["发电车", "抢修工具", "卫星通信车", "移动基站"]
+    },
+    {
+      "id": "GROUP-EM-009",
+      "pattern": "USAR+UAV+UGV",
+      "definition": "1搜救队 + 2无人机 + 2机器人 (智能搜救编组)",
+      "roles": {
+        "rescue_team": "人工精准救援",
+        "uav": "大范围快速搜索",
+        "ugv": "狭小空间深入探测"
+      },
+      "min_personnel": 34,
+      "features": "人机协同提高搜救效率",
+      "scenarios": ["earthquake", "building_collapse", "large_area_search"],
+      "equipment": ["生命探测仪", "侦察无人机x2", "搜救机器人x2", "破拆工具"]
+    },
+    {
+      "id": "GROUP-EM-010",
+      "pattern": "MEDICAL+VOLUNTEER",
+      "definition": "2医疗队 + 20志愿者 (伤员转运编组)",
+      "roles": {
+        "medical": "现场分类、急救处置",
+        "volunteers": "担架转运、秩序维护"
+      },
+      "min_personnel": 36,
+      "features": "批量伤员快速处置转运",
+      "scenarios": ["mass_casualty"],
+      "equipment": ["救护车x4", "担架x20", "急救包", "分类标签"]
+    }
+  ]
+}

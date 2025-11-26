@@ -1,0 +1,648 @@
+# 硬约束规则库 - 一票否决规则（扩展版）
+# 不满足任一硬规则的方案将被直接否决或警告
+# 参考: 军事版硬规则过滤设计
+# 规则总数: 35条
+
+version: "2.0"
+description: "应急救灾硬约束规则库 - 扩展版"
+last_updated: "2024-11-26"
+
+rules:
+  # ============================================================================
+  # 人员安全类 (HR-EM-001 ~ HR-EM-008)
+  # ============================================================================
+
+  HR-EM-001:
+    name: "救援人员安全红线"
+    description: "救援人员伤亡风险超过阈值则否决方案"
+    check:
+      field: "rescue_risk"
+      operator: "gt"
+      threshold: 0.10
+    action: "reject"
+    message: "救援人员伤亡风险{value:.1%}超过10%安全红线，方案否决"
+    severity: "critical"
+
+  HR-EM-002:
+    name: "危险区域暴露时间"
+    description: "救援人员在危险区域暴露时间超过阈值"
+    check:
+      field: "hazard_exposure_minutes"
+      operator: "gt"
+      threshold: 120
+    action: "reject"
+    message: "危险区域暴露时间{value}分钟超过2小时，方案否决"
+    severity: "high"
+
+  HR-EM-003:
+    name: "防护装备匹配"
+    description: "危化品场景必须配备相应防护装备"
+    check:
+      field: "protection_equipment_match"
+      operator: "lt"
+      threshold: 1.0
+    condition:
+      field: "disaster_type"
+      operator: "eq"
+      value: "hazmat"
+    action: "reject"
+    message: "危化品场景防护装备覆盖率{value:.1%}不足100%，方案否决"
+    severity: "critical"
+
+  HR-EM-004:
+    name: "空呼器配备"
+    description: "密闭空间救援必须配备空气呼吸器"
+    check:
+      field: "breathing_apparatus_equipped"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "requires_breathing_apparatus"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "密闭空间救援未配备空气呼吸器，方案否决"
+    severity: "critical"
+
+  HR-EM-005:
+    name: "水域救生衣配备"
+    description: "水域救援必须配备救生衣"
+    check:
+      field: "life_jacket_equipped"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "disaster_type"
+      operator: "eq"
+      value: "flood"
+    action: "reject"
+    message: "水域救援未配备救生衣，方案否决"
+    severity: "critical"
+
+  HR-EM-006:
+    name: "辐射剂量限制"
+    description: "放射性场景人员累计剂量超限"
+    check:
+      field: "radiation_dose_msv"
+      operator: "gt"
+      threshold: 100
+    condition:
+      field: "hazmat_type"
+      operator: "eq"
+      value: "radioactive"
+    action: "reject"
+    message: "预计辐射剂量{value}mSv超过应急剂量限值100mSv，方案否决"
+    severity: "critical"
+
+  HR-EM-007:
+    name: "高温环境作业时间"
+    description: "高温环境连续作业时间超限"
+    check:
+      field: "high_temp_work_minutes"
+      operator: "gt"
+      threshold: 30
+    condition:
+      field: "ambient_temperature"
+      operator: "gte"
+      value: 35
+    action: "warn"
+    message: "高温环境连续作业{value}分钟超过30分钟，建议轮换"
+    severity: "medium"
+
+  HR-EM-008:
+    name: "救援人员数量下限"
+    description: "进入危险区域救援人员不得少于2人"
+    check:
+      field: "min_rescue_team_size"
+      operator: "lt"
+      threshold: 2
+    action: "reject"
+    message: "进入危险区域救援人员{value}人少于2人，方案否决"
+    severity: "critical"
+
+  # ============================================================================
+  # 时效性类 (HR-EM-010 ~ HR-EM-016)
+  # ============================================================================
+
+  HR-EM-010:
+    name: "黄金救援时间"
+    description: "响应时间超过黄金救援时间"
+    check:
+      field: "response_time_minutes"
+      operator: "gt"
+      threshold_field: "golden_hour_minutes"
+    action: "reject"
+    message: "响应时间{value}分钟超过黄金救援时间{threshold}分钟，方案否决"
+    severity: "critical"
+
+  HR-EM-011:
+    name: "到达时间底线"
+    description: "首支力量到达时间超过30分钟"
+    check:
+      field: "first_arrival_minutes"
+      operator: "gt"
+      threshold: 30
+    action: "reject"
+    message: "首支力量到达时间{value}分钟超过30分钟底线，方案否决"
+    severity: "high"
+
+  HR-EM-012:
+    name: "全覆盖时间"
+    description: "所有任务点覆盖时间超过阈值"
+    check:
+      field: "full_coverage_minutes"
+      operator: "gt"
+      threshold: 60
+    action: "warn"
+    message: "全覆盖时间{value}分钟超过60分钟，建议优化"
+    severity: "medium"
+
+  HR-EM-013:
+    name: "危化品响应时间"
+    description: "危化品事故响应时间严格限制"
+    check:
+      field: "first_arrival_minutes"
+      operator: "gt"
+      threshold: 15
+    condition:
+      field: "disaster_type"
+      operator: "eq"
+      value: "hazmat"
+    action: "reject"
+    message: "危化品事故首支力量到达时间{value}分钟超过15分钟，方案否决"
+    severity: "critical"
+
+  HR-EM-014:
+    name: "心梗/脑卒中响应时间"
+    description: "心梗脑卒中患者转运时间限制"
+    check:
+      field: "hospital_arrival_minutes"
+      operator: "gt"
+      threshold: 60
+    condition:
+      field: "has_critical_patient"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "危重患者送达医院时间{value}分钟超过60分钟，方案否决"
+    severity: "critical"
+
+  HR-EM-015:
+    name: "火灾蔓延前到达"
+    description: "火灾蔓延前必须到达"
+    check:
+      field: "first_arrival_minutes"
+      operator: "gt"
+      threshold_field: "fire_spread_minutes"
+    condition:
+      field: "disaster_type"
+      operator: "eq"
+      value: "fire"
+    action: "reject"
+    message: "到达时间{value}分钟超过火灾蔓延时间{threshold}分钟，方案否决"
+    severity: "critical"
+
+  HR-EM-016:
+    name: "堤坝险情响应时间"
+    description: "堤坝险情必须快速响应"
+    check:
+      field: "first_arrival_minutes"
+      operator: "gt"
+      threshold: 20
+    condition:
+      field: "dam_emergency"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "堤坝险情响应时间{value}分钟超过20分钟，方案否决"
+    severity: "critical"
+
+  # ============================================================================
+  # 能力覆盖类 (HR-EM-020 ~ HR-EM-028)
+  # ============================================================================
+
+  HR-EM-020:
+    name: "关键能力覆盖"
+    description: "关键能力(critical)覆盖率不足50%时警告"
+    check:
+      field: "critical_capability_coverage"
+      operator: "lt"
+      threshold: 0.5
+    action: "warn"
+    message: "关键能力覆盖率{value:.1%}不足50%，建议增加资源"
+    severity: "high"
+
+  HR-EM-021:
+    name: "高优先级能力覆盖"
+    description: "高优先级能力(high)覆盖率不足50%时警告"
+    check:
+      field: "high_capability_coverage"
+      operator: "lt"
+      threshold: 0.5
+    action: "warn"
+    message: "高优先级能力覆盖率{value:.1%}不足50%，建议增加资源"
+    severity: "medium"
+
+  HR-EM-022:
+    name: "搜救能力必备"
+    description: "有被困人员时必须具备搜救能力"
+    check:
+      field: "has_search_rescue_capability"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "has_trapped"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "有被困人员但未配置搜救能力，方案否决"
+    severity: "critical"
+
+  HR-EM-023:
+    name: "医疗能力必备"
+    description: "有伤亡人员时必须具备医疗急救能力"
+    check:
+      field: "has_medical_capability"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "has_casualties"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "有伤亡人员但未配置医疗急救能力，方案否决"
+    severity: "critical"
+
+  HR-EM-024:
+    name: "危化品侦检能力必备"
+    description: "危化品事故必须具备侦检能力"
+    check:
+      field: "has_hazmat_detect_capability"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "disaster_type"
+      operator: "eq"
+      value: "hazmat"
+    action: "reject"
+    message: "危化品事故未配置侦检能力，方案否决"
+    severity: "critical"
+
+  HR-EM-025:
+    name: "水域救援能力必备"
+    description: "洪涝灾害必须具备水域救援能力"
+    check:
+      field: "has_water_rescue_capability"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "disaster_type"
+      operator: "eq"
+      value: "flood"
+    action: "reject"
+    message: "洪涝灾害未配置水域救援能力，方案否决"
+    severity: "critical"
+
+  HR-EM-026:
+    name: "高层救援能力必备"
+    description: "高层建筑火灾必须具备高空救援能力"
+    check:
+      field: "has_high_angle_capability"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "building_height_m"
+      operator: "gte"
+      value: 30
+    action: "reject"
+    message: "高层建筑火灾未配置高空救援能力，方案否决"
+    severity: "critical"
+
+  HR-EM-027:
+    name: "生命探测能力"
+    description: "大面积倒塌必须具备生命探测能力"
+    check:
+      field: "has_life_detect_capability"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "collapse_area_sqm"
+      operator: "gte"
+      value: 500
+    action: "reject"
+    message: "大面积倒塌未配置生命探测能力，方案否决"
+    severity: "critical"
+
+  HR-EM-028:
+    name: "排水能力"
+    description: "内涝救援必须具备排水能力"
+    check:
+      field: "has_drainage_capability"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "flood_type"
+      operator: "eq"
+      value: "urban_waterlogging"
+    action: "warn"
+    message: "内涝救援未配置排水能力，建议增加排水设备"
+    severity: "medium"
+
+  # ============================================================================
+  # 资源可用性类 (HR-EM-030 ~ HR-EM-037)
+  # ============================================================================
+
+  HR-EM-030:
+    name: "关键资源可用"
+    description: "方案所需关键资源必须可用"
+    check:
+      field: "unavailable_critical_resources"
+      operator: "gt"
+      threshold: 0
+    action: "reject"
+    message: "有{value}项关键资源不可用，方案否决"
+    severity: "critical"
+
+  HR-EM-031:
+    name: "资源距离限制"
+    description: "资源距离超过最大允许距离"
+    check:
+      field: "max_resource_distance_km"
+      operator: "gt"
+      threshold: 50
+    action: "warn"
+    message: "最远资源距离{value}km超过50km，建议就近调配"
+    severity: "medium"
+
+  HR-EM-032:
+    name: "队伍疲劳度"
+    description: "连续作战队伍疲劳度过高"
+    check:
+      field: "max_team_fatigue"
+      operator: "gt"
+      threshold: 0.8
+    action: "warn"
+    message: "存在疲劳度{value:.1%}超过80%的队伍，建议轮换"
+    severity: "medium"
+
+  HR-EM-033:
+    name: "资源重复分配"
+    description: "同一资源不能分配给多个任务"
+    check:
+      field: "duplicate_resource_count"
+      operator: "gt"
+      threshold: 0
+    action: "reject"
+    message: "{value}个资源被重复分配，方案否决"
+    severity: "critical"
+
+  HR-EM-034:
+    name: "备用资源比例"
+    description: "关键任务必须保留备用资源"
+    check:
+      field: "reserve_ratio"
+      operator: "lt"
+      threshold: 0.1
+    condition:
+      field: "incident_level"
+      operator: "in"
+      value: ["I", "II"]
+    action: "warn"
+    message: "备用资源比例{value:.1%}不足10%，建议增加预备力量"
+    severity: "medium"
+
+  HR-EM-035:
+    name: "特种装备数量"
+    description: "特种装备数量必须满足最低要求"
+    check:
+      field: "special_equipment_shortage"
+      operator: "gt"
+      threshold: 0
+    action: "reject"
+    message: "特种装备缺口{value}件，方案否决"
+    severity: "high"
+
+  HR-EM-036:
+    name: "油料保障"
+    description: "长途救援必须确保油料保障"
+    check:
+      field: "fuel_guarantee"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "total_distance_km"
+      operator: "gte"
+      value: 100
+    action: "warn"
+    message: "长途救援未确保油料保障，建议安排加油点"
+    severity: "medium"
+
+  HR-EM-037:
+    name: "通信覆盖"
+    description: "所有队伍必须在通信覆盖范围内"
+    check:
+      field: "communication_coverage"
+      operator: "lt"
+      threshold: 1.0
+    action: "warn"
+    message: "通信覆盖率{value:.1%}不足100%，建议增加通信保障"
+    severity: "medium"
+
+  # ============================================================================
+  # 环境约束类 (HR-EM-040 ~ HR-EM-048)
+  # ============================================================================
+
+  HR-EM-040:
+    name: "道路通行"
+    description: "主要进场道路必须可通行"
+    check:
+      field: "main_road_accessible"
+      operator: "eq"
+      threshold: false
+    action: "reject"
+    message: "主要进场道路不可通行，方案否决"
+    severity: "critical"
+
+  HR-EM-041:
+    name: "天气条件"
+    description: "极端天气条件下禁止空中作业"
+    check:
+      field: "allow_aerial_operation"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "requires_aerial"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "天气条件不允许空中作业，方案否决"
+    severity: "high"
+
+  HR-EM-042:
+    name: "夜间作业照明"
+    description: "夜间作业必须配备照明"
+    check:
+      field: "has_lighting"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "is_night_operation"
+      operator: "eq"
+      value: true
+    action: "warn"
+    message: "夜间作业未配置照明，建议增加照明保障"
+    severity: "medium"
+
+  HR-EM-043:
+    name: "风力限制"
+    description: "大风天气限制高空作业"
+    check:
+      field: "wind_speed_ms"
+      operator: "gt"
+      threshold: 10
+    condition:
+      field: "requires_high_altitude"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "风速{value}m/s超过10m/s，禁止高空作业，方案否决"
+    severity: "high"
+
+  HR-EM-044:
+    name: "能见度限制"
+    description: "低能见度限制飞行作业"
+    check:
+      field: "visibility_m"
+      operator: "lt"
+      threshold: 1000
+    condition:
+      field: "requires_aerial"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "能见度{value}m不足1000m，禁止飞行作业，方案否决"
+    severity: "high"
+
+  HR-EM-045:
+    name: "水深限制"
+    description: "水深超限禁止涉水"
+    check:
+      field: "water_depth_m"
+      operator: "gt"
+      threshold: 0.5
+    condition:
+      field: "requires_wading"
+      operator: "eq"
+      value: true
+    action: "warn"
+    message: "水深{value}m超过0.5m，建议使用船只"
+    severity: "medium"
+
+  HR-EM-046:
+    name: "流速限制"
+    description: "水流速度超限禁止入水"
+    check:
+      field: "water_flow_speed_ms"
+      operator: "gt"
+      threshold: 2
+    condition:
+      field: "disaster_type"
+      operator: "eq"
+      value: "flood"
+    action: "reject"
+    message: "水流速度{value}m/s超过2m/s，禁止入水救援，方案否决"
+    severity: "critical"
+
+  HR-EM-047:
+    name: "余震风险"
+    description: "余震频繁时限制进入建筑"
+    check:
+      field: "aftershock_frequency"
+      operator: "gt"
+      threshold: 5
+    condition:
+      field: "disaster_type"
+      operator: "eq"
+      value: "earthquake"
+    action: "warn"
+    message: "1小时内余震{value}次超过5次，建议暂缓进入危险建筑"
+    severity: "high"
+
+  HR-EM-048:
+    name: "燃气浓度"
+    description: "燃气浓度超过爆炸下限禁止进入"
+    check:
+      field: "gas_concentration_lel"
+      operator: "gt"
+      threshold: 0.2
+    condition:
+      field: "gas_leak_detected"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "燃气浓度{value:.1%}LEL超过20%，禁止进入，方案否决"
+    severity: "critical"
+
+  # ============================================================================
+  # 法规合规类 (HR-EM-050 ~ HR-EM-053)
+  # ============================================================================
+
+  HR-EM-050:
+    name: "资质要求"
+    description: "特种作业必须持有相应资质"
+    check:
+      field: "qualification_match"
+      operator: "lt"
+      threshold: 1.0
+    condition:
+      field: "requires_qualification"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "特种作业资质覆盖率{value:.1%}不足100%，方案否决"
+    severity: "critical"
+
+  HR-EM-051:
+    name: "跨区域协调"
+    description: "跨区域调度必须获得授权"
+    check:
+      field: "cross_region_authorized"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "requires_cross_region"
+      operator: "eq"
+      value: true
+    action: "warn"
+    message: "跨区域调度未获授权，建议先行协调"
+    severity: "medium"
+
+  HR-EM-052:
+    name: "军地协同审批"
+    description: "调用军队力量必须获得批准"
+    check:
+      field: "military_approved"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "requires_military"
+      operator: "eq"
+      value: true
+    action: "reject"
+    message: "调用军队力量未获批准，方案否决"
+    severity: "critical"
+
+  HR-EM-053:
+    name: "民用航空管制"
+    description: "无人机飞行必须获得空域批准"
+    check:
+      field: "airspace_approved"
+      operator: "eq"
+      threshold: false
+    condition:
+      field: "requires_uav"
+      operator: "eq"
+      value: true
+    action: "warn"
+    message: "无人机飞行未获空域批准，建议先行申报"
+    severity: "medium"

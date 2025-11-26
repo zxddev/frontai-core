@@ -1,0 +1,236 @@
+# 应急救灾 - 救援队伍能力库
+# version: emergency-2025-11-25
+
+professional_teams:
+  - id: "RT-001"
+    code: "FIRE"
+    name: "消防救援队"
+    capabilities:
+      - "灭火"
+      - "搜救"
+      - "破拆"
+      - "高空救援"
+      - "水域救援"
+    equipment:
+      - "消防车"
+      - "云梯车"
+      - "破拆工具"
+      - "生命探测仪"
+      - "空气呼吸器"
+    specs:
+      response_time_min: 10
+      capacity_persons: 20
+      coverage_km: 5
+    suitable_disasters:
+      - "fire"
+      - "earthquake"
+      - "building_collapse"
+
+  - id: "RT-002"
+    code: "MEDICAL"
+    name: "医疗急救队"
+    capabilities:
+      - "现场急救"
+      - "伤员转运"
+      - "医疗分类"
+      - "心肺复苏"
+      - "止血包扎"
+    equipment:
+      - "救护车"
+      - "急救包"
+      - "担架"
+      - "AED"
+      - "心电监护仪"
+    specs:
+      response_time_min: 15
+      capacity_persons: 8
+      coverage_km: 10
+    suitable_disasters:
+      - "all"
+
+  - id: "RT-003"
+    code: "HAZMAT"
+    name: "危化品处置队"
+    capabilities:
+      - "化学品识别"
+      - "泄漏封堵"
+      - "洗消"
+      - "气体监测"
+      - "个人防护"
+    equipment:
+      - "防化服"
+      - "堵漏器材"
+      - "洗消车"
+      - "气体检测仪"
+      - "应急处置箱"
+    specs:
+      response_time_min: 30
+      capacity_persons: 12
+      coverage_km: 20
+    suitable_disasters:
+      - "hazmat"
+      - "chemical_leak"
+      - "toxic_gas"
+
+  - id: "RT-004"
+    code: "USAR"
+    name: "地震救援队"
+    capabilities:
+      - "废墟搜救"
+      - "生命探测"
+      - "重型破拆"
+      - "狭小空间救援"
+      - "支撑加固"
+    equipment:
+      - "搜救犬"
+      - "生命探测仪"
+      - "液压破拆"
+      - "支撑设备"
+      - "照明设备"
+    specs:
+      response_time_min: 60
+      capacity_persons: 30
+      coverage_km: 100
+    suitable_disasters:
+      - "earthquake"
+      - "building_collapse"
+      - "mine_accident"
+
+  - id: "RT-005"
+    code: "WATER"
+    name: "水上救援队"
+    capabilities:
+      - "水域搜救"
+      - "船艇操作"
+      - "潜水救援"
+      - "抗洪抢险"
+      - "堤坝巡查"
+    equipment:
+      - "冲锋舟"
+      - "救生衣"
+      - "潜水设备"
+      - "抽水泵"
+      - "救生圈"
+    specs:
+      response_time_min: 20
+      capacity_persons: 15
+      coverage_km: 30
+    suitable_disasters:
+      - "flood"
+      - "drowning"
+      - "typhoon"
+
+  - id: "RT-006"
+    code: "POWER"
+    name: "电力抢修队"
+    capabilities:
+      - "电力抢修"
+      - "发电保障"
+      - "线路巡检"
+      - "临时供电"
+    equipment:
+      - "发电车"
+      - "抢修工具"
+      - "绝缘设备"
+      - "电缆"
+    specs:
+      response_time_min: 30
+      capacity_persons: 10
+      coverage_km: 50
+    suitable_disasters:
+      - "power_outage"
+      - "infrastructure_damage"
+
+  - id: "RT-007"
+    code: "COMM"
+    name: "通信保障队"
+    capabilities:
+      - "通信恢复"
+      - "应急通信"
+      - "信号覆盖"
+      - "数据传输"
+    equipment:
+      - "卫星通信车"
+      - "移动基站"
+      - "对讲机"
+      - "光纤设备"
+    specs:
+      response_time_min: 45
+      capacity_persons: 8
+      coverage_km: 50
+    suitable_disasters:
+      - "communication_failure"
+      - "infrastructure_damage"
+
+  - id: "RT-008"
+    code: "ENGINEER"
+    name: "工程抢修队"
+    capabilities:
+      - "道路抢通"
+      - "桥梁抢修"
+      - "清障排险"
+      - "临时工程"
+    equipment:
+      - "挖掘机"
+      - "装载机"
+      - "吊车"
+      - "发电机"
+    specs:
+      response_time_min: 60
+      capacity_persons: 20
+      coverage_km: 100
+    suitable_disasters:
+      - "landslide"
+      - "road_damage"
+      - "earthquake"
+
+volunteer_teams:
+  - id: "VT-001"
+    code: "COMMUNITY"
+    name: "社区志愿者"
+    capabilities:
+      - "人员疏散引导"
+      - "物资搬运"
+      - "信息登记"
+      - "心理安抚"
+      - "秩序维护"
+    equipment:
+      - "反光背心"
+      - "扩音器"
+      - "引导牌"
+    specs:
+      response_time_min: 5
+      capacity_persons: 50
+    suitable_scenarios:
+      - "mass_evacuation"
+      - "shelter_management"
+
+  - id: "VT-002"
+    code: "BLUE_SKY"
+    name: "蓝天救援队"
+    capabilities:
+      - "山地搜救"
+      - "城市搜救"
+      - "水域救援"
+      - "应急培训"
+    equipment:
+      - "搜救装备"
+      - "通信设备"
+      - "急救包"
+    specs:
+      response_time_min: 30
+      capacity_persons: 20
+    suitable_scenarios:
+      - "wilderness_search"
+      - "urban_search"
+      - "water_rescue"
+
+# 能力-灾害匹配矩阵
+capability_disaster_matrix:
+  灭火: ["fire"]
+  搜救: ["earthquake", "building_collapse", "mine_accident"]
+  水域搜救: ["flood", "drowning", "typhoon"]
+  危化品处置: ["hazmat", "chemical_leak"]
+  医疗急救: ["all"]
+  电力抢修: ["power_outage", "infrastructure_damage"]
+  道路抢通: ["landslide", "road_damage", "earthquake"]

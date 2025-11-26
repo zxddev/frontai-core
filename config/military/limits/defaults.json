@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "updated_at": "2025-11-24T12:00:00Z",
+  "unit_decl": {
+    "distance": "km",
+    "altitude": "m",
+    "speed": "mach",
+    "time": "min"
+  },
+  "defaults": {
+    "max_speed_mach": {"min": 0, "max": 2.5},
+    "endurance_min": {"min": 0, "max": 600},
+    "radius_km": {"min": 0, "max": 1500},
+    "risk": {"min": 0, "max": 0.8}
+  }
+}

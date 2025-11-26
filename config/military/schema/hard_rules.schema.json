@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Hard Rules Schema",
+  "type": "object",
+  "required": ["version", "updated_at", "rules"],
+  "properties": {
+    "version": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "source": { "type": "string" },
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "if", "then", "description"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^HR-00[1-7]$" },
+          "name": { "type": "string" },
+          "if": { "type": "string" },
+          "then": { "type": "string" },
+          "description": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

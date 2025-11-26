@@ -1,0 +1,86 @@
+{
+  "version": "emergency-2025-11-25",
+  "updated_at": "2025-11-25",
+  "source": "docs/emergency_rules_design.md",
+  "rules": [
+    {
+      "id": "HR-EM-001",
+      "name": "人员安全红线",
+      "if": "方案导致救援人员伤亡概率 > 0.10",
+      "then": "一票否决",
+      "threshold": 0.10,
+      "description": "救援人员安全是底线，高风险方案需调整或换人员为无人设备"
+    },
+    {
+      "id": "HR-EM-002",
+      "name": "二次伤害禁止",
+      "if": "方案可能导致被困人员二次伤害 = true",
+      "then": "一票否决",
+      "description": "如不稳定结构下的强行破拆、有毒环境下无防护进入"
+    },
+    {
+      "id": "HR-EM-003",
+      "name": "救援时效性-地震",
+      "if": "方案执行时间 > 黄金救援时间(72h)",
+      "then": "一票否决",
+      "disaster_type": "earthquake",
+      "golden_time_hours": 72,
+      "description": "地震72小时是黄金救援期"
+    },
+    {
+      "id": "HR-EM-004",
+      "name": "救援时效性-溺水",
+      "if": "方案执行时间 > 黄金救援时间(6min)",
+      "then": "一票否决",
+      "disaster_type": "drowning",
+      "golden_time_min": 6,
+      "description": "溺水6分钟是黄金救援期"
+    },
+    {
+      "id": "HR-EM-005",
+      "name": "救援时效性-火灾",
+      "if": "方案执行时间 > 黄金逃生时间(3min)",
+      "then": "一票否决",
+      "disaster_type": "fire",
+      "golden_time_min": 3,
+      "description": "火灾3分钟是黄金逃生期"
+    },
+    {
+      "id": "HR-EM-006",
+      "name": "资源可用性",
+      "if": "方案所需资源 > 实际可用资源",
+      "then": "一票否决",
+      "description": "不能超出现有资源能力进行规划"
+    },
+    {
+      "id": "HR-EM-007",
+      "name": "道路可达性",
+      "if": "救援路线不可通行 AND 无替代路线",
+      "then": "一票否决",
+      "description": "必须保证救援力量能够到达现场"
+    },
+    {
+      "id": "HR-EM-008",
+      "name": "危险区域管控",
+      "if": "无防护人员进入高危区域 = true",
+      "then": "一票否决",
+      "high_risk_zones": ["hazmat_core", "radiation", "high_temperature", "structural_collapse"],
+      "description": "危化品核心区、高辐射区、高温区等必须有防护"
+    },
+    {
+      "id": "HR-EM-009",
+      "name": "无人机气象限制",
+      "if": "风力等级 > 6 AND 需要无人机作业 = true",
+      "then": "一票否决",
+      "max_wind_level": 6,
+      "description": "恶劣气象条件下禁止无人机起飞"
+    },
+    {
+      "id": "HR-EM-010",
+      "name": "通信保障",
+      "if": "方案区域无任何通信手段 = true",
+      "then": "一票否决 或 先建立通信",
+      "description": "没有通信联络的救援行动禁止执行"
+    }
+  ]
+}

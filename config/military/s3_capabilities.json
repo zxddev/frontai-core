@@ -1,0 +1,16 @@
+{
+  "version": "demo-1.0",
+  "updated_at": "2025-11-24",
+  "metrics": [
+    {"id": "S3-M1", "name": "对海探测距离", "type": "KPP", "target": ">=200", "unit": "km", "constraints": ["S3-CON1"]},
+    {"id": "S3-M2", "name": "导弹射程", "type": "KPP", "target": ">=200", "unit": "km", "constraints": ["S3-CON2"]},
+    {"id": "S3-M3", "name": "多轴攻击能力", "type": "KSA", "target": "必须支持", "unit": "-", "constraints": ["S3-CON3"]},
+    {"id": "S3-M4", "name": "电子压制能力", "type": "KSA", "target": "必须支持", "unit": "-", "constraints": ["S3-CON4"]}
+  ],
+  "constraints": [
+    {"id": "S3-CON1", "name": "海情保障约束", "category": "侦察", "description": "需天/空基对海监视数据", "priority": "高"},
+    {"id": "S3-CON2", "name": "防区外安全约束", "category": "战术", "description": "保持在防区外射程外发射", "priority": "高"},
+    {"id": "S3-CON3", "name": "多轴突防约束", "category": "战术", "description": "至少两轴同时攻击", "priority": "高"},
+    {"id": "S3-CON4", "name": "电子战配合约束", "category": "协同", "description": "攻击前必须电子压制", "priority": "高"}
+  ]
+}

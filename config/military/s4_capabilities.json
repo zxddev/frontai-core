@@ -1,0 +1,16 @@
+{
+  "version": "demo-1.0",
+  "updated_at": "2025-11-24",
+  "metrics": [
+    {"id": "S4-M1", "name": "辐射源定位精度", "type": "KPP", "target": "<=20", "unit": "m", "constraints": ["S4-CON1"]},
+    {"id": "S4-M2", "name": "反辐射射程", "type": "KPP", "target": ">=100", "unit": "km", "constraints": ["S4-CON2"]},
+    {"id": "S4-M3", "name": "抗关机能力", "type": "KSA", "target": "必须支持", "unit": "-", "constraints": ["S4-CON3"]},
+    {"id": "S4-M4", "name": "无人突防能力", "type": "KSA", "target": "必须支持", "unit": "-", "constraints": ["S4-CON4"]}
+  ],
+  "constraints": [
+    {"id": "S4-CON1", "name": "定位时效约束", "category": "侦察", "description": "定位时间需<10秒", "priority": "高"},
+    {"id": "S4-CON2", "name": "射程安全约束", "category": "战术", "description": "优先防区外打击", "priority": "高"},
+    {"id": "S4-CON3", "name": "抗关机约束", "category": "武器", "description": "导弹需具备抗关机/记忆频率", "priority": "高"},
+    {"id": "S4-CON4", "name": "无人风险分担", "category": "协同", "description": "高威胁区域由无人机前出", "priority": "高"}
+  ]
+}

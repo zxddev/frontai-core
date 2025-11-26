@@ -1,0 +1,18 @@
+{
+  "version": "1.0",
+  "updated_at": "2025-11-24",
+  "paths": [
+    {"scene": "S1", "path_id": "S1-P1", "tasks": ["MT01","MT02","MT03","MT04","MT15"], "allocation": ["J-20_01","UAV_01"], "metrics": {"success":0.9,"time_norm":0.3,"cost_norm":0.4,"risk":0.25,"redundancy":0.5}},
+    {"scene": "S1", "path_id": "S1-P2", "tasks": ["MT02","MT03","MT04","MT15"], "allocation": ["J-20_02","UAV_02"], "metrics": {"success":0.85,"time_norm":0.35,"cost_norm":0.42,"risk":0.28,"redundancy":0.4}},
+    {"scene": "S1", "path_id": "S1-P3", "tasks": ["MT01","MT02","MT15"], "allocation": ["J-20_01"], "metrics": {"success":0.8,"time_norm":0.25,"cost_norm":0.35,"risk":0.3,"redundancy":0.2}},
+    {"scene": "S2", "path_id": "S2-P1", "tasks": ["MT21","MT22","MT15"], "allocation": ["J-11_01","J-11_02"], "metrics": {"success":0.88,"time_norm":0.28,"cost_norm":0.45,"risk":0.32,"redundancy":0.6}},
+    {"scene": "S2", "path_id": "S2-P2", "tasks": ["MT21","MT22","MT15"], "allocation": ["J-11_01"], "metrics": {"success":0.8,"time_norm":0.22,"cost_norm":0.38,"risk":0.36,"redundancy":0.3}},
+    {"scene": "S2", "path_id": "S2-P3", "tasks": ["MT21","MT22","MT15"], "allocation": ["J-11_02"], "metrics": {"success":0.78,"time_norm":0.3,"cost_norm":0.4,"risk":0.35,"redundancy":0.3}},
+    {"scene": "S3", "path_id": "S3-P1", "tasks": ["MT31","MT32","MT15"], "allocation": ["J-15K_01","J-15K_02"], "metrics": {"success":0.86,"time_norm":0.4,"cost_norm":0.5,"risk":0.38,"redundancy":0.5}},
+    {"scene": "S3", "path_id": "S3-P2", "tasks": ["MT31","MT32","MT15"], "allocation": ["J-15K_01"], "metrics": {"success":0.78,"time_norm":0.35,"cost_norm":0.48,"risk":0.42,"redundancy":0.3}},
+    {"scene": "S3", "path_id": "S3-P3", "tasks": ["MT31","MT32","MT15"], "allocation": ["J-15K_02"], "metrics": {"success":0.76,"time_norm":0.36,"cost_norm":0.5,"risk":0.43,"redundancy":0.3}},
+    {"scene": "S4", "path_id": "S4-P1", "tasks": ["MT41","MT42","MT15"], "allocation": ["EW_UAV_01","HARM_01"], "metrics": {"success":0.84,"time_norm":0.32,"cost_norm":0.45,"risk":0.35,"redundancy":0.4}},
+    {"scene": "S4", "path_id": "S4-P2", "tasks": ["MT41","MT42","MT15"], "allocation": ["HARM_01"], "metrics": {"success":0.77,"time_norm":0.3,"cost_norm":0.4,"risk":0.38,"redundancy":0.2}},
+    {"scene": "S4", "path_id": "S4-P3", "tasks": ["MT41","MT42","MT15"], "allocation": ["EW_UAV_01"], "metrics": {"success":0.7,"time_norm":0.28,"cost_norm":0.35,"risk":0.4,"redundancy":0.2}}
+  ]
+}

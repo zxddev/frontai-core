@@ -1,0 +1,10 @@
+{
+  "version": "1.1",
+  "updated_at": "2025-11-24",
+  "scene_centers": {
+    "S1": {"target_type": "空中目标", "rcs": "极低", "radiation": "间歇/静默", "location": "空中", "speed": "高", "base_score": 0.82},
+    "S2": {"target_type": "空中目标", "rcs": "中/高", "radiation": "持续", "location": "空中", "speed": "中/高", "base_score": 0.8},
+    "S3": {"target_type": "水面目标", "rcs": "极高", "radiation": "持续", "location": "海上", "speed": "低", "base_score": 0.85},
+    "S4": {"target_type": "地面辐射源", "rcs": "不适用", "radiation": "搜索/跟踪", "location": "陆地", "speed": "静止", "base_score": 0.9}
+  }
+}

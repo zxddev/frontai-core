@@ -1,0 +1,25 @@
+{
+  "version": "docx-2025-11-24",
+  "updated_at": "2025-11-24",
+  "source": "docs/TO XIAOMA 20251124(2).docx",
+  "profiles": {
+    "fast_initiative": {
+      "name": "快速夺取主动权",
+      "weights": {
+        "success": 0.35,
+        "time": 0.30,
+        "cost": 0.15,
+        "risk": 0.10,
+        "redundancy": 0.10
+      },
+      "interpretation": {
+        "success": "核心关切，行动必须有效",
+        "time": "强调速度，快速闭合杀伤链",
+        "cost": "可承受较高资源消耗",
+        "risk": "允许适度平台战损概率升高",
+        "redundancy": "可牺牲部分备份方案以求效率"
+      },
+      "note": "软规则加权示例，来自 docx 决策偏好权重库"
+    }
+  }
+}

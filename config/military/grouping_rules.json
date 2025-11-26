@@ -1,0 +1,71 @@
+{
+  "version": "1.0",
+  "updated_at": "2025-11-24",
+  "grouping_rules": [
+    {
+      "id": "GROUP-001",
+      "pattern": "1+2",
+      "definition": "1有人+2无人（隐身猎杀小组）",
+      "roles": {
+        "manned": "决策核心/静默接敌/致命一击",
+        "uav1": "前出侦察/诱骗",
+        "uav2": "侧翼掩护/中继制导"
+      },
+      "features": "高隐蔽性、强突防能力",
+      "scenes": ["S1"]
+    },
+    {
+      "id": "GROUP-003",
+      "pattern": "1+2",
+      "definition": "1有人+2无人（电子战指挥小组）",
+      "roles": {
+        "manned": "电子战指挥",
+        "uav1": "前沿侦收",
+        "uav2": "诱骗/干扰"
+      },
+      "features": "电磁优势、风险分散",
+      "scenes": ["S1", "S4"]
+    },
+    {
+      "id": "GROUP-006",
+      "pattern": "2+4",
+      "definition": "2有人+4无人（联合猎杀小组）",
+      "roles": {
+        "manned1": "主攻手",
+        "manned2": "支援策应",
+        "uav1": "侦察定位",
+        "uav2": "侦察定位",
+        "uav3": "电磁压制",
+        "uav4": "电磁压制"
+      },
+      "features": "决策冗余、火力增强、抗毁性强",
+      "scenes": ["S1"]
+    },
+    {
+      "id": "GROUP-004",
+      "pattern": "2+2",
+      "definition": "2有人+2无人（对海打击编组）",
+      "roles": {
+        "manned1": "主攻",
+        "manned2": "伴随护航",
+        "uav1": "目标指示",
+        "uav2": "中继制导"
+      },
+      "features": "多轴向对海突击、信息中继",
+      "scenes": ["S3"]
+    },
+    {
+      "id": "GROUP-005",
+      "pattern": "1+3",
+      "definition": "1有人+3无人（SEAD 协同编组）",
+      "roles": {
+        "manned": "电子战指挥/压制",
+        "uav1": "前沿侦收",
+        "uav2": "诱饵曝光",
+        "uav3": "反辐射打击"
+      },
+      "features": "前出侦收+诱饵+压制三段式",
+      "scenes": ["S4"]
+    }
+  ]
+}
