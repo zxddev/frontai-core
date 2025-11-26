@@ -179,25 +179,23 @@ class FireRedASRProvider(ASRProvider):
 
         url = f"{self._url}/health"
 
-        async def _check():
-            session = await self._get_session()
-            async with session.get(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    is_healthy = (
-                        data.get("status") == "healthy"
-                        and data.get("model_loaded", False)
-                    )
-                    if not is_healthy:
-                        logger.warning(
-                            "FireRedASR健康检查: 服务异常",
-                            extra={"response": data},
-                        )
-                    return is_healthy
-                return False
-
         try:
-            return await asyncio.wait_for(_check(), timeout=10.0)
+            session = await self._get_session()
+            async with asyncio.timeout(10.0):
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        is_healthy = (
+                            data.get("status") == "healthy"
+                            and data.get("model_loaded", False)
+                        )
+                        if not is_healthy:
+                            logger.warning(
+                                "FireRedASR健康检查: 服务异常",
+                                extra={"response": data},
+                            )
+                        return is_healthy
+                    return False
         except Exception as e:
             logger.warning("FireRedASR健康检查失败: %s", str(e))
             return False

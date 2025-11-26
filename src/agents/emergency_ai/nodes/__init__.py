@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from .understanding import understand_disaster, enhance_with_cases
 from .reasoning import query_rules, apply_rules
+from .htn_decompose import htn_decompose
 from .matching import match_resources, optimize_allocation
 from .optimization import filter_hard_rules, score_soft_rules, explain_scheme
 from .output import generate_output
@@ -18,6 +19,8 @@ __all__ = [
     # 阶段2: 规则推理
     "query_rules",
     "apply_rules",
+    # 阶段2.5: HTN任务分解
+    "htn_decompose",
     # 阶段3: 资源匹配
     "match_resources",
     "optimize_allocation",

@@ -92,6 +92,56 @@ class SchemeScore(TypedDict):
     rank: int                             # 排名
 
 
+# ============================================================================
+# HTN任务分解相关类型定义
+# ============================================================================
+
+class MetaTask(TypedDict):
+    """
+    元任务定义
+    
+    对应mt_library.json中的EM01-EM32元任务。
+    """
+    id: str                               # 任务ID，如EM01
+    name: str                             # 任务名称，如"无人机广域侦察"
+    category: str                         # 任务类别，如sensing/assessment/search_rescue
+    precondition: str                     # 前置条件描述
+    effect: str                           # 执行效果描述
+    outputs: List[str]                    # 输出产物列表
+    typical_scenes: List[str]             # 适用场景列表，如["S1", "S2"]
+    phase: str                            # 所属阶段，如detect/assess/plan/execute
+    duration_range: Dict[str, int]        # 时长范围，{min: 10, max: 30}分钟
+    required_capabilities: List[str]      # 所需能力列表
+    risk_level: str                       # 风险等级，low/medium/high
+
+
+class TaskSequenceItem(TypedDict):
+    """
+    任务序列项
+    
+    拓扑排序后的任务执行序列中的单个任务。
+    """
+    task_id: str                          # 任务ID，如EM06
+    task_name: str                        # 任务名称
+    sequence: int                         # 执行顺序，从1开始
+    depends_on: List[str]                 # 依赖的任务ID列表
+    golden_hour: Optional[int]            # 黄金救援时间窗口（分钟），来自Neo4j
+    phase: str                            # 所属阶段
+    is_parallel: bool                     # 是否可并行执行
+    parallel_group_id: Optional[str]      # 并行组ID，同组任务可并行
+
+
+class ParallelTaskGroup(TypedDict):
+    """
+    并行任务组
+    
+    可同时执行的任务集合，来自mt_library.json的parallel_groups。
+    """
+    group_id: str                         # 并行组ID
+    task_ids: List[str]                   # 组内任务ID列表
+    reason: str                           # 可并行的原因
+
+
 class EmergencyAIState(TypedDict):
     """
     应急AI混合系统状态
@@ -118,6 +168,11 @@ class EmergencyAIState(TypedDict):
     matched_rules: List[MatchedTRRRule]                     # 匹配的TRR规则
     task_requirements: List[Dict[str, Any]]                 # 任务需求列表
     capability_requirements: List[CapabilityRequirement]    # 能力需求列表
+    
+    # ========== 阶段2.5: HTN任务分解 ==========
+    scene_codes: List[str]                                  # 识别的场景代码，如["S1", "S2"]
+    task_sequence: List[TaskSequenceItem]                   # 拓扑排序后的任务执行序列
+    parallel_tasks: List[ParallelTaskGroup]                 # 可并行执行的任务组
     
     # ========== 阶段3: 资源匹配 ==========
     resource_candidates: List[ResourceCandidate]            # 候选资源
@@ -161,12 +216,13 @@ def create_initial_state(
     Returns:
         初始化的EmergencyAIState
     """
-    # 默认优化权重（地震场景）
+    # 默认优化权重（5维评估，严格对齐军事版）
     default_weights: Dict[str, float] = {
-        "response_time": 0.40,
-        "coverage_rate": 0.30,
-        "cost": 0.10,
-        "risk": 0.20,
+        "success_rate": 0.35,     # 人命关天，最高权重
+        "response_time": 0.30,    # 黄金救援期72小时
+        "coverage_rate": 0.20,    # 全区域覆盖
+        "risk": 0.05,             # 生命优先于风险规避
+        "redundancy": 0.10,       # 备用资源保障
     }
     
     return EmergencyAIState(
@@ -183,6 +239,9 @@ def create_initial_state(
         matched_rules=[],
         task_requirements=[],
         capability_requirements=[],
+        scene_codes=[],
+        task_sequence=[],
+        parallel_tasks=[],
         resource_candidates=[],
         allocation_solutions=[],
         pareto_solutions=[],

@@ -57,8 +57,8 @@
 - [ ] 6.2 在 `optimization.py` 新增冗余性计算函数 `_calculate_redundancy_rate()`
   - [ ] 6.2.1 计算每个能力是否有备用资源
   - [ ] 6.2.2 返回备用覆盖比例
-- [ ] 6.3 修改 `DEFAULT_WEIGHTS` 为5维权重（**修正**）
-  - `success_rate: 0.30, response_time: 0.30, coverage_rate: 0.20, risk: 0.10, redundancy: 0.10`
+- [ ] 6.3 修改 `DEFAULT_WEIGHTS` 为5维权重（**严格对齐军事版**）
+  - `success_rate: 0.35, response_time: 0.30, coverage_rate: 0.20, risk: 0.05, redundancy: 0.10`
 - [ ] 6.4 修改 `score_soft_rules()` 使用5维评估
 - [ ] 6.5 更新 `SchemeScore` 的 `soft_rule_scores` 包含新维度
 
@@ -83,6 +83,6 @@
 - [ ] 9.4 验证并行任务：[EM06, EM12, EM13]可同时执行
 - [ ] 9.5 验证NSGA-II生成多个帕累托解
 - [ ] 9.6 验证动态LIMIT生效（测试max_teams=100和max_teams=300）
-- [ ] 9.7 验证5维评估权重生效（成功率0.30）
+- [ ] 9.7 验证5维评估权重生效（成功率0.35）
 - [ ] 9.8 验证输出包含完整的任务序列和并行任务组
 - [ ] 9.9 运行类型检查确保强类型覆盖

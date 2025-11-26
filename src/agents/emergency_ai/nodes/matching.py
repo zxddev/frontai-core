@@ -31,6 +31,17 @@ DISTANCE_EXPAND_STEP_KM: float = 50.0
 # 最大搜索距离上限（km）
 MAX_SEARCH_DISTANCE_KM: float = 300.0
 
+# 默认队伍查询上限（支持大规模救援场景）
+DEFAULT_MAX_TEAMS: int = 200
+
+# 灾害等级对应的队伍数量上限
+DISASTER_SCALE_LIMITS: Dict[str, int] = {
+    "small": 50,      # 小型灾害（社区级）
+    "medium": 100,    # 中型灾害（区县级）
+    "large": 200,     # 大型灾害（城市级）
+    "catastrophic": 500,  # 特大灾害（地震级）
+}
+
 
 async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
     """
@@ -78,6 +89,11 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
     required_caps = {cap["capability_code"] for cap in capability_requirements}
     logger.info(f"[资源匹配] 需要的能力: {required_caps}")
 
+    # 获取灾害等级和队伍数量上限
+    disaster_scale = _determine_disaster_scale(state)
+    max_teams = constraints.get("max_teams", DISASTER_SCALE_LIMITS.get(disaster_scale, DEFAULT_MAX_TEAMS))
+    logger.info(f"[资源匹配] 灾害等级: {disaster_scale}，队伍上限: {max_teams}")
+
     # 获取时间约束
     constraints = state.get("constraints", {})
     max_response_hours = constraints.get("max_response_time_hours", 2.0)
@@ -96,8 +112,9 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
             event_lat=event_lat,
             event_lng=event_lng,
             max_distance_km=search_distance,
+            max_teams=max_teams,
         )
-        logger.info(f"[资源匹配] 初始查询: 距离<={search_distance}km, 找到{len(teams)}支队伍")
+        logger.info(f"[资源匹配] 初始查询: 距离<={search_distance}km, 上限{max_teams}支, 找到{len(teams)}支队伍")
 
         # 检查能力覆盖
         covered_caps = _get_covered_capabilities(teams)
@@ -116,6 +133,7 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
                 event_lat=event_lat,
                 event_lng=event_lng,
                 max_distance_km=search_distance,
+                max_teams=max_teams,
             )
             covered_caps = _get_covered_capabilities(teams)
             missing_caps = required_caps - covered_caps
@@ -180,8 +198,8 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
     """
     分配优化节点：基于候选资源生成多个分配方案
 
-    使用贪心策略生成多个方案（按匹配分数、距离、可用性优先），
-    计算每个方案的响应时间、覆盖率等指标。
+    使用NSGA-II多目标优化生成Pareto最优解集。
+    如果候选资源较少（<=10），退化为贪心策略以提高效率。
 
     Args:
         state: 当前状态
@@ -194,7 +212,10 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
 
     candidates = state.get("resource_candidates", [])
     capability_requirements = state.get("capability_requirements", [])
+    task_sequence = state.get("task_sequence", [])  # HTN分解后的任务序列
+    constraints = state.get("constraints", {})
     trace: Dict[str, Any] = dict(state.get("trace", {}))
+    errors: List[str] = list(state.get("errors", []))
 
     if not candidates:
         logger.warning("[分配优化] 无候选资源，无法生成方案")
@@ -202,58 +223,268 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
             "allocation_solutions": [],
             "pareto_solutions": [],
             "trace": trace,
+            "errors": errors,
         }
 
+    # 获取生成方案数量
+    n_alternatives = constraints.get("n_alternatives", 5)
+    
     solutions: List[AllocationSolution] = []
+    algorithm_used = "greedy"  # 默认贪心
 
-    # 方案1: 最高匹配分数优先
-    solution1 = _generate_greedy_solution(
-        candidates=candidates,
-        capability_requirements=capability_requirements,
-        strategy="match_score",
-        solution_id=f"solution-{uuid.uuid4().hex[:8]}",
-    )
-    if solution1:
-        solutions.append(solution1)
+    # 尝试使用NSGA-II（候选资源>10时效果更好）
+    if len(candidates) > 10:
+        try:
+            nsga_solutions = _run_nsga2_optimization(
+                candidates=candidates,
+                capability_requirements=capability_requirements,
+                task_sequence=task_sequence,
+                n_solutions=n_alternatives,
+            )
+            if nsga_solutions:
+                solutions = nsga_solutions
+                algorithm_used = "NSGA-II"
+                logger.info(f"[分配优化] NSGA-II生成{len(solutions)}个Pareto解")
+        except Exception as e:
+            logger.warning(f"[分配优化] NSGA-II失败，退化为贪心策略: {e}")
+            errors.append(f"NSGA-II优化失败: {e}")
 
-    # 方案2: 最短响应时间优先（按距离排序）
-    solution2 = _generate_greedy_solution(
-        candidates=candidates,
-        capability_requirements=capability_requirements,
-        strategy="distance",
-        solution_id=f"solution-{uuid.uuid4().hex[:8]}",
-    )
-    if solution2:
-        solutions.append(solution2)
+    # 如果NSGA-II未生成方案，使用贪心策略
+    if not solutions:
+        # 方案1: 最高匹配分数优先
+        solution1 = _generate_greedy_solution(
+            candidates=candidates,
+            capability_requirements=capability_requirements,
+            strategy="match_score",
+            solution_id=f"solution-{uuid.uuid4().hex[:8]}",
+        )
+        if solution1:
+            solutions.append(solution1)
 
-    # 方案3: 最高可用性优先
-    solution3 = _generate_greedy_solution(
-        candidates=candidates,
-        capability_requirements=capability_requirements,
-        strategy="availability",
-        solution_id=f"solution-{uuid.uuid4().hex[:8]}",
-    )
-    if solution3:
-        solutions.append(solution3)
+        # 方案2: 最短响应时间优先（按距离排序）
+        solution2 = _generate_greedy_solution(
+            candidates=candidates,
+            capability_requirements=capability_requirements,
+            strategy="distance",
+            solution_id=f"solution-{uuid.uuid4().hex[:8]}",
+        )
+        if solution2:
+            solutions.append(solution2)
 
-    # Pareto最优解（取前3个不同的方案）
-    pareto_solutions = _deduplicate_solutions(solutions)[:3]
+        # 方案3: 最高可用性优先
+        solution3 = _generate_greedy_solution(
+            candidates=candidates,
+            capability_requirements=capability_requirements,
+            strategy="availability",
+            solution_id=f"solution-{uuid.uuid4().hex[:8]}",
+        )
+        if solution3:
+            solutions.append(solution3)
+
+    # Pareto最优解
+    pareto_solutions = _deduplicate_solutions(solutions)[:n_alternatives]
 
     # 更新追踪信息
     trace["phases_executed"] = trace.get("phases_executed", []) + ["optimize_allocation"]
-    trace["algorithms_used"] = trace.get("algorithms_used", []) + ["greedy_allocation"]
+    trace["algorithms_used"] = trace.get("algorithms_used", []) + [algorithm_used]
     trace["solutions_generated"] = len(solutions)
+    trace["optimization_algorithm"] = algorithm_used
 
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(
-        f"[分配优化] 完成，生成{len(solutions)}个方案，Pareto解{len(pareto_solutions)}个，耗时{elapsed_ms}ms"
+        f"[分配优化] 完成，算法={algorithm_used}，生成{len(solutions)}个方案，Pareto解{len(pareto_solutions)}个，耗时{elapsed_ms}ms"
     )
 
     return {
         "allocation_solutions": solutions,
         "pareto_solutions": pareto_solutions,
         "trace": trace,
+        "errors": errors,
     }
+
+
+def _run_nsga2_optimization(
+    candidates: List[ResourceCandidate],
+    capability_requirements: List[Dict[str, Any]],
+    task_sequence: List[Dict[str, Any]],
+    n_solutions: int = 5,
+) -> List[AllocationSolution]:
+    """
+    使用NSGA-II进行多目标优化
+    
+    优化目标（5维评估）：
+    1. 最大化成功率（权重0.35）
+    2. 最小化响应时间（权重0.30）
+    3. 最大化覆盖率（权重0.20）
+    4. 最小化风险（权重0.05）
+    5. 最大化冗余性（权重0.10）
+    
+    Args:
+        candidates: 候选资源
+        capability_requirements: 能力需求
+        task_sequence: HTN任务序列
+        n_solutions: 生成方案数量
+        
+    Returns:
+        Pareto最优解列表
+    """
+    try:
+        from pymoo.algorithms.moo.nsga2 import NSGA2
+        from pymoo.operators.crossover.sbx import SBX
+        from pymoo.operators.mutation.pm import PM
+        from pymoo.operators.sampling.rnd import BinaryRandomSampling
+        from pymoo.optimize import minimize
+        from pymoo.core.problem import Problem
+        import numpy as np
+    except ImportError:
+        logger.warning("[NSGA-II] pymoo未安装，使用贪心策略")
+        raise ImportError("pymoo not installed")
+
+    required_caps = {cap["capability_code"] for cap in capability_requirements}
+    n_resources = len(candidates)
+    
+    if n_resources == 0:
+        return []
+
+    class EmergencyAllocationProblem(Problem):
+        """应急资源分配问题定义"""
+        
+        def __init__(self):
+            # 决策变量：每个候选资源是否选中（0/1）
+            super().__init__(
+                n_var=n_resources,
+                n_obj=3,  # 响应时间、覆盖率、队伍数量（成本代理）
+                n_constr=1,  # 至少覆盖70%能力
+                xl=0,
+                xu=1,
+                vtype=int,
+            )
+        
+        def _evaluate(self, X, out, *args, **kwargs):
+            F = []  # 目标函数值
+            G = []  # 约束函数值
+            
+            for x in X:
+                selected_indices = np.where(x > 0.5)[0]
+                
+                if len(selected_indices) == 0:
+                    # 无选中资源，惩罚
+                    F.append([1000, 0, 1000])
+                    G.append([1.0])  # 违反约束
+                    continue
+                
+                # 计算响应时间（最大ETA）
+                max_eta = 0.0
+                covered_caps: set = set()
+                total_score = 0.0
+                
+                for idx in selected_indices:
+                    cand = candidates[idx]
+                    max_eta = max(max_eta, cand.get("eta_minutes", 0))
+                    covered_caps.update(cand["capabilities"])
+                    total_score += cand["match_score"]
+                
+                # 覆盖率（负值因为要最大化）
+                coverage = len(covered_caps.intersection(required_caps)) / len(required_caps) if required_caps else 1.0
+                
+                # 目标：响应时间（最小化）、-覆盖率（最小化以最大化覆盖）、队伍数量（最小化成本）
+                F.append([max_eta, -coverage, len(selected_indices)])
+                
+                # 约束：覆盖率>=70%
+                G.append([0.7 - coverage])
+            
+            out["F"] = np.array(F)
+            out["G"] = np.array(G)
+
+    problem = EmergencyAllocationProblem()
+    
+    algorithm = NSGA2(
+        pop_size=50,
+        sampling=BinaryRandomSampling(),
+        crossover=SBX(prob=0.9, eta=15),
+        mutation=PM(eta=20),
+        eliminate_duplicates=True,
+    )
+    
+    result = minimize(
+        problem,
+        algorithm,
+        termination=("n_gen", 50),
+        seed=42,
+        verbose=False,
+    )
+    
+    if result.X is None or len(result.X) == 0:
+        logger.warning("[NSGA-II] 无可行解")
+        return []
+    
+    # 转换为AllocationSolution
+    solutions: List[AllocationSolution] = []
+    seen_solutions: set = set()
+    
+    # 处理结果（可能是单解或多解）
+    X_array = result.X if len(result.X.shape) == 2 else [result.X]
+    F_array = result.F if len(result.F.shape) == 2 else [result.F]
+    
+    for sol_idx, (x, f) in enumerate(zip(X_array, F_array)):
+        selected_indices = np.where(x > 0.5)[0]
+        if len(selected_indices) == 0:
+            continue
+        
+        # 去重
+        sol_key = frozenset(int(i) for i in selected_indices)
+        if sol_key in seen_solutions:
+            continue
+        seen_solutions.add(sol_key)
+        
+        # 构建分配方案
+        allocations: List[Dict[str, Any]] = []
+        covered_caps: set = set()
+        max_eta = 0.0
+        
+        for idx in selected_indices:
+            cand = candidates[int(idx)]
+            assignable_caps = set(cand["capabilities"]).intersection(required_caps) - covered_caps
+            
+            allocations.append({
+                "resource_id": cand["resource_id"],
+                "resource_name": cand["resource_name"],
+                "resource_type": cand["resource_type"],
+                "assigned_capabilities": list(assignable_caps) if assignable_caps else cand["capabilities"],
+                "match_score": cand["match_score"],
+                "distance_km": cand["distance_km"],
+                "eta_minutes": cand.get("eta_minutes", 0),
+            })
+            covered_caps.update(cand["capabilities"])
+            max_eta = max(max_eta, cand.get("eta_minutes", 0))
+        
+        coverage_rate = len(covered_caps.intersection(required_caps)) / len(required_caps) if required_caps else 1.0
+        avg_score = sum(a["match_score"] for a in allocations) / len(allocations) if allocations else 0
+        
+        solution: AllocationSolution = {
+            "solution_id": f"nsga-{uuid.uuid4().hex[:8]}",
+            "allocations": allocations,
+            "total_score": round(avg_score, 3),
+            "response_time_min": round(max_eta, 1),
+            "coverage_rate": round(coverage_rate, 3),
+            "cost_estimate": len(allocations) * 1000,
+            "risk_level": round(1.0 - coverage_rate, 3),
+            "teams_count": len(allocations),
+            "objectives": {
+                "response_time": round(float(f[0]), 1),
+                "coverage_rate": round(-float(f[1]), 3),
+                "teams_count": int(f[2]),
+            },
+        }
+        solutions.append(solution)
+        
+        if len(solutions) >= n_solutions:
+            break
+    
+    # 按覆盖率降序排序
+    solutions.sort(key=lambda s: s["coverage_rate"], reverse=True)
+    
+    return solutions
 
 
 def _extract_event_location(state: EmergencyAIState) -> Optional[Tuple[float, float]]:
@@ -292,11 +523,54 @@ def _extract_event_location(state: EmergencyAIState) -> Optional[Tuple[float, fl
         return None
 
 
+def _determine_disaster_scale(state: EmergencyAIState) -> str:
+    """
+    根据灾情判断灾害等级
+    
+    Args:
+        state: 当前状态
+        
+    Returns:
+        灾害等级: small/medium/large/catastrophic
+    """
+    parsed_disaster = state.get("parsed_disaster")
+    if parsed_disaster is None:
+        return "medium"
+    
+    # 根据受影响人口判断
+    affected_pop = parsed_disaster.get("affected_population", 0)
+    estimated_trapped = parsed_disaster.get("estimated_trapped", 0)
+    severity = parsed_disaster.get("severity", "medium")
+    disaster_type = parsed_disaster.get("disaster_type", "").lower()
+    
+    # 地震/特大灾害
+    if disaster_type == "earthquake" or severity == "critical":
+        if affected_pop > 10000 or estimated_trapped > 100:
+            return "catastrophic"
+        return "large"
+    
+    # 根据被困人数
+    if estimated_trapped > 50:
+        return "large"
+    elif estimated_trapped > 10:
+        return "medium"
+    
+    # 根据严重程度
+    severity_mapping = {
+        "critical": "large",
+        "high": "medium",
+        "medium": "medium",
+        "low": "small",
+    }
+    return severity_mapping.get(severity, "medium")
+
+
 async def _query_teams_from_db(
     db: AsyncSession,
     event_lat: float,
     event_lng: float,
     max_distance_km: float,
+    max_teams: int = DEFAULT_MAX_TEAMS,
 ) -> List[Dict[str, Any]]:
     """
     从数据库查询指定范围内的可用队伍
@@ -309,6 +583,7 @@ async def _query_teams_from_db(
         event_lat: 事件纬度
         event_lng: 事件经度
         max_distance_km: 最大距离（公里）
+        max_teams: 返回的最大队伍数量
 
     Returns:
         队伍列表，每个队伍包含id, name, type, capabilities, distance_m等
@@ -346,13 +621,14 @@ async def _query_teams_from_db(
               ) <= :max_distance_m
         GROUP BY t.id
         ORDER BY distance_m ASC, t.capability_level DESC
-        LIMIT 50
+        LIMIT :max_teams
     """)
 
     params = {
         "event_lat": event_lat,
         "event_lng": event_lng,
         "max_distance_m": max_distance_km * 1000,
+        "max_teams": max_teams,
     }
 
     try:

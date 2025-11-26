@@ -18,6 +18,8 @@ from .nodes import (
     # 阶段2
     query_rules,
     apply_rules,
+    # 阶段2.5: HTN任务分解
+    htn_decompose,
     # 阶段3
     match_resources,
     optimize_allocation,
@@ -44,15 +46,28 @@ def should_continue_after_understanding(state: EmergencyAIState) -> Literal["que
     return "query_rules"
 
 
-def should_continue_after_rules(state: EmergencyAIState) -> Literal["match_resources", "generate_output"]:
+def should_continue_after_rules(state: EmergencyAIState) -> Literal["htn_decompose", "generate_output"]:
     """
     判断规则推理后是否继续
     
-    如果没有匹配到任何规则，直接生成输出。
+    如果没有匹配到任何规则，直接生成输出；否则进入HTN任务分解。
     """
     matched_rules = state.get("matched_rules", [])
     if not matched_rules:
         logger.warning("无匹配规则，跳转到输出")
+        return "generate_output"
+    return "htn_decompose"
+
+
+def should_continue_after_htn_decompose(state: EmergencyAIState) -> Literal["match_resources", "generate_output"]:
+    """
+    判断HTN任务分解后是否继续
+    
+    如果任务序列为空，直接生成输出；否则继续资源匹配。
+    """
+    task_sequence = state.get("task_sequence", [])
+    if not task_sequence:
+        logger.warning("任务序列为空，跳转到输出")
         return "generate_output"
     return "match_resources"
 
@@ -104,6 +119,12 @@ def build_emergency_ai_graph() -> StateGraph:
       │
       ▼ (conditional: 有匹配规则?)
     ┌─────────────────────────────────────┐
+    │ Phase 2.5: HTN任务分解              │
+    │ 场景识别 → 任务链合并 → 拓扑排序    │
+    └─────────────────────────────────────┘
+      │
+      ▼ (conditional: 有任务序列?)
+    ┌─────────────────────────────────────┐
     │ Phase 3: 资源匹配                   │
     │ match_resources → optimize_alloc    │
     └─────────────────────────────────────┘
@@ -139,6 +160,9 @@ def build_emergency_ai_graph() -> StateGraph:
     workflow.add_node("query_rules", query_rules)
     workflow.add_node("apply_rules", apply_rules)
     
+    # 阶段2.5: HTN任务分解
+    workflow.add_node("htn_decompose", htn_decompose)
+    
     # 阶段3: 资源匹配
     workflow.add_node("match_resources", match_resources)
     workflow.add_node("optimize_allocation", optimize_allocation)
@@ -170,10 +194,20 @@ def build_emergency_ai_graph() -> StateGraph:
     # Phase 2 内部
     workflow.add_edge("query_rules", "apply_rules")
     
-    # Phase 2 → Phase 3 (conditional)
+    # Phase 2 → HTN分解 (conditional)
     workflow.add_conditional_edges(
         "apply_rules",
         should_continue_after_rules,
+        {
+            "htn_decompose": "htn_decompose",
+            "generate_output": "generate_output",
+        }
+    )
+    
+    # HTN分解 → Phase 3 (conditional)
+    workflow.add_conditional_edges(
+        "htn_decompose",
+        should_continue_after_htn_decompose,
         {
             "match_resources": "match_resources",
             "generate_output": "generate_output",

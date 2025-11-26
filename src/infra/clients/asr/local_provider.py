@@ -110,60 +110,58 @@ class LocalFunASRProvider(ASRProvider):
             extra={"url": self._url, "size": len(audio_data)},
         )
 
-        async def _do_recognize():
-            async with websockets.connect(
-                self._url,
-                open_timeout=10,
-                ping_interval=None,
-                subprotocols=["binary"],
-                additional_headers={"User-Agent": "FrontAI-ASR/1.0"},
-                user_agent_header="FrontAI-ASR/1.0",
-                max_size=None,
-                ssl=ssl_ctx,
-            ) as ws:
-                # 发送开始消息
-                start_msg: dict[str, Any] = {
-                    "mode": "2pass",
-                    "wav_name": "audio_stream",
-                    "is_speaking": True,
-                    "wav_format": cfg.format,
-                    "audio_fs": cfg.sample_rate,
-                    "chunk_size": self._chunk_cfg,
-                    "hotwords": self._hotwords_json,
-                    "itn": True,
-                }
-                await ws.send(json.dumps(start_msg))
-
-                # 分块发送音频（200ms每块）
-                chunk_bytes = 6400
-                for i in range(0, len(audio_data), chunk_bytes):
-                    await ws.send(audio_data[i : i + chunk_bytes])
-                    await asyncio.sleep(0.005)
-
-                # 发送结束帧
-                await ws.send(json.dumps({"is_speaking": False}))
-
-                # 接收识别结果
-                final_text = ""
-                try:
-                    async for message in ws:
-                        try:
-                            obj = json.loads(message)
-                        except json.JSONDecodeError:
-                            continue
-                        text = obj.get("text", "")
-                        mode = obj.get("mode", "")
-                        is_final = bool(obj.get("is_final", False))
-                        if text:
-                            final_text = text
-                        if mode == "2pass-offline" or (not mode and is_final):
-                            break
-                except Exception:
-                    pass  # 服务器可能主动关闭
-                return final_text
-
         try:
-            final_text = await asyncio.wait_for(_do_recognize(), timeout=self._timeout_seconds)
+            async with asyncio.timeout(self._timeout_seconds):
+                async with websockets.connect(
+                    self._url,
+                    open_timeout=10,
+                    ping_interval=None,
+                    subprotocols=["binary"],
+                    additional_headers={"User-Agent": "FrontAI-ASR/1.0"},
+                    user_agent_header="FrontAI-ASR/1.0",
+                    max_size=None,
+                    ssl=ssl_ctx,
+                ) as ws:
+                    # 发送开始消息
+                    start_msg: dict[str, Any] = {
+                        "mode": "2pass",
+                        "wav_name": "audio_stream",
+                        "is_speaking": True,
+                        "wav_format": cfg.format,
+                        "audio_fs": cfg.sample_rate,
+                        "chunk_size": self._chunk_cfg,
+                        "hotwords": self._hotwords_json,
+                        "itn": True,
+                    }
+                    await ws.send(json.dumps(start_msg))
+
+                    # 分块发送音频（200ms每块）
+                    chunk_bytes = 6400
+                    for i in range(0, len(audio_data), chunk_bytes):
+                        await ws.send(audio_data[i : i + chunk_bytes])
+                        await asyncio.sleep(0.005)
+
+                    # 发送结束帧
+                    await ws.send(json.dumps({"is_speaking": False}))
+
+                    # 接收识别结果
+                    final_text = ""
+                    try:
+                        async for message in ws:
+                            try:
+                                obj = json.loads(message)
+                            except json.JSONDecodeError:
+                                continue
+                            text = obj.get("text", "")
+                            mode = obj.get("mode", "")
+                            is_final = bool(obj.get("is_final", False))
+                            if text:
+                                final_text = text
+                            if mode == "2pass-offline" or (not mode and is_final):
+                                break
+                    except Exception:
+                        pass  # 服务器可能主动关闭
+
         except asyncio.TimeoutError:
             raise ASRError(
                 message=f"本地FunASR超时({self._timeout_seconds}s)",

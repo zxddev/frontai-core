@@ -42,21 +42,31 @@ HARD_RULES = [
 
 
 # ============================================================================
-# 软规则权重配置
+# 5维评估权重配置（严格对齐军事版）
 # ============================================================================
 
 DEFAULT_WEIGHTS = {
-    "response_time": 0.35,
-    "coverage_rate": 0.30,
-    "cost": 0.15,
-    "risk": 0.20,
+    "success_rate": 0.35,     # 人命关天，最高权重
+    "response_time": 0.30,    # 黄金救援期72小时
+    "coverage_rate": 0.20,    # 全区域覆盖
+    "risk": 0.05,             # 生命优先于风险规避
+    "redundancy": 0.10,       # 备用资源保障
 }
 
 EARTHQUAKE_WEIGHTS = {
-    "response_time": 0.40,
-    "coverage_rate": 0.30,
-    "cost": 0.10,
-    "risk": 0.20,
+    "success_rate": 0.35,     # 地震救援成功率最优先
+    "response_time": 0.35,    # 黄金72小时
+    "coverage_rate": 0.15,    # 覆盖率
+    "risk": 0.05,             # 风险
+    "redundancy": 0.10,       # 冗余保障
+}
+
+FIRE_WEIGHTS = {
+    "success_rate": 0.30,
+    "response_time": 0.40,    # 火灾响应时间更关键
+    "coverage_rate": 0.15,
+    "risk": 0.05,
+    "redundancy": 0.10,
 }
 
 
@@ -158,13 +168,22 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
     scheme_scores = state.get("scheme_scores", [])
     solutions = state.get("allocation_solutions", [])
     parsed_disaster = state.get("parsed_disaster", {})
+    capability_requirements = state.get("capability_requirements", [])
     
     # 获取权重配置
     weights = state.get("optimization_weights", {})
     if not weights:
         # 根据灾害类型选择权重
-        disaster_type = parsed_disaster.get("disaster_type", "earthquake")
-        weights = EARTHQUAKE_WEIGHTS if disaster_type == "earthquake" else DEFAULT_WEIGHTS
+        disaster_type = parsed_disaster.get("disaster_type", "earthquake").lower()
+        if disaster_type == "earthquake":
+            weights = EARTHQUAKE_WEIGHTS
+        elif disaster_type == "fire":
+            weights = FIRE_WEIGHTS
+        else:
+            weights = DEFAULT_WEIGHTS
+    
+    # 获取相似案例用于计算成功率
+    similar_cases = state.get("similar_cases", [])
     
     # 创建方案ID到方案的映射
     solution_map = {s["solution_id"]: s for s in solutions}
@@ -180,35 +199,40 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
         if not solution:
             continue
         
-        # 计算各维度得分（归一化到0-1）
-        # 响应时间：越短越好
+        # 计算5维评估得分（归一化到0-1）
+        
+        # 1. 成功率：基于历史案例相似度和能力匹配度（权重0.35）
+        success_rate_score = _calculate_success_rate(solution, similar_cases)
+        
+        # 2. 响应时间：越短越好（权重0.30）
         response_time = solution.get("response_time_min", 60)
         time_score = max(0, 1 - response_time / 120)  # 120分钟为基准
         
-        # 覆盖率：越高越好
+        # 3. 覆盖率：越高越好（权重0.20）
         coverage_score = solution.get("coverage_rate", 0)
         
-        # 成本：越低越好
-        cost = solution.get("cost_estimate", 10000)
-        cost_score = max(0, 1 - cost / 50000)  # 50000为基准
-        
-        # 风险：越低越好
+        # 4. 风险：越低越好（权重0.05）
         risk_score = 1 - solution.get("risk_level", 0)
         
-        # 保存各维度得分
+        # 5. 冗余性：备用资源覆盖率（权重0.10）
+        redundancy_score = _calculate_redundancy_rate(solution, capability_requirements)
+        
+        # 保存5维评估得分
         score["soft_rule_scores"] = {
+            "success_rate": round(success_rate_score, 3),
             "response_time": round(time_score, 3),
             "coverage_rate": round(coverage_score, 3),
-            "cost": round(cost_score, 3),
             "risk": round(risk_score, 3),
+            "redundancy": round(redundancy_score, 3),
         }
         
-        # 加权计算总分
+        # 5维加权计算总分（严格对齐军事版）
         weighted_score = (
-            time_score * weights.get("response_time", 0.35) +
-            coverage_score * weights.get("coverage_rate", 0.30) +
-            cost_score * weights.get("cost", 0.15) +
-            risk_score * weights.get("risk", 0.20)
+            success_rate_score * weights.get("success_rate", 0.35) +
+            time_score * weights.get("response_time", 0.30) +
+            coverage_score * weights.get("coverage_rate", 0.20) +
+            risk_score * weights.get("risk", 0.05) +
+            redundancy_score * weights.get("redundancy", 0.10)
         )
         score["weighted_score"] = round(weighted_score, 3)
     
