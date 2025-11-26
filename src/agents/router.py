@@ -1081,6 +1081,7 @@ async def get_emergency_analyze_result(task_id: str) -> EmergencyAnalyzeResult:
         completed_at=result.get("completed_at"),
         understanding=result.get("understanding"),
         reasoning=result.get("reasoning"),
+        htn_decomposition=result.get("htn_decomposition"),
         matching=result.get("matching"),
         optimization=result.get("optimization"),
         recommended_scheme=result.get("recommended_scheme"),

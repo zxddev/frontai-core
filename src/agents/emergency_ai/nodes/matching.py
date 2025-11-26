@@ -89,13 +89,15 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
     required_caps = {cap["capability_code"] for cap in capability_requirements}
     logger.info(f"[资源匹配] 需要的能力: {required_caps}")
 
+    # 获取约束条件
+    constraints = state.get("constraints", {})
+    
     # 获取灾害等级和队伍数量上限
     disaster_scale = _determine_disaster_scale(state)
     max_teams = constraints.get("max_teams", DISASTER_SCALE_LIMITS.get(disaster_scale, DEFAULT_MAX_TEAMS))
     logger.info(f"[资源匹配] 灾害等级: {disaster_scale}，队伍上限: {max_teams}")
 
     # 获取时间约束
-    constraints = state.get("constraints", {})
     max_response_hours = constraints.get("max_response_time_hours", 2.0)
     initial_max_distance = max_response_hours * AVERAGE_SPEED_KMH
     logger.info(f"[资源匹配] 时间约束: {max_response_hours}小时，初始搜索距离: {initial_max_distance}km")
@@ -328,6 +330,12 @@ def _run_nsga2_optimization(
     Returns:
         Pareto最优解列表
     """
+    logger.info(f"[NSGA-II] 开始多目标优化")
+    logger.info(f"  - 候选资源数: {len(candidates)}")
+    logger.info(f"  - 能力需求数: {len(capability_requirements)}")
+    logger.info(f"  - 任务序列长度: {len(task_sequence)}")
+    logger.info(f"  - 目标解数量: {n_solutions}")
+    
     try:
         from pymoo.algorithms.moo.nsga2 import NSGA2
         from pymoo.operators.crossover.sbx import SBX
@@ -336,14 +344,17 @@ def _run_nsga2_optimization(
         from pymoo.optimize import minimize
         from pymoo.core.problem import Problem
         import numpy as np
+        logger.info(f"[NSGA-II] pymoo库导入成功")
     except ImportError:
         logger.warning("[NSGA-II] pymoo未安装，使用贪心策略")
         raise ImportError("pymoo not installed")
 
     required_caps = {cap["capability_code"] for cap in capability_requirements}
     n_resources = len(candidates)
+    logger.info(f"[NSGA-II] 需求能力: {required_caps}")
     
     if n_resources == 0:
+        logger.warning("[NSGA-II] 无候选资源，返回空")
         return []
 
     class EmergencyAllocationProblem(Problem):
@@ -398,6 +409,13 @@ def _run_nsga2_optimization(
 
     problem = EmergencyAllocationProblem()
     
+    logger.info(f"[NSGA-II] 配置算法参数:")
+    logger.info(f"  - pop_size: 50 (种群大小)")
+    logger.info(f"  - n_gen: 50 (迭代代数)")
+    logger.info(f"  - n_var: {n_resources} (决策变量数)")
+    logger.info(f"  - n_obj: 3 (目标数: 响应时间/覆盖率/队伍数)")
+    logger.info(f"  - n_constr: 1 (约束: 覆盖率>=70%)")
+    
     algorithm = NSGA2(
         pop_size=50,
         sampling=BinaryRandomSampling(),
@@ -405,6 +423,10 @@ def _run_nsga2_optimization(
         mutation=PM(eta=20),
         eliminate_duplicates=True,
     )
+    
+    logger.info(f"[NSGA-II] 开始优化迭代...")
+    import time as time_module
+    start_opt = time_module.time()
     
     result = minimize(
         problem,
@@ -414,9 +436,14 @@ def _run_nsga2_optimization(
         verbose=False,
     )
     
+    elapsed_opt = int((time_module.time() - start_opt) * 1000)
+    logger.info(f"[NSGA-II] 优化完成，耗时{elapsed_opt}ms")
+    
     if result.X is None or len(result.X) == 0:
         logger.warning("[NSGA-II] 无可行解")
         return []
+    
+    logger.info(f"[NSGA-II] 找到Pareto前沿解")
     
     # 转换为AllocationSolution
     solutions: List[AllocationSolution] = []
@@ -535,6 +562,7 @@ def _determine_disaster_scale(state: EmergencyAIState) -> str:
     """
     parsed_disaster = state.get("parsed_disaster")
     if parsed_disaster is None:
+        logger.info("[匹配-灾害等级] 无灾情数据，使用默认等级: medium")
         return "medium"
     
     # 根据受影响人口判断
@@ -543,16 +571,26 @@ def _determine_disaster_scale(state: EmergencyAIState) -> str:
     severity = parsed_disaster.get("severity", "medium")
     disaster_type = parsed_disaster.get("disaster_type", "").lower()
     
+    logger.info(f"[匹配-灾害等级] 判断输入参数:")
+    logger.info(f"  - disaster_type: {disaster_type}")
+    logger.info(f"  - severity: {severity}")
+    logger.info(f"  - affected_population: {affected_pop}")
+    logger.info(f"  - estimated_trapped: {estimated_trapped}")
+    
     # 地震/特大灾害
     if disaster_type == "earthquake" or severity == "critical":
         if affected_pop > 10000 or estimated_trapped > 100:
+            logger.info(f"[匹配-灾害等级] 判断: 地震/特大灾害 + (人口>{10000}或被困>{100}) -> catastrophic")
             return "catastrophic"
+        logger.info(f"[匹配-灾害等级] 判断: 地震/严重灾害 -> large")
         return "large"
     
     # 根据被困人数
     if estimated_trapped > 50:
+        logger.info(f"[匹配-灾害等级] 判断: 被困人数{estimated_trapped} > 50 -> large")
         return "large"
     elif estimated_trapped > 10:
+        logger.info(f"[匹配-灾害等级] 判断: 被困人数{estimated_trapped} > 10 -> medium")
         return "medium"
     
     # 根据严重程度
@@ -562,7 +600,9 @@ def _determine_disaster_scale(state: EmergencyAIState) -> str:
         "medium": "medium",
         "low": "small",
     }
-    return severity_mapping.get(severity, "medium")
+    result = severity_mapping.get(severity, "medium")
+    logger.info(f"[匹配-灾害等级] 判断: 按严重程度{severity} -> {result}")
+    return result
 
 
 async def _query_teams_from_db(

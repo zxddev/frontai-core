@@ -382,29 +382,40 @@ def _calculate_success_rate(
     Returns:
         成功率评分（0-1）
     """
+    logger.info(f"[5维评估-成功率] 开始计算")
+    
     # 历史案例成功率（如果有相似案例）
     case_success_rate = 0.8  # 默认基准成功率
     if similar_cases:
+        logger.info(f"  - 相似案例数: {len(similar_cases)}")
         total_similarity = 0.0
         weighted_success = 0.0
-        for case in similar_cases[:3]:  # 取前3个最相似案例
+        for i, case in enumerate(similar_cases[:3]):  # 取前3个最相似案例
             similarity = case.get("similarity_score", 0.5)
             # 假设历史案例都是成功的（可以从lessons_learned判断）
             success = 0.9 if case.get("lessons_learned") else 0.7
             weighted_success += similarity * success
             total_similarity += similarity
+            logger.info(f"  - 案例{i+1}: 相似度={similarity:.3f}, 成功率={success}")
         if total_similarity > 0:
             case_success_rate = weighted_success / total_similarity
+        logger.info(f"  - 案例加权成功率: {case_success_rate:.3f}")
+    else:
+        logger.info(f"  - 无相似案例，使用默认成功率: {case_success_rate}")
     
     # 能力匹配度（基于分配方案的覆盖率和匹配分数）
     coverage_rate = solution.get("coverage_rate", 0.8)
     avg_match_score = solution.get("total_score", 0.7)
     capability_match = (coverage_rate + avg_match_score) / 2
+    logger.info(f"  - 覆盖率: {coverage_rate:.3f}, 匹配分: {avg_match_score:.3f}")
+    logger.info(f"  - 能力匹配度: {capability_match:.3f}")
     
     # 综合成功率
     success_rate = 0.6 * case_success_rate + 0.4 * capability_match
+    success_rate = min(1.0, max(0.0, success_rate))
+    logger.info(f"  - 最终成功率: 0.6×{case_success_rate:.3f} + 0.4×{capability_match:.3f} = {success_rate:.3f}")
     
-    return min(1.0, max(0.0, success_rate))
+    return success_rate
 
 
 def _calculate_redundancy_rate(
@@ -425,11 +436,15 @@ def _calculate_redundancy_rate(
     Returns:
         冗余性评分（0-1）
     """
+    logger.info(f"[5维评估-冗余性] 开始计算")
+    
     if not capability_requirements:
+        logger.info(f"  - 无能力需求，返回1.0")
         return 1.0  # 无需求时认为完全冗余
     
     allocations = solution.get("allocations", [])
     if not allocations:
+        logger.info(f"  - 无分配方案，返回0.0")
         return 0.0
     
     # 统计每个能力被多少资源覆盖
@@ -437,6 +452,10 @@ def _calculate_redundancy_rate(
     for alloc in allocations:
         for cap in alloc.get("assigned_capabilities", []):
             capability_coverage[cap] = capability_coverage.get(cap, 0) + 1
+    
+    logger.info(f"  - 能力覆盖统计:")
+    for cap, count in capability_coverage.items():
+        logger.info(f"    {cap}: 被{count}个资源覆盖")
     
     # 计算有冗余（>=2个资源覆盖）的能力比例
     required_caps = {req["capability_code"] for req in capability_requirements}
@@ -447,11 +466,16 @@ def _calculate_redundancy_rate(
             redundant_count += 1
     
     redundancy_rate = redundant_count / len(required_caps) if required_caps else 1.0
+    logger.info(f"  - 有冗余的能力: {redundant_count}/{len(required_caps)} = {redundancy_rate:.3f}")
     
     # 考虑队伍数量的冗余（更多队伍意味着更高冗余）
     teams_count = solution.get("teams_count", len(allocations))
     min_teams = len(required_caps)  # 最少需要的队伍数
     team_redundancy = min(1.0, teams_count / (min_teams * 1.5)) if min_teams > 0 else 1.0
+    logger.info(f"  - 队伍冗余: {teams_count}队/{min_teams*1.5:.1f}最小需求 = {team_redundancy:.3f}")
     
     # 综合冗余性
-    return (redundancy_rate + team_redundancy) / 2
+    final_redundancy = (redundancy_rate + team_redundancy) / 2
+    logger.info(f"  - 最终冗余性: ({redundancy_rate:.3f} + {team_redundancy:.3f})/2 = {final_redundancy:.3f}")
+    
+    return final_redundancy

@@ -106,15 +106,16 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
             "pareto_solutions_count": len(state.get("pareto_solutions", [])),
         },
         
-        # 阶段4: 方案优化
+        # 阶段4: 方案优化（5维评估）
         "optimization": {
             "scheme_scores": [
                 {
                     "scheme_id": s.get("scheme_id"),
                     "passed": s.get("hard_rule_passed"),
                     "violations": s.get("hard_rule_violations", []),
-                    "weighted_score": s.get("weighted_score"),
+                    "total_score": s.get("weighted_score"),
                     "rank": s.get("rank"),
+                    "dimension_scores": s.get("soft_rule_scores", {}),
                 }
                 for s in state.get("scheme_scores", [])
             ],

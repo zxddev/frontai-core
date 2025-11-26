@@ -44,38 +44,53 @@ def _identify_scenes(parsed_disaster: ParsedDisasterInfo) -> List[str]:
     scenes: List[str] = []
     disaster_type = parsed_disaster.get("disaster_type", "").lower()
     
+    # 详细日志：输入参数
+    logger.info(f"[HTN-场景识别] 输入参数:")
+    logger.info(f"  - disaster_type: {disaster_type}")
+    logger.info(f"  - has_secondary_fire: {parsed_disaster.get('has_secondary_fire')}")
+    logger.info(f"  - has_hazmat_leak: {parsed_disaster.get('has_hazmat_leak')}")
+    logger.info(f"  - severity: {parsed_disaster.get('severity')}")
+    logger.info(f"  - estimated_trapped: {parsed_disaster.get('estimated_trapped')}")
+    
     # 地震相关场景
     if disaster_type == "earthquake" or "地震" in disaster_type:
         scenes.append("S1")  # 地震主灾
+        logger.info(f"[HTN-场景识别] 识别到地震场景 -> 添加S1")
         
         # 检查次生灾害
         if parsed_disaster.get("has_secondary_fire"):
             scenes.append("S2")  # 次生火灾
+            logger.info(f"[HTN-场景识别] 存在次生火灾 -> 添加S2")
         if parsed_disaster.get("has_hazmat_leak"):
             scenes.append("S3")  # 危化品泄漏
+            logger.info(f"[HTN-场景识别] 存在危化品泄漏 -> 添加S3")
     
     # 洪水/泥石流场景
-    if disaster_type in ["flood", "debris_flow", "landslide"] or "洪" in disaster_type or "泥石流" in disaster_type:
+    if disaster_type in ["flood", "debris_flow", "landslide"] or "洪" in disaster_type or "泥石流" in disaster_type or "滑坡" in disaster_type:
         scenes.append("S4")  # 山洪泥石流
+        logger.info(f"[HTN-场景识别] 识别到洪水/泥石流/滑坡 -> 添加S4")
     
     # 暴雨内涝场景
     if disaster_type == "waterlogging" or "内涝" in disaster_type or "暴雨" in disaster_type:
         scenes.append("S5")  # 暴雨内涝
+        logger.info(f"[HTN-场景识别] 识别到暴雨内涝 -> 添加S5")
     
     # 火灾场景（非地震次生）
     if disaster_type == "fire" and "S2" not in scenes:
         scenes.append("S2")  # 火灾处置链
+        logger.info(f"[HTN-场景识别] 识别到独立火灾 -> 添加S2")
     
     # 危化品泄漏（非地震次生）
     if disaster_type == "hazmat" and "S3" not in scenes:
         scenes.append("S3")  # 危化品处置链
+        logger.info(f"[HTN-场景识别] 识别到独立危化品泄漏 -> 添加S3")
     
     # 默认场景
     if not scenes:
-        logger.warning(f"无法识别场景，灾害类型: {disaster_type}，使用默认S1")
+        logger.warning(f"[HTN-场景识别] 无法识别场景，灾害类型: {disaster_type}，使用默认S1")
         scenes.append("S1")
     
-    logger.info(f"识别场景: {scenes}，灾害类型: {disaster_type}")
+    logger.info(f"[HTN-场景识别] 最终识别场景: {scenes}")
     return scenes
 
 
@@ -95,15 +110,25 @@ def _merge_chains(chains: List[TaskChainConfig]) -> Tuple[List[str], Dict[str, L
     Returns:
         (合并后的任务列表, 合并后的依赖关系)
     """
+    logger.info(f"[HTN-合并] 开始合并{len(chains)}条任务链")
+    
     all_tasks: Set[str] = set()
     merged_deps: Dict[str, List[str]] = {}
     
     for chain in chains:
+        chain_name = chain.get("name", "未知")
+        chain_tasks = chain.get("tasks", [])
+        chain_deps = chain.get("dependencies", {})
+        logger.info(f"[HTN-合并] 处理任务链: {chain_name}")
+        logger.info(f"  - 任务数: {len(chain_tasks)}")
+        logger.info(f"  - 依赖关系数: {len(chain_deps)}")
+        logger.info(f"  - 任务列表: {chain_tasks}")
+        
         # 合并任务
-        all_tasks.update(chain["tasks"])
+        all_tasks.update(chain_tasks)
         
         # 合并依赖关系
-        for task_id, deps in chain.get("dependencies", {}).items():
+        for task_id, deps in chain_deps.items():
             if task_id in merged_deps:
                 # 已有依赖，合并去重
                 existing = set(merged_deps[task_id])
@@ -111,6 +136,11 @@ def _merge_chains(chains: List[TaskChainConfig]) -> Tuple[List[str], Dict[str, L
                 merged_deps[task_id] = list(existing)
             else:
                 merged_deps[task_id] = list(deps)
+    
+    logger.info(f"[HTN-合并] 合并完成:")
+    logger.info(f"  - 总任务数: {len(all_tasks)}")
+    logger.info(f"  - 总依赖关系数: {len(merged_deps)}")
+    logger.info(f"  - 合并后任务: {sorted(all_tasks)}")
     
     return list(all_tasks), merged_deps
 
@@ -125,27 +155,38 @@ def _identify_parallel_tasks(chains: List[TaskChainConfig]) -> List[ParallelTask
     Returns:
         并行任务组列表
     """
+    logger.info(f"[HTN-并行识别] 开始识别可并行任务")
+    
     parallel_groups: List[ParallelTaskGroup] = []
     seen_groups: Set[frozenset] = set()
     group_index = 0
     
     for chain in chains:
-        for group_tasks in chain.get("parallel_groups", []):
+        chain_name = chain.get("name", "未知")
+        chain_parallel = chain.get("parallel_groups", [])
+        logger.info(f"[HTN-并行识别] 检查任务链: {chain_name}, 配置并行组数: {len(chain_parallel)}")
+        
+        for group_tasks in chain_parallel:
             # 去重：相同任务组只保留一个
             group_key = frozenset(group_tasks)
             if group_key in seen_groups:
+                logger.info(f"  - 跳过重复组: {group_tasks}")
                 continue
             seen_groups.add(group_key)
             
             # 生成并行组
             group_index += 1
+            reason = _get_parallel_reason(group_tasks)
             group = ParallelTaskGroup(
                 group_id=f"PG-{group_index:02d}",
                 task_ids=list(group_tasks),
-                reason=_get_parallel_reason(group_tasks),
+                reason=reason,
             )
             parallel_groups.append(group)
+            logger.info(f"  - 发现并行组: PG-{group_index:02d} = {group_tasks}")
+            logger.info(f"    原因: {reason}")
     
+    logger.info(f"[HTN-并行识别] 完成，共{len(parallel_groups)}个并行组")
     return parallel_groups
 
 
@@ -187,6 +228,10 @@ def topological_sort(tasks: List[str], dependencies: Dict[str, List[str]]) -> Li
     Raises:
         ValueError: 检测到循环依赖
     """
+    logger.info(f"[HTN-拓扑排序] Kahn算法开始")
+    logger.info(f"  - 任务数: {len(tasks)}")
+    logger.info(f"  - 依赖关系数: {len(dependencies)}")
+    
     # 计算入度
     in_degree: Dict[str, int] = {task: 0 for task in tasks}
     
@@ -196,14 +241,25 @@ def topological_sort(tasks: List[str], dependencies: Dict[str, List[str]]) -> Li
             if dep in in_degree:
                 in_degree[task_id] += 1
     
+    # 日志：入度统计
+    logger.info(f"[HTN-拓扑排序] 入度计算完成:")
+    for task_id, degree in sorted(in_degree.items(), key=lambda x: x[1]):
+        deps = dependencies.get(task_id, [])
+        logger.info(f"  - {task_id}: 入度={degree}, 依赖={deps}")
+    
     # 初始队列：入度为0的任务
     queue: List[str] = [t for t in tasks if in_degree[t] == 0]
+    logger.info(f"[HTN-拓扑排序] 初始队列(入度=0): {queue}")
+    
     result: List[str] = []
+    step = 0
     
     while queue:
         # 取出入度为0的任务
         task = queue.pop(0)
         result.append(task)
+        step += 1
+        logger.info(f"[HTN-拓扑排序] 步骤{step}: 处理 {task}")
         
         # 更新后续任务的入度
         for other_task in tasks:
@@ -211,13 +267,15 @@ def topological_sort(tasks: List[str], dependencies: Dict[str, List[str]]) -> Li
                 in_degree[other_task] -= 1
                 if in_degree[other_task] == 0:
                     queue.append(other_task)
+                    logger.info(f"  - {other_task} 入度变为0，加入队列")
     
     # 检测循环依赖
     if len(result) != len(tasks):
         unresolved = [t for t in tasks if t not in result]
-        logger.error(f"检测到循环依赖，无法排序的任务: {unresolved}")
+        logger.error(f"[HTN-拓扑排序] 检测到循环依赖，无法排序的任务: {unresolved}")
         raise ValueError(f"任务依赖存在循环: {unresolved}")
     
+    logger.info(f"[HTN-拓扑排序] 排序完成，执行顺序: {result}")
     return result
 
 

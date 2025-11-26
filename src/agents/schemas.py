@@ -368,6 +368,7 @@ class EmergencyAnalyzeResult(BaseModel):
     # 各阶段结果
     understanding: Optional[Dict[str, Any]] = Field(default=None, description="灾情理解结果")
     reasoning: Optional[Dict[str, Any]] = Field(default=None, description="规则推理结果")
+    htn_decomposition: Optional[Dict[str, Any]] = Field(default=None, description="HTN任务分解结果")
     matching: Optional[Dict[str, Any]] = Field(default=None, description="资源匹配结果")
     optimization: Optional[Dict[str, Any]] = Field(default=None, description="方案优化结果")
     
