@@ -73,6 +73,32 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
             ],
         },
         
+        # 阶段2.5: HTN任务分解
+        "htn_decomposition": {
+            "scene_codes": state.get("scene_codes", []),
+            "task_sequence": [
+                {
+                    "task_id": t.get("task_id"),
+                    "task_name": t.get("task_name"),
+                    "sequence": t.get("sequence"),
+                    "depends_on": t.get("depends_on", []),
+                    "golden_hour": t.get("golden_hour"),
+                    "phase": t.get("phase"),
+                    "is_parallel": t.get("is_parallel"),
+                    "parallel_group_id": t.get("parallel_group_id"),
+                }
+                for t in state.get("task_sequence", [])
+            ],
+            "parallel_tasks": [
+                {
+                    "group_id": g.get("group_id"),
+                    "task_ids": g.get("task_ids", []),
+                    "reason": g.get("reason"),
+                }
+                for g in state.get("parallel_tasks", [])
+            ],
+        },
+        
         # 阶段3: 资源匹配
         "matching": {
             "candidates_count": len(state.get("resource_candidates", [])),

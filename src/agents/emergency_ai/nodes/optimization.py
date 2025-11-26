@@ -358,3 +358,100 @@ async def explain_scheme(state: EmergencyAIState) -> Dict[str, Any]:
         )
         
         return {"scheme_explanation": simple_explanation}
+
+
+# ============================================================================
+# 5维评估辅助函数
+# ============================================================================
+
+def _calculate_success_rate(
+    solution: AllocationSolution,
+    similar_cases: List[Dict[str, Any]],
+) -> float:
+    """
+    计算方案成功率
+    
+    基于历史案例相似度和资源能力匹配度计算预期成功率。
+    
+    成功率 = 0.6 × 历史案例成功率 + 0.4 × 能力匹配度
+    
+    Args:
+        solution: 分配方案
+        similar_cases: 相似历史案例
+        
+    Returns:
+        成功率评分（0-1）
+    """
+    # 历史案例成功率（如果有相似案例）
+    case_success_rate = 0.8  # 默认基准成功率
+    if similar_cases:
+        total_similarity = 0.0
+        weighted_success = 0.0
+        for case in similar_cases[:3]:  # 取前3个最相似案例
+            similarity = case.get("similarity_score", 0.5)
+            # 假设历史案例都是成功的（可以从lessons_learned判断）
+            success = 0.9 if case.get("lessons_learned") else 0.7
+            weighted_success += similarity * success
+            total_similarity += similarity
+        if total_similarity > 0:
+            case_success_rate = weighted_success / total_similarity
+    
+    # 能力匹配度（基于分配方案的覆盖率和匹配分数）
+    coverage_rate = solution.get("coverage_rate", 0.8)
+    avg_match_score = solution.get("total_score", 0.7)
+    capability_match = (coverage_rate + avg_match_score) / 2
+    
+    # 综合成功率
+    success_rate = 0.6 * case_success_rate + 0.4 * capability_match
+    
+    return min(1.0, max(0.0, success_rate))
+
+
+def _calculate_redundancy_rate(
+    solution: AllocationSolution,
+    capability_requirements: List[Dict[str, Any]],
+) -> float:
+    """
+    计算冗余性评分
+    
+    检查每个关键能力是否有备用资源覆盖。
+    
+    冗余率 = 有备用覆盖的能力数 / 总能力需求数
+    
+    Args:
+        solution: 分配方案
+        capability_requirements: 能力需求列表
+        
+    Returns:
+        冗余性评分（0-1）
+    """
+    if not capability_requirements:
+        return 1.0  # 无需求时认为完全冗余
+    
+    allocations = solution.get("allocations", [])
+    if not allocations:
+        return 0.0
+    
+    # 统计每个能力被多少资源覆盖
+    capability_coverage: Dict[str, int] = {}
+    for alloc in allocations:
+        for cap in alloc.get("assigned_capabilities", []):
+            capability_coverage[cap] = capability_coverage.get(cap, 0) + 1
+    
+    # 计算有冗余（>=2个资源覆盖）的能力比例
+    required_caps = {req["capability_code"] for req in capability_requirements}
+    redundant_count = 0
+    
+    for cap in required_caps:
+        if capability_coverage.get(cap, 0) >= 2:
+            redundant_count += 1
+    
+    redundancy_rate = redundant_count / len(required_caps) if required_caps else 1.0
+    
+    # 考虑队伍数量的冗余（更多队伍意味着更高冗余）
+    teams_count = solution.get("teams_count", len(allocations))
+    min_teams = len(required_caps)  # 最少需要的队伍数
+    team_redundancy = min(1.0, teams_count / (min_teams * 1.5)) if min_teams > 0 else 1.0
+    
+    # 综合冗余性
+    return (redundancy_rate + team_redundancy) / 2

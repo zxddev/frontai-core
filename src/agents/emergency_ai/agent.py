@@ -21,11 +21,19 @@ class EmergencyAIAgent:
     """
     应急救灾AI+规则混合Agent
     
-    集成LLM/RAG/知识图谱/规则引擎，实现4阶段智能决策：
+    集成LLM/RAG/知识图谱/规则引擎，实现5阶段智能决策：
     1. 灾情理解：LLM语义解析 + RAG案例增强
     2. 规则推理：KG规则查询 + TRR引擎匹配
-    3. 资源匹配：CSP约束求解 + NSGA-II优化
-    4. 方案优化：硬/软规则过滤 + LLM解释生成
+    2.5. HTN任务分解：场景识别 + 任务链合并 + Kahn拓扑排序
+    3. 资源匹配：数据库查询 + NSGA-II多目标优化
+    4. 方案优化：硬/软规则过滤 + 5维评估(成功率0.35) + LLM解释生成
+    
+    5维评估权重（严格对齐军事版）：
+    - 成功率: 0.35 (人命关天，最高权重)
+    - 响应时间: 0.30 (黄金救援期72小时)
+    - 覆盖率: 0.20 (全区域覆盖)
+    - 风险: 0.05 (生命优先于风险规避)
+    - 冗余性: 0.10 (备用资源保障)
     
     Example:
         ```python
@@ -68,8 +76,9 @@ class EmergencyAIAgent:
             - success: 是否成功
             - understanding: 灾情理解结果
             - reasoning: 规则推理结果
+            - htn_decomposition: HTN任务分解结果（scene_codes, task_sequence, parallel_tasks）
             - matching: 资源匹配结果
-            - optimization: 方案优化结果
+            - optimization: 方案优化结果（5维评估得分）
             - recommended_scheme: 推荐方案
             - scheme_explanation: 方案解释
             - trace: 执行追踪
