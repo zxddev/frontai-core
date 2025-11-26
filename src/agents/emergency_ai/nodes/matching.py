@@ -218,6 +218,11 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
     constraints = state.get("constraints", {})
     trace: Dict[str, Any] = dict(state.get("trace", {}))
     errors: List[str] = list(state.get("errors", []))
+    
+    # 获取被困人数用于计算救援容量需求
+    parsed_disaster = state.get("parsed_disaster", {})
+    estimated_trapped = parsed_disaster.get("estimated_trapped", 0) if parsed_disaster else 0
+    logger.info(f"[分配优化] 被困人数: {estimated_trapped}")
 
     if not candidates:
         logger.warning("[分配优化] 无候选资源，无法生成方案")
@@ -242,6 +247,7 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
                 capability_requirements=capability_requirements,
                 task_sequence=task_sequence,
                 n_solutions=n_alternatives,
+                estimated_trapped=estimated_trapped,
             )
             if nsga_solutions:
                 solutions = nsga_solutions
@@ -259,6 +265,7 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
             capability_requirements=capability_requirements,
             strategy="match_score",
             solution_id=f"solution-{uuid.uuid4().hex[:8]}",
+            estimated_trapped=estimated_trapped,
         )
         if solution1:
             solutions.append(solution1)
@@ -269,6 +276,7 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
             capability_requirements=capability_requirements,
             strategy="distance",
             solution_id=f"solution-{uuid.uuid4().hex[:8]}",
+            estimated_trapped=estimated_trapped,
         )
         if solution2:
             solutions.append(solution2)
@@ -279,6 +287,7 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
             capability_requirements=capability_requirements,
             strategy="availability",
             solution_id=f"solution-{uuid.uuid4().hex[:8]}",
+            estimated_trapped=estimated_trapped,
         )
         if solution3:
             solutions.append(solution3)
@@ -310,6 +319,7 @@ def _run_nsga2_optimization(
     capability_requirements: List[Dict[str, Any]],
     task_sequence: List[Dict[str, Any]],
     n_solutions: int = 5,
+    estimated_trapped: int = 0,
 ) -> List[AllocationSolution]:
     """
     使用NSGA-II进行多目标优化
@@ -468,10 +478,13 @@ def _run_nsga2_optimization(
         allocations: List[Dict[str, Any]] = []
         covered_caps: set = set()
         max_eta = 0.0
+        max_distance = 0.0
+        total_capacity = 0
         
         for idx in selected_indices:
             cand = candidates[int(idx)]
             assignable_caps = set(cand["capabilities"]).intersection(required_caps) - covered_caps
+            cand_capacity = cand.get("rescue_capacity", 0)
             
             allocations.append({
                 "resource_id": cand["resource_id"],
@@ -481,12 +494,26 @@ def _run_nsga2_optimization(
                 "match_score": cand["match_score"],
                 "distance_km": cand["distance_km"],
                 "eta_minutes": cand.get("eta_minutes", 0),
+                "rescue_capacity": cand_capacity,
             })
             covered_caps.update(cand["capabilities"])
             max_eta = max(max_eta, cand.get("eta_minutes", 0))
+            max_distance = max(max_distance, cand["distance_km"])
+            total_capacity += cand_capacity
         
         coverage_rate = len(covered_caps.intersection(required_caps)) / len(required_caps) if required_caps else 1.0
         avg_score = sum(a["match_score"] for a in allocations) / len(allocations) if allocations else 0
+        uncovered = required_caps - covered_caps
+        
+        # 计算容量覆盖率和警告
+        capacity_coverage = total_capacity / estimated_trapped if estimated_trapped > 0 else 1.0
+        capacity_warning: Optional[str] = None
+        if estimated_trapped > 0:
+            capacity_gap = estimated_trapped - total_capacity
+            if capacity_coverage < 0.5:
+                capacity_warning = f"🚨 救援容量严重不足！被困{estimated_trapped}人，总容量{total_capacity}人（覆盖率{capacity_coverage*100:.1f}%），缺口{capacity_gap}人"
+            elif capacity_coverage < 0.8:
+                capacity_warning = f"⚠️ 救援容量不足！被困{estimated_trapped}人，总容量{total_capacity}人（覆盖率{capacity_coverage*100:.1f}%），缺口{capacity_gap}人"
         
         solution: AllocationSolution = {
             "solution_id": f"nsga-{uuid.uuid4().hex[:8]}",
@@ -494,8 +521,13 @@ def _run_nsga2_optimization(
             "total_score": round(avg_score, 3),
             "response_time_min": round(max_eta, 1),
             "coverage_rate": round(coverage_rate, 3),
-            "cost_estimate": len(allocations) * 1000,
+            "resource_scale": len(allocations),
             "risk_level": round(1.0 - coverage_rate, 3),
+            "total_rescue_capacity": total_capacity,
+            "capacity_coverage_rate": round(capacity_coverage, 3),
+            "capacity_warning": capacity_warning,
+            "uncovered_capabilities": list(uncovered) if uncovered else [],
+            "max_distance_km": round(max_distance, 2),
             "teams_count": len(allocations),
             "objectives": {
                 "response_time": round(float(f[0]), 1),
@@ -647,6 +679,7 @@ async def _query_teams_from_db(
                 FILTER (WHERE tc.capability_code IS NOT NULL),
                 ARRAY[]::VARCHAR[]
             ) AS capabilities,
+            COALESCE(SUM(tc.max_capacity), 0) AS total_rescue_capacity,
             ST_Distance(
                 t.base_location,
                 ST_SetSRID(ST_MakePoint(:event_lng, :event_lat), 4326)::geography
@@ -679,6 +712,30 @@ async def _query_teams_from_db(
         teams: List[Dict[str, Any]] = []
         for row in rows:
             row_dict = dict(zip(columns, row))
+            
+            # 救援容量：优先使用数据库值，否则按类型估算
+            db_capacity = row_dict.get("total_rescue_capacity", 0) or 0
+            team_type = row_dict["team_type"]
+            available = row_dict["available_personnel"] or 0
+            
+            if db_capacity > 0:
+                rescue_capacity = int(db_capacity)
+            else:
+                # 按队伍类型估算救援容量（72小时内可救援人数）
+                capacity_multipliers = {
+                    "fire_rescue": 2.0,       # 消防队每人可救2人
+                    "search_rescue": 1.5,     # 搜救队每人可救1.5人
+                    "medical": 5.0,           # 医疗队每人可处理5伤员
+                    "hazmat": 0.5,            # 危化品队不直接救人
+                    "engineering": 0.0,       # 工程队不直接救人
+                    "volunteer": 1.0,         # 志愿者每人可救1人
+                }
+                multiplier = capacity_multipliers.get(team_type, 1.0)
+                rescue_capacity = int(available * multiplier)
+                if rescue_capacity == 0 and available > 0:
+                    rescue_capacity = available  # 兜底：至少等于可用人数
+                logger.debug(f"[救援容量估算] {row_dict['name']} 无max_capacity，按类型{team_type}估算: {available}人×{multiplier}={rescue_capacity}")
+            
             team = {
                 "id": str(row_dict["id"]),
                 "code": row_dict["code"],
@@ -695,10 +752,12 @@ async def _query_teams_from_db(
                 "capabilities": list(row_dict["capabilities"] or []),
                 "distance_m": row_dict["distance_m"],
                 "distance_km": row_dict["distance_m"] / 1000.0 if row_dict["distance_m"] else 0,
+                "rescue_capacity": rescue_capacity,
             }
             teams.append(team)
 
-        logger.info(f"[数据库查询] 查询到{len(teams)}支队伍")
+        total_capacity = sum(t["rescue_capacity"] for t in teams)
+        logger.info(f"[数据库查询] 查询到{len(teams)}支队伍，总救援容量{total_capacity}人")
         return teams
 
     except Exception as e:
@@ -782,6 +841,7 @@ def _calculate_match_scores(
             "distance_km": round(distance_km, 2),
             "availability_score": 1.0,  # 数据库查询已过滤standby状态
             "match_score": round(match_score, 3),
+            "rescue_capacity": team.get("rescue_capacity", 0),  # 救援容量
             # 扩展字段
             "eta_minutes": round(eta_minutes, 1),
             "capability_level": capability_level,
@@ -818,15 +878,19 @@ def _generate_greedy_solution(
     capability_requirements: List[Dict[str, Any]],
     strategy: str,
     solution_id: str,
+    estimated_trapped: int = 0,
 ) -> Optional[AllocationSolution]:
     """
     使用贪心策略生成分配方案
+    
+    修复版本：同时考虑能力覆盖和救援容量，不会在能力覆盖100%时就停止
 
     Args:
         candidates: 候选资源列表
         capability_requirements: 能力需求列表
         strategy: 策略 (match_score/distance/availability)
         solution_id: 方案ID
+        estimated_trapped: 被困人数，用于计算最低救援容量需求
 
     Returns:
         分配方案或None
@@ -844,35 +908,133 @@ def _generate_greedy_solution(
     else:
         sorted_candidates = list(candidates)
 
+    # 计算最低救援容量需求（被困人数的80%）
+    min_capacity_required = int(estimated_trapped * 0.8) if estimated_trapped > 0 else 0
+    logger.info(f"[贪心-容量] 被困人数={estimated_trapped}，最低容量需求={min_capacity_required}")
+
     # 贪心分配
     required_caps = {cap["capability_code"] for cap in capability_requirements}
     covered_caps: set = set()
     allocations: List[Dict[str, Any]] = []
     max_eta = 0.0
     total_distance = 0.0
+    total_capacity = 0  # 累计救援容量
+    capability_covered = False  # 标记能力是否已全覆盖
+    selected_ids: set = set()  # 已选择的队伍ID，避免重复
 
     for candidate in sorted_candidates:
+        if candidate["resource_id"] in selected_ids:
+            continue
+            
         candidate_caps = set(candidate["capabilities"])
         new_caps = candidate_caps - covered_caps
         assignable_caps = new_caps.intersection(required_caps)
+        candidate_capacity = candidate.get("rescue_capacity", 0)
 
+        # 决策逻辑：
+        # 1. 如果有新能力可覆盖，必须选择
+        # 2. 如果能力已全覆盖但容量不足，也要选择（只要有救援容量）
+        should_select = False
+        select_reason = ""
+        
         if assignable_caps:
+            should_select = True
+            select_reason = f"新增能力{assignable_caps}"
+        elif capability_covered and total_capacity < min_capacity_required and candidate_capacity > 0:
+            should_select = True
+            select_reason = f"容量不足({total_capacity}<{min_capacity_required})，增加容量{candidate_capacity}"
+
+        if should_select:
+            # 容量补充队伍：使用队伍与需求的交集能力（而非空列表）
+            effective_caps = assignable_caps if assignable_caps else candidate_caps.intersection(required_caps)
             allocations.append({
                 "resource_id": candidate["resource_id"],
                 "resource_name": candidate["resource_name"],
                 "resource_type": candidate["resource_type"],
-                "assigned_capabilities": list(assignable_caps),
+                "assigned_capabilities": list(effective_caps),
                 "match_score": candidate["match_score"],
                 "distance_km": candidate["distance_km"],
                 "eta_minutes": candidate.get("eta_minutes", 0),
+                "rescue_capacity": candidate_capacity,
             })
+            selected_ids.add(candidate["resource_id"])
             covered_caps.update(assignable_caps)
             max_eta = max(max_eta, candidate.get("eta_minutes", 0))
             total_distance = max(total_distance, candidate["distance_km"])
+            total_capacity += candidate_capacity
+            
+            logger.debug(f"[贪心-选择] {candidate['resource_name']}: {select_reason}，累计容量={total_capacity}")
 
-        # 所有能力都已覆盖
+        # 检查能力是否全覆盖
         if covered_caps.issuperset(required_caps):
-            break
+            if not capability_covered:
+                logger.info(f"[贪心-能力] 能力已全覆盖，当前容量={total_capacity}，需求={min_capacity_required}")
+            capability_covered = True
+            
+            # 终止条件：能力全覆盖 AND 容量足够
+            if estimated_trapped == 0 or total_capacity >= min_capacity_required:
+                logger.info(f"[贪心-完成] 能力覆盖100%且容量足够，总容量={total_capacity}")
+                break
+
+    if not allocations:
+        return None
+    
+    # === 冗余性增强阶段 ===
+    # 统计每个能力被多少队伍覆盖
+    capability_coverage_count: Dict[str, int] = {cap: 0 for cap in required_caps}
+    for alloc in allocations:
+        for cap in alloc.get("assigned_capabilities", []):
+            if cap in capability_coverage_count:
+                capability_coverage_count[cap] += 1
+    
+    # 找出低冗余能力（只有1个队伍覆盖）
+    low_redundancy_caps = {cap for cap, count in capability_coverage_count.items() if count <= 1}
+    
+    if low_redundancy_caps:
+        logger.info(f"[贪心-冗余] 低冗余能力: {low_redundancy_caps}，尝试增加备份队伍")
+        
+        # 最多额外添加2支队伍提高冗余性
+        max_redundancy_teams = 2
+        added_for_redundancy = 0
+        
+        for candidate in sorted_candidates:
+            if added_for_redundancy >= max_redundancy_teams:
+                break
+            if candidate["resource_id"] in selected_ids:
+                continue
+            
+            candidate_caps = set(candidate["capabilities"])
+            # 检查是否能为低冗余能力提供备份
+            can_backup = candidate_caps.intersection(low_redundancy_caps)
+            
+            if can_backup:
+                allocations.append({
+                    "resource_id": candidate["resource_id"],
+                    "resource_name": candidate["resource_name"],
+                    "resource_type": candidate["resource_type"],
+                    "assigned_capabilities": list(can_backup),
+                    "match_score": candidate["match_score"],
+                    "distance_km": candidate["distance_km"],
+                    "eta_minutes": candidate.get("eta_minutes", 0),
+                    "rescue_capacity": candidate.get("rescue_capacity", 0),
+                })
+                selected_ids.add(candidate["resource_id"])
+                total_capacity += candidate.get("rescue_capacity", 0)
+                max_eta = max(max_eta, candidate.get("eta_minutes", 0))
+                total_distance = max(total_distance, candidate["distance_km"])
+                added_for_redundancy += 1
+                
+                # 更新覆盖计数
+                for cap in can_backup:
+                    capability_coverage_count[cap] += 1
+                
+                # 重新计算低冗余能力
+                low_redundancy_caps = {cap for cap, count in capability_coverage_count.items() if count <= 1}
+                
+                logger.info(f"[贪心-冗余] 添加备份队伍: {candidate['resource_name']}，为能力{can_backup}提供备份")
+        
+        if added_for_redundancy > 0:
+            logger.info(f"[贪心-冗余] 冗余增强完成，额外添加{added_for_redundancy}支队伍")
 
     if not allocations:
         return None
@@ -880,9 +1042,39 @@ def _generate_greedy_solution(
     # 计算方案指标
     coverage_rate = len(covered_caps.intersection(required_caps)) / len(required_caps) if required_caps else 1.0
     avg_score = sum(a["match_score"] for a in allocations) / len(allocations)
+    capacity_coverage = total_capacity / estimated_trapped if estimated_trapped > 0 else 1.0
 
     # 未覆盖的能力
     uncovered = required_caps - covered_caps
+    
+    # 生成容量警告（分级）
+    capacity_warning: Optional[str] = None
+    if estimated_trapped > 0:
+        capacity_gap = estimated_trapped - total_capacity
+        if capacity_coverage < 0.5:
+            # 严重不足：覆盖率<50%
+            capacity_warning = (
+                f"🚨 救援容量严重不足！被困{estimated_trapped}人，"
+                f"派出队伍总容量仅{total_capacity}人（覆盖率{capacity_coverage*100:.1f}%），"
+                f"缺口{capacity_gap}人。必须紧急请求国家级增援！"
+            )
+            logger.error(f"[贪心-严重警告] {capacity_warning}")
+        elif capacity_coverage < 0.8:
+            # 不足：覆盖率50%-80%
+            capacity_warning = (
+                f"⚠️ 救援容量不足！被困{estimated_trapped}人，"
+                f"派出队伍总容量{total_capacity}人（覆盖率{capacity_coverage*100:.1f}%），"
+                f"缺口{capacity_gap}人。建议紧急请求省级增援！"
+            )
+            logger.warning(f"[贪心-警告] {capacity_warning}")
+        elif capacity_coverage < 1.0:
+            # 轻度不足：覆盖率80%-100%
+            capacity_warning = (
+                f"⚠ 救援容量存在缺口。被困{estimated_trapped}人，"
+                f"派出队伍总容量{total_capacity}人（覆盖率{capacity_coverage*100:.1f}%），"
+                f"缺口{capacity_gap}人。建议申请额外增援以确保全员获救。"
+            )
+            logger.warning(f"[贪心-提示] {capacity_warning}")
 
     solution: AllocationSolution = {
         "solution_id": solution_id,
@@ -890,8 +1082,11 @@ def _generate_greedy_solution(
         "total_score": round(avg_score, 3),
         "response_time_min": round(max_eta, 1),
         "coverage_rate": round(coverage_rate, 3),
-        "cost_estimate": len(allocations) * 1000,
+        "resource_scale": len(allocations),
         "risk_level": round(1.0 - coverage_rate, 3),
+        "total_rescue_capacity": total_capacity,
+        "capacity_coverage_rate": round(capacity_coverage, 3),
+        "capacity_warning": capacity_warning,
         # 扩展字段
         "uncovered_capabilities": list(uncovered) if uncovered else [],
         "max_distance_km": round(total_distance, 2),

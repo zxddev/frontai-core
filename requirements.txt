@@ -37,3 +37,6 @@ jieba>=0.42.1
 dashscope>=1.14.0
 websockets>=12.0
 aiohttp>=3.9.0
+# TTS语音合成
+tritonclient[grpc]>=2.40.0
+soundfile>=0.12.0

@@ -27,6 +27,7 @@ class DisasterParseResult(BaseModel):
     """灾情解析结果"""
     disaster_type: str = Field(description="灾害类型: earthquake/fire/flood/hazmat/landslide")
     severity: str = Field(description="严重程度: critical/high/medium/low")
+    magnitude: Optional[float] = Field(default=None, description="震级（仅地震时填写，如6.5、7.0）")
     has_building_collapse: bool = Field(description="是否有建筑倒塌")
     has_trapped_persons: bool = Field(description="是否有被困人员")
     estimated_trapped: int = Field(description="预估被困人数")
@@ -48,30 +49,41 @@ class RescuePriorityResult(BaseModel):
 
 
 class SchemeExplanation(BaseModel):
-    """方案解释"""
-    summary: str = Field(description="方案摘要")
-    selection_reason: str = Field(description="选择该方案的原因")
-    key_advantages: List[str] = Field(description="关键优势")
-    potential_risks: List[str] = Field(description="潜在风险")
-    mitigation_measures: List[str] = Field(description="风险缓解措施")
-    execution_suggestions: List[str] = Field(description="执行建议")
+    """方案解释 - 给指挥员的详细说明"""
+    summary: str = Field(description="方案摘要（100-200字，概述整体救援策略）")
+    situation_assessment: str = Field(description="态势评估（当前灾情严重程度、紧迫性、主要威胁分析）")
+    selection_reason: str = Field(description="方案选择理由（为什么推荐此方案，与备选方案对比）")
+    key_advantages: List[str] = Field(description="关键优势（至少5条，每条详细说明）")
+    resource_deployment: List[str] = Field(description="资源部署说明（每支队伍的具体任务、到达时间、负责区域）")
+    timeline: List[str] = Field(description="时间线规划（按小时划分的行动计划）")
+    coordination_points: List[str] = Field(description="协调要点（各队伍之间如何配合、通信频率）")
+    potential_risks: List[str] = Field(description="潜在风险（至少3条，包括环境风险、人员风险、设备风险）")
+    mitigation_measures: List[str] = Field(description="风险缓解措施（对应每个风险的具体应对方案）")
+    execution_suggestions: List[str] = Field(description="执行建议（至少5条具体可操作的建议）")
+    commander_notes: str = Field(description="指挥员注意事项（特别提醒、决策要点、应急预案触发条件）")
 
 
 # ============================================================================
 # LLM客户端获取
 # ============================================================================
 
-def _get_llm() -> ChatOpenAI:
-    """获取LLM客户端实例"""
+def _get_llm(max_tokens: int = 4096) -> ChatOpenAI:
+    """
+    获取LLM客户端实例
+    
+    Args:
+        max_tokens: 最大输出token数，默认4096，方案解释建议使用8192
+    """
     llm_model = os.environ.get('LLM_MODEL', '/models/openai/gpt-oss-120b')
     openai_base_url = os.environ.get('OPENAI_BASE_URL', 'http://192.168.31.50:8000/v1')
     openai_api_key = os.environ.get('OPENAI_API_KEY', 'dummy_key')
-    request_timeout = int(os.environ.get('REQUEST_TIMEOUT', '120'))
+    request_timeout = int(os.environ.get('REQUEST_TIMEOUT', '180'))
     return ChatOpenAI(
         model=llm_model,
         base_url=openai_base_url,
         api_key=openai_api_key,
         timeout=request_timeout,
+        max_tokens=max_tokens,
         max_retries=0,  # 禁止内部重试，失败直接抛错
     )
 
@@ -336,42 +348,79 @@ async def explain_scheme_async(
     scheme: Dict[str, Any],
     disaster_info: Dict[str, Any],
     alternatives: Optional[List[Dict[str, Any]]] = None,
+    task_sequence: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """异步版本的方案解释"""
-    logger.info("异步调用LLM生成方案解释")
+    """
+    异步版本的方案解释 - 为指挥员生成详细的方案说明
     
-    llm = _get_llm()
+    Args:
+        scheme: 推荐方案
+        disaster_info: 灾情信息
+        alternatives: 备选方案
+        task_sequence: HTN任务序列
+    """
+    logger.info("异步调用LLM生成详细方案解释")
+    
+    # 使用更大的max_tokens以避免输出截断
+    llm = _get_llm(max_tokens=8192)
     parser = JsonOutputParser(pydantic_object=SchemeExplanation)
     
-    system_prompt = """你是应急救灾方案专家，负责解释救援方案。
+    system_prompt = """你是资深应急救灾指挥专家，正在为前线指挥员生成救援方案说明。
 
-请根据方案内容和灾情信息，生成清晰的方案说明，包括：
-1. 方案摘要
-2. 选择该方案的原因
-3. 关键优势
-4. 潜在风险及缓解措施
-5. 执行建议
+【重要提醒】
+- 这是真实的救灾场景，方案说明将直接用于指挥决策
+- 必须详细、准确、可操作，不能遗漏关键信息
+- 每个字段都要尽量详细，给指挥员足够的信息
+
+【输出要求】
+1. summary: 100-200字，概述整体救援策略，包括主要目标和关键行动
+2. situation_assessment: 详细分析当前态势，包括灾情严重程度、时间紧迫性、主要威胁
+3. selection_reason: 解释为什么选择此方案，与其他方案的对比优势
+4. key_advantages: 至少5条优势，每条要具体说明
+5. resource_deployment: 每支队伍的详细部署，包括任务、到达时间、负责区域、联系方式
+6. timeline: 按小时划分的详细行动计划（T+0到T+24小时）
+7. coordination_points: 各队伍协调配合要点，通信频率，指挥关系
+8. potential_risks: 至少3条风险，包括环境、人员、设备等方面
+9. mitigation_measures: 每个风险对应的具体缓解措施
+10. execution_suggestions: 至少5条可操作的具体建议
+11. commander_notes: 指挥员特别注意事项，包括决策要点、应急预案触发条件
 
 {format_instructions}"""
 
-    human_prompt = """灾情信息：
+    human_prompt = """【灾情信息】
 {disaster_info}
 
-推荐方案：
+【HTN任务序列】
+{task_sequence_info}
+
+【推荐方案详情】
 {scheme}
 
+【备选方案对比】
 {alternatives_info}
 
-请生成方案解释。"""
+请生成详细的方案解释，确保内容完整不截断。"""
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", human_prompt),
     ])
     
-    alternatives_info = ""
+    alternatives_info = "无备选方案"
     if alternatives:
-        alternatives_info = f"备选方案：\n{json.dumps(alternatives[:3], ensure_ascii=False, indent=2)}"
+        alt_summaries = []
+        for i, alt in enumerate(alternatives[:3]):
+            alt_summaries.append(f"方案{i+1}: {len(alt.get('allocations', []))}支队伍, "
+                               f"响应时间{alt.get('response_time_min', 0):.0f}分钟, "
+                               f"覆盖率{alt.get('coverage_rate', 0)*100:.0f}%")
+        alternatives_info = "\n".join(alt_summaries)
+    
+    task_sequence_info = "无任务序列信息"
+    if task_sequence:
+        task_summaries = []
+        for t in task_sequence[:10]:
+            task_summaries.append(f"- {t.get('task_id')}: {t.get('task_name')} (依赖:{t.get('depends_on', [])})")
+        task_sequence_info = "\n".join(task_summaries)
     
     chain = prompt | llm | parser
     
@@ -380,6 +429,7 @@ async def explain_scheme_async(
             "disaster_info": json.dumps(disaster_info, ensure_ascii=False, indent=2),
             "scheme": json.dumps(scheme, ensure_ascii=False, indent=2),
             "alternatives_info": alternatives_info,
+            "task_sequence_info": task_sequence_info,
             "format_instructions": parser.get_format_instructions(),
         })
         logger.info("异步LLM方案解释生成完成")

@@ -319,4 +319,96 @@ def _get_default_rules(disaster_info: Dict[str, Any]) -> List[Dict[str, Any]]:
                 ],
             })
     
+    # 火灾默认规则
+    elif disaster_type == "fire":
+        default_rules.append({
+            "rule_id": "DEFAULT-FIRE-001",
+            "rule_name": "默认火灾扑救规则",
+            "disaster_type": "fire",
+            "priority": "critical",
+            "weight": 0.95,
+            "trigger_conditions": [],
+            "triggered_tasks": [
+                {"task_code": "FIRE_SUPPRESSION", "task_name": "火灾扑救", "priority": "critical", "sequence": 1},
+                {"task_code": "SEARCH_RESCUE", "task_name": "搜索救援", "priority": "critical", "sequence": 2},
+                {"task_code": "MEDICAL_EMERGENCY", "task_name": "医疗急救", "priority": "high", "sequence": 3},
+            ],
+            "required_capabilities": [
+                {"capability_code": "FIRE_SUPPRESSION", "capability_name": "火灾扑救"},
+                {"capability_code": "STRUCTURAL_RESCUE", "capability_name": "结构救援"},
+                {"capability_code": "LIFE_DETECTION", "capability_name": "生命探测"},
+                {"capability_code": "MEDICAL_TRIAGE", "capability_name": "医疗分诊"},
+                {"capability_code": "EMERGENCY_TREATMENT", "capability_name": "紧急救治"},
+            ],
+        })
+    
+    # 危化品泄漏默认规则
+    elif disaster_type == "hazmat":
+        default_rules.append({
+            "rule_id": "DEFAULT-HAZMAT-001",
+            "rule_name": "默认危化品处置规则",
+            "disaster_type": "hazmat",
+            "priority": "critical",
+            "weight": 0.95,
+            "trigger_conditions": [],
+            "triggered_tasks": [
+                {"task_code": "HAZMAT_DETECTION", "task_name": "危化品侦检", "priority": "critical", "sequence": 1},
+                {"task_code": "HAZMAT_CONTAINMENT", "task_name": "危化品堵漏", "priority": "critical", "sequence": 2},
+                {"task_code": "EVACUATION", "task_name": "人员疏散", "priority": "critical", "sequence": 3},
+                {"task_code": "MEDICAL_EMERGENCY", "task_name": "医疗急救", "priority": "high", "sequence": 4},
+            ],
+            "required_capabilities": [
+                {"capability_code": "HAZMAT_DETECTION", "capability_name": "危化品侦检"},
+                {"capability_code": "HAZMAT_CONTAINMENT", "capability_name": "危化品堵漏"},
+                {"capability_code": "EVACUATION_COORDINATION", "capability_name": "疏散协调"},
+                {"capability_code": "MEDICAL_TRIAGE", "capability_name": "医疗分诊"},
+                {"capability_code": "EMERGENCY_TREATMENT", "capability_name": "紧急救治"},
+            ],
+        })
+    
+    # 洪水/泥石流默认规则
+    elif disaster_type in ("flood", "landslide"):
+        default_rules.append({
+            "rule_id": "DEFAULT-FLOOD-001",
+            "rule_name": "默认洪水/泥石流救援规则",
+            "disaster_type": disaster_type,
+            "priority": "critical",
+            "weight": 0.9,
+            "trigger_conditions": [],
+            "triggered_tasks": [
+                {"task_code": "WATER_RESCUE", "task_name": "水上救援", "priority": "critical", "sequence": 1},
+                {"task_code": "SEARCH_RESCUE", "task_name": "搜索救援", "priority": "critical", "sequence": 2},
+                {"task_code": "EVACUATION", "task_name": "人员疏散", "priority": "critical", "sequence": 3},
+                {"task_code": "MEDICAL_EMERGENCY", "task_name": "医疗急救", "priority": "high", "sequence": 4},
+            ],
+            "required_capabilities": [
+                {"capability_code": "WATER_RESCUE", "capability_name": "水上救援"},
+                {"capability_code": "STRUCTURAL_RESCUE", "capability_name": "结构救援"},
+                {"capability_code": "LIFE_DETECTION", "capability_name": "生命探测"},
+                {"capability_code": "EVACUATION_COORDINATION", "capability_name": "疏散协调"},
+                {"capability_code": "MEDICAL_TRIAGE", "capability_name": "医疗分诊"},
+            ],
+        })
+    
+    # 未知灾害类型：通用救援规则
+    else:
+        default_rules.append({
+            "rule_id": "DEFAULT-GENERAL-001",
+            "rule_name": "通用应急救援规则",
+            "disaster_type": disaster_type,
+            "priority": "high",
+            "weight": 0.8,
+            "trigger_conditions": [],
+            "triggered_tasks": [
+                {"task_code": "SEARCH_RESCUE", "task_name": "搜索救援", "priority": "critical", "sequence": 1},
+                {"task_code": "MEDICAL_EMERGENCY", "task_name": "医疗急救", "priority": "high", "sequence": 2},
+            ],
+            "required_capabilities": [
+                {"capability_code": "STRUCTURAL_RESCUE", "capability_name": "结构救援"},
+                {"capability_code": "LIFE_DETECTION", "capability_name": "生命探测"},
+                {"capability_code": "MEDICAL_TRIAGE", "capability_name": "医疗分诊"},
+                {"capability_code": "EMERGENCY_TREATMENT", "capability_name": "紧急救治"},
+            ],
+        })
+    
     return default_rules

@@ -29,14 +29,23 @@ HARD_RULES = [
     {
         "rule_id": "HR-EM-002",
         "name": "黄金救援时间",
-        "check": lambda scheme: scheme.get("response_time_min", 0) <= 60,  # 1小时内响应
-        "message": "预计响应时间超过黄金救援时间",
+        # 地震黄金72小时，首批救援队伍应在4小时内到达
+        # 考虑山区、偏远地区实际情况，设置为180分钟
+        "check": lambda scheme: scheme.get("response_time_min", 0) <= 180,
+        "message": "预计响应时间超过3小时，方案否决",
     },
     {
         "rule_id": "HR-EM-003",
         "name": "关键能力覆盖",
-        "check": lambda scheme: scheme.get("coverage_rate", 0) >= 0.8,  # 至少80%覆盖
-        "message": "关键能力覆盖率不足80%",
+        "check": lambda scheme: scheme.get("coverage_rate", 0) >= 0.7,  # 至少70%覆盖
+        "message": "关键能力覆盖率不足70%",
+    },
+    {
+        "rule_id": "HR-EM-004",
+        "name": "救援容量底线",
+        # 救援容量必须覆盖至少50%被困人员，否则资源严重不足
+        "check": lambda scheme: scheme.get("capacity_coverage_rate", 1.0) >= 0.5,
+        "message": "救援容量覆盖率不足50%，资源严重不足需紧急增援",
     },
 ]
 
@@ -244,14 +253,115 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
     
     # 确定推荐方案
     recommended_scheme: AllocationSolution | None = None
+    requires_reinforcement: bool = False
+    reinforcement_message: str = ""
+    
     if passed_scores:
+        # 正常情况：选择得分最高的通过方案
         best_score = passed_scores[0]
         recommended_scheme = solution_map.get(best_score["scheme_id"])
+    elif solutions:
+        # 巨灾场景：所有方案都被硬规则否决，仍需输出最佳可用方案
+        logger.warning("[巨灾模式] 所有方案被硬规则否决，启用紧急增援模式")
+        requires_reinforcement = True
+        
+        # 选择救援容量最大的方案
+        best_solution = max(solutions, key=lambda s: s.get("total_rescue_capacity", 0))
+        recommended_scheme = best_solution
+        
+        # 为巨灾方案计算5维评分（即使硬规则未通过也需要评估）
+        catastrophe_success_rate = _calculate_success_rate(best_solution, similar_cases)
+        catastrophe_response_time = best_solution.get("response_time_min", 60)
+        catastrophe_time_score = max(0, 1 - catastrophe_response_time / 120)
+        catastrophe_coverage = best_solution.get("coverage_rate", 0)
+        catastrophe_risk = 1 - best_solution.get("risk_level", 0)
+        catastrophe_redundancy = _calculate_redundancy_rate(best_solution, capability_requirements)
+        
+        catastrophe_weighted = (
+            catastrophe_success_rate * weights.get("success_rate", 0.35) +
+            catastrophe_time_score * weights.get("response_time", 0.30) +
+            catastrophe_coverage * weights.get("coverage_rate", 0.20) +
+            catastrophe_risk * weights.get("risk", 0.05) +
+            catastrophe_redundancy * weights.get("redundancy", 0.10)
+        )
+        
+        # 更新该方案在scheme_scores中的评分
+        for score in scheme_scores:
+            if score["scheme_id"] == best_solution["solution_id"]:
+                score["soft_rule_scores"] = {
+                    "success_rate": round(catastrophe_success_rate, 3),
+                    "response_time": round(catastrophe_time_score, 3),
+                    "coverage_rate": round(catastrophe_coverage, 3),
+                    "risk": round(catastrophe_risk, 3),
+                    "redundancy": round(catastrophe_redundancy, 3),
+                }
+                score["weighted_score"] = round(catastrophe_weighted, 3)
+                score["rank"] = 1  # 巨灾模式下为唯一推荐
+                score["catastrophe_mode"] = True
+                break
+        
+        logger.info(f"[巨灾模式] 方案5维评分: 综合={catastrophe_weighted:.3f}, 成功率={catastrophe_success_rate:.3f}")
+        
+        # 计算增援需求
+        estimated_trapped = parsed_disaster.get("estimated_trapped", 0)
+        current_capacity = best_solution.get("total_rescue_capacity", 0)
+        capacity_gap = max(0, estimated_trapped - current_capacity)
+        capacity_rate = current_capacity / estimated_trapped if estimated_trapped > 0 else 0
+        
+        # 生成增援建议
+        if capacity_rate < 0.3:
+            reinforcement_level = "国家级"
+            reinforcement_message = (
+                f"🚨🚨🚨 特大灾害！本地资源严重不足！\n"
+                f"被困人数: {estimated_trapped}人\n"
+                f"本地救援容量: {current_capacity}人（仅覆盖{capacity_rate*100:.1f}%）\n"
+                f"容量缺口: {capacity_gap}人\n\n"
+                f"⚡ 紧急建议:\n"
+                f"1. 立即启动国家级应急响应\n"
+                f"2. 请求国家救援队、武警部队增援\n"
+                f"3. 协调周边省份救援力量跨区支援\n"
+                f"4. 本方案仅为首批先遣力量，必须等待增援到位后扩大救援规模"
+            )
+        elif capacity_rate < 0.5:
+            reinforcement_level = "省级"
+            reinforcement_message = (
+                f"🚨🚨 重大灾害！本地资源不足！\n"
+                f"被困人数: {estimated_trapped}人\n"
+                f"本地救援容量: {current_capacity}人（仅覆盖{capacity_rate*100:.1f}%）\n"
+                f"容量缺口: {capacity_gap}人\n\n"
+                f"⚡ 紧急建议:\n"
+                f"1. 立即启动省级应急响应\n"
+                f"2. 请求省级专业救援队增援\n"
+                f"3. 协调相邻地市救援力量支援\n"
+                f"4. 本方案为首批响应力量，需省级增援补充"
+            )
+        else:
+            reinforcement_level = "市级"
+            reinforcement_message = (
+                f"⚠️ 灾害较重，建议申请增援\n"
+                f"被困人数: {estimated_trapped}人\n"
+                f"本地救援容量: {current_capacity}人（覆盖{capacity_rate*100:.1f}%）\n"
+                f"容量缺口: {capacity_gap}人\n\n"
+                f"建议: 向市级应急指挥部申请增援力量"
+            )
+        
+        # 更新方案的容量警告
+        if recommended_scheme:
+            recommended_scheme["capacity_warning"] = reinforcement_message
+            recommended_scheme["requires_reinforcement"] = True
+            recommended_scheme["reinforcement_level"] = reinforcement_level
+            recommended_scheme["capacity_gap"] = capacity_gap
+        
+        logger.warning(
+            f"[巨灾模式] 需要{reinforcement_level}增援，容量缺口{capacity_gap}人",
+            extra={"estimated_trapped": estimated_trapped, "current_capacity": current_capacity}
+        )
     
     # 更新追踪信息
     trace = state.get("trace", {})
     trace["phases_executed"] = trace.get("phases_executed", []) + ["score_soft_rules"]
     trace["soft_rules_weights"] = weights
+    trace["requires_reinforcement"] = requires_reinforcement
     
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(
@@ -259,6 +369,7 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
         extra={
             "scored_count": len(passed_scores),
             "best_score": passed_scores[0]["weighted_score"] if passed_scores else 0,
+            "requires_reinforcement": requires_reinforcement,
             "elapsed_ms": elapsed_ms,
         }
     )
@@ -266,16 +377,18 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
     return {
         "scheme_scores": scheme_scores,
         "recommended_scheme": recommended_scheme,
+        "requires_reinforcement": requires_reinforcement,
+        "reinforcement_message": reinforcement_message,
         "trace": trace,
     }
 
 
 async def explain_scheme(state: EmergencyAIState) -> Dict[str, Any]:
     """
-    方案解释节点：使用LLM生成方案解释
+    方案解释节点：使用LLM生成详细的方案解释
     
-    为推荐方案生成自然语言解释，包括选择理由、
-    优势、风险和执行建议。
+    为指挥员生成完整的救援方案说明，包括态势评估、
+    资源部署、时间线、协调要点、风险缓解等。
     
     Args:
         state: 当前状态
@@ -283,46 +396,87 @@ async def explain_scheme(state: EmergencyAIState) -> Dict[str, Any]:
     Returns:
         更新的状态字段
     """
-    logger.info("执行方案解释节点", extra={"event_id": state["event_id"]})
+    logger.info("执行方案解释节点（详细版）", extra={"event_id": state["event_id"]})
     start_time = time.time()
     
-    # 获取推荐方案
+    # 获取推荐方案和相关信息
     recommended_scheme = state.get("recommended_scheme")
     parsed_disaster = state.get("parsed_disaster", {})
     pareto_solutions = state.get("pareto_solutions", [])
+    task_sequence = state.get("task_sequence", [])
     
     if not recommended_scheme:
         logger.warning("无推荐方案，跳过解释生成")
         return {"scheme_explanation": "无可用方案"}
     
-    # 调用LLM生成解释
+    # 调用LLM生成详细解释
     try:
         explanation_result = await explain_scheme_async(
             scheme=recommended_scheme,
             disaster_info=parsed_disaster,
             alternatives=pareto_solutions[:3] if pareto_solutions else None,
+            task_sequence=task_sequence,
         )
         
-        # 构建解释文本
+        # 构建完整的解释文本（Markdown格式）
         explanation_parts = [
-            f"## 方案摘要\n{explanation_result.get('summary', '')}",
-            f"\n## 选择理由\n{explanation_result.get('selection_reason', '')}",
+            "# 救援方案详细说明",
+            f"\n## 一、方案摘要\n{explanation_result.get('summary', '')}",
+            f"\n## 二、态势评估\n{explanation_result.get('situation_assessment', '')}",
+            f"\n## 三、方案选择理由\n{explanation_result.get('selection_reason', '')}",
         ]
         
+        # 关键优势
         advantages = explanation_result.get("key_advantages", [])
         if advantages:
-            explanation_parts.append(f"\n## 关键优势\n" + "\n".join(f"- {a}" for a in advantages))
+            explanation_parts.append("\n## 四、关键优势")
+            for i, a in enumerate(advantages, 1):
+                explanation_parts.append(f"{i}. {a}")
         
+        # 资源部署
+        deployments = explanation_result.get("resource_deployment", [])
+        if deployments:
+            explanation_parts.append("\n## 五、资源部署详情")
+            for d in deployments:
+                explanation_parts.append(f"- {d}")
+        
+        # 时间线
+        timeline = explanation_result.get("timeline", [])
+        if timeline:
+            explanation_parts.append("\n## 六、行动时间线")
+            for t in timeline:
+                explanation_parts.append(f"- {t}")
+        
+        # 协调要点
+        coordination = explanation_result.get("coordination_points", [])
+        if coordination:
+            explanation_parts.append("\n## 七、协调配合要点")
+            for c in coordination:
+                explanation_parts.append(f"- {c}")
+        
+        # 风险与缓解
         risks = explanation_result.get("potential_risks", [])
         mitigations = explanation_result.get("mitigation_measures", [])
         if risks:
-            explanation_parts.append(f"\n## 潜在风险\n" + "\n".join(f"- {r}" for r in risks))
+            explanation_parts.append("\n## 八、潜在风险")
+            for i, r in enumerate(risks, 1):
+                explanation_parts.append(f"{i}. {r}")
         if mitigations:
-            explanation_parts.append(f"\n## 风险缓解\n" + "\n".join(f"- {m}" for m in mitigations))
+            explanation_parts.append("\n## 九、风险缓解措施")
+            for i, m in enumerate(mitigations, 1):
+                explanation_parts.append(f"{i}. {m}")
         
+        # 执行建议
         suggestions = explanation_result.get("execution_suggestions", [])
         if suggestions:
-            explanation_parts.append(f"\n## 执行建议\n" + "\n".join(f"- {s}" for s in suggestions))
+            explanation_parts.append("\n## 十、执行建议")
+            for i, s in enumerate(suggestions, 1):
+                explanation_parts.append(f"{i}. {s}")
+        
+        # 指挥员注意事项
+        commander_notes = explanation_result.get("commander_notes", "")
+        if commander_notes:
+            explanation_parts.append(f"\n## 十一、指挥员特别注意事项\n{commander_notes}")
         
         scheme_explanation = "\n".join(explanation_parts)
         

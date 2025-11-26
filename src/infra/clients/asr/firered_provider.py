@@ -9,12 +9,56 @@ import asyncio
 import io
 import logging
 import os
+import struct
 import time
 from typing import Optional
 
 from .base import ASRConfig, ASRError, ASRProvider, ASRResult
 
 logger = logging.getLogger(__name__)
+
+
+def _pcm_to_wav(pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """将原始PCM数据转换为WAV格式。
+    
+    Args:
+        pcm_data: 原始PCM音频数据
+        sample_rate: 采样率，默认16000
+        channels: 声道数，默认1（单声道）
+        bits_per_sample: 位深度，默认16位
+        
+    Returns:
+        带WAV头的音频数据
+    """
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    data_size = len(pcm_data)
+    
+    wav_buffer = io.BytesIO()
+    # RIFF header
+    wav_buffer.write(b'RIFF')
+    wav_buffer.write(struct.pack('<I', 36 + data_size))  # file size - 8
+    wav_buffer.write(b'WAVE')
+    # fmt chunk
+    wav_buffer.write(b'fmt ')
+    wav_buffer.write(struct.pack('<I', 16))  # fmt chunk size
+    wav_buffer.write(struct.pack('<H', 1))   # audio format (1 = PCM)
+    wav_buffer.write(struct.pack('<H', channels))
+    wav_buffer.write(struct.pack('<I', sample_rate))
+    wav_buffer.write(struct.pack('<I', byte_rate))
+    wav_buffer.write(struct.pack('<H', block_align))
+    wav_buffer.write(struct.pack('<H', bits_per_sample))
+    # data chunk
+    wav_buffer.write(b'data')
+    wav_buffer.write(struct.pack('<I', data_size))
+    wav_buffer.write(pcm_data)
+    
+    return wav_buffer.getvalue()
+
+
+def _is_wav_format(data: bytes) -> bool:
+    """检查数据是否为WAV格式。"""
+    return len(data) > 12 and data[:4] == b'RIFF' and data[8:12] == b'WAVE'
 
 
 class FireRedASRProvider(ASRProvider):
@@ -98,6 +142,11 @@ class FireRedASRProvider(ASRProvider):
 
         url = f"{self._url}/v1/audio/transcriptions"
 
+        # 检测并转换PCM为WAV格式
+        if not _is_wav_format(audio_data) and cfg.format in ("wav", "pcm", "raw"):
+            logger.info("检测到原始PCM数据，转换为WAV格式")
+            audio_data = _pcm_to_wav(audio_data)
+
         logger.info(
             "FireRedASR开始识别",
             extra={"url": url, "size": len(audio_data), "format": cfg.format},
@@ -106,9 +155,8 @@ class FireRedASRProvider(ASRProvider):
         try:
             session = await self._get_session()
 
-            # 根据格式确定文件扩展名
-            ext = "wav" if cfg.format in ("wav", "pcm") else cfg.format
-            filename = f"audio.{ext}"
+            # 统一使用wav格式
+            filename = "audio.wav"
 
             # 构建 multipart/form-data
             data = aiohttp.FormData()
@@ -116,7 +164,7 @@ class FireRedASRProvider(ASRProvider):
                 "file",
                 io.BytesIO(audio_data),
                 filename=filename,
-                content_type=f"audio/{ext}",
+                content_type="audio/wav",
             )
             data.add_field("model", self._model)
 

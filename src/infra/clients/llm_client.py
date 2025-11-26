@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging  # 日志记录
 from langchain_openai import ChatOpenAI  # 引入 ChatOpenAI
 
-from infra.settings import Settings  # 引入配置
+from src.infra.settings import Settings  # 引入配置
 
 logger = logging.getLogger(__name__)  # 初始化日志器
 

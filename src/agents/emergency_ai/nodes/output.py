@@ -99,11 +99,25 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
             ],
         },
         
-        # 阶段3: 资源匹配
+        # 阶段3: 资源匹配（详细信息）
         "matching": {
             "candidates_count": len(state.get("resource_candidates", [])),
             "solutions_count": len(state.get("allocation_solutions", [])),
             "pareto_solutions_count": len(state.get("pareto_solutions", [])),
+            # 详细的候选资源列表
+            "candidates_detail": [
+                {
+                    "resource_id": c.get("resource_id"),
+                    "resource_name": c.get("resource_name"),
+                    "resource_type": c.get("resource_type"),
+                    "capabilities": c.get("capabilities", []),
+                    "distance_km": round(c.get("distance_km", 0), 1),
+                    "eta_minutes": round(c.get("eta_minutes", 0)),
+                    "match_score": round(c.get("match_score", 0), 3),
+                    "rescue_capacity": c.get("rescue_capacity", 0),  # 救援容量
+                }
+                for c in state.get("resource_candidates", [])[:20]  # 最多显示20个
+            ],
         },
         
         # 阶段4: 方案优化（5维评估）

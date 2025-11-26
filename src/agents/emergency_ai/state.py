@@ -17,6 +17,7 @@ class ParsedDisasterInfo(TypedDict):
     disaster_type: str                    # 灾害类型: earthquake/fire/hazmat等
     location: Dict[str, float]            # 位置: {longitude, latitude}
     severity: str                         # 严重程度: critical/high/medium/low
+    magnitude: Optional[float]            # 震级（地震专用，如6.5）
     has_building_collapse: bool           # 是否有建筑倒塌
     has_trapped_persons: bool             # 是否有被困人员
     estimated_trapped: int                # 预估被困人数
@@ -69,6 +70,7 @@ class ResourceCandidate(TypedDict):
     distance_km: float                    # 距离(km)
     availability_score: float             # 可用性评分
     match_score: float                    # 综合匹配分数
+    rescue_capacity: int                  # 救援容量（72小时内可救援人数）
 
 
 class AllocationSolution(TypedDict):
@@ -78,8 +80,11 @@ class AllocationSolution(TypedDict):
     total_score: float                    # 总分
     response_time_min: float              # 预计响应时间(分钟)
     coverage_rate: float                  # 能力覆盖率
-    cost_estimate: float                  # 成本估算
+    resource_scale: int                   # 资源调动规模（队伍数），仅供参考不参与评分
     risk_level: float                     # 风险等级
+    total_rescue_capacity: int            # 总救援容量（所有队伍容量之和）
+    capacity_coverage_rate: float         # 容量覆盖率（总容量/被困人数）
+    capacity_warning: Optional[str]       # 容量不足警告（覆盖率<80%时生成）
 
 
 class SchemeScore(TypedDict):
@@ -165,6 +170,7 @@ class EmergencyAIState(TypedDict):
     understanding_summary: str                              # 理解总结
     
     # ========== 阶段2: 规则推理 ==========
+    _kg_rules: List[Dict[str, Any]]                         # KG查询的原始TRR规则（中间状态）
     matched_rules: List[MatchedTRRRule]                     # 匹配的TRR规则
     task_requirements: List[Dict[str, Any]]                 # 任务需求列表
     capability_requirements: List[CapabilityRequirement]    # 能力需求列表
@@ -236,6 +242,7 @@ def create_initial_state(
         parsed_disaster=None,
         similar_cases=[],
         understanding_summary="",
+        _kg_rules=[],
         matched_rules=[],
         task_requirements=[],
         capability_requirements=[],
