@@ -513,3 +513,110 @@ class DispatchTasksResult(BaseModel):
     # 时间戳
     started_at: Optional[str] = Field(default=None, description="开始时间")
     completed_at: Optional[str] = Field(default=None, description="完成时间")
+
+
+# ============================================================================
+# 路径规划智能体接口
+# ============================================================================
+
+class RoutePlanningLocation(BaseModel):
+    """路径规划坐标点"""
+    lon: float = Field(..., description="经度")
+    lat: float = Field(..., description="纬度")
+
+
+class RoutePlanningVehicle(BaseModel):
+    """路径规划车辆信息"""
+    vehicle_id: str = Field(..., description="车辆ID")
+    vehicle_code: Optional[str] = Field(default=None, description="车辆编码")
+    vehicle_type: Optional[str] = Field(default="unknown", description="车辆类型")
+    max_speed_kmh: int = Field(default=60, description="最大速度(km/h)")
+    is_all_terrain: bool = Field(default=False, description="是否全地形")
+    capacity: int = Field(default=10, description="载重能力")
+    current_location: RoutePlanningLocation = Field(..., description="当前位置")
+
+
+class RoutePlanningTaskPoint(BaseModel):
+    """路径规划任务点"""
+    id: str = Field(..., description="任务点ID")
+    location: RoutePlanningLocation = Field(..., description="位置坐标")
+    demand: int = Field(default=1, description="需求量")
+    priority: int = Field(default=1, ge=1, le=5, description="优先级1-5")
+    time_window_start: Optional[int] = Field(default=None, description="时间窗开始(分钟)")
+    time_window_end: Optional[int] = Field(default=None, description="时间窗结束(分钟)")
+    service_time_min: int = Field(default=15, description="服务时间(分钟)")
+
+
+class RoutePlanningDisasterContext(BaseModel):
+    """路径规划灾情上下文"""
+    disaster_type: Optional[str] = Field(default=None, description="灾害类型")
+    severity: Optional[str] = Field(default=None, description="严重程度")
+    urgency_level: Optional[str] = Field(default="medium", description="紧急程度: critical/high/medium/low")
+    affected_roads: List[str] = Field(default_factory=list, description="受影响道路")
+    blocked_areas: List[str] = Field(default_factory=list, description="封锁区域")
+    weather_conditions: Optional[str] = Field(default=None, description="天气状况")
+
+
+class RoutePlanningRequest(BaseModel):
+    """路径规划请求"""
+    request_type: str = Field(..., description="规划类型: single/multi/replan")
+    
+    # 单车规划参数
+    start: Optional[RoutePlanningLocation] = Field(default=None, description="起点")
+    end: Optional[RoutePlanningLocation] = Field(default=None, description="终点")
+    vehicle_id: Optional[str] = Field(default=None, description="车辆ID")
+    
+    # 多车规划参数
+    vehicles: Optional[List[RoutePlanningVehicle]] = Field(default=None, description="车辆列表")
+    task_points: Optional[List[RoutePlanningTaskPoint]] = Field(default=None, description="任务点列表")
+    depot_location: Optional[RoutePlanningLocation] = Field(default=None, description="车辆基地位置")
+    
+    # 通用参数
+    scenario_id: Optional[str] = Field(default=None, description="想定ID")
+    constraints: Optional[Dict[str, Any]] = Field(default=None, description="约束条件")
+    disaster_context: Optional[RoutePlanningDisasterContext] = Field(default=None, description="灾情上下文")
+    natural_language_request: Optional[str] = Field(default=None, description="自然语言请求")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "request_type": "single",
+                "start": {"lon": 104.06, "lat": 30.67},
+                "end": {"lon": 104.12, "lat": 30.72},
+                "vehicle_id": "vehicle-001",
+                "disaster_context": {
+                    "disaster_type": "earthquake",
+                    "severity": "high",
+                    "urgency_level": "critical",
+                },
+                "natural_language_request": "尽快到达现场，避开塌方区域",
+            }
+        }
+
+
+class RoutePlanningTaskResponse(BaseModel):
+    """路径规划任务提交响应"""
+    success: bool = Field(..., description="是否成功")
+    task_id: str = Field(..., description="任务ID")
+    request_type: str = Field(..., description="规划类型")
+    status: str = Field(..., description="任务状态")
+    message: str = Field(..., description="状态消息")
+    created_at: datetime = Field(..., description="创建时间")
+
+
+class RoutePlanningResult(BaseModel):
+    """路径规划结果"""
+    request_id: str = Field(..., description="请求ID")
+    request_type: str = Field(..., description="规划类型")
+    success: bool = Field(..., description="是否成功")
+    
+    # 路径结果
+    route: Optional[Dict[str, Any]] = Field(default=None, description="单车路径结果")
+    multi_route: Optional[Dict[str, Any]] = Field(default=None, description="多车路径结果")
+    
+    # 解释
+    explanation: Optional[Dict[str, Any]] = Field(default=None, description="路径解释")
+    
+    # 追踪
+    trace: Optional[Dict[str, Any]] = Field(default=None, description="执行追踪")
+    errors: List[str] = Field(default_factory=list, description="错误列表")

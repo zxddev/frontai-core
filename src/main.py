@@ -11,7 +11,7 @@ from src.domains.events import router as events_router
 from src.domains.schemes import router as schemes_router
 from src.domains.tasks import router as tasks_router
 from src.domains.websocket import router as websocket_router
-from src.domains.rescue_workflow import router as rescue_workflow_router
+
 from src.domains.map_entities import entity_router, layer_router
 from src.domains.auth import auth_router
 from src.domains.users import users_router
@@ -19,6 +19,7 @@ from src.domains.shelters import router as shelters_router
 from src.domains.supplies import router as supplies_router
 from src.domains.messages import router as messages_router
 from src.domains.integrations import integrations_router
+from src.domains.staging_area import router as staging_area_router
 from src.agents import router as ai_router
 from src.domains.frontend_api import frontend_router
 from src.domains.frontend_api.websocket import frontend_ws_router
@@ -78,7 +79,7 @@ api_router_v2.include_router(events_router)
 api_router_v2.include_router(schemes_router)
 api_router_v2.include_router(tasks_router)
 api_router_v2.include_router(websocket_router)
-api_router_v2.include_router(rescue_workflow_router)
+
 api_router_v2.include_router(entity_router)
 api_router_v2.include_router(layer_router)
 api_router_v2.include_router(auth_router)
@@ -87,6 +88,7 @@ api_router_v2.include_router(shelters_router)
 api_router_v2.include_router(supplies_router)
 api_router_v2.include_router(messages_router)
 api_router_v2.include_router(integrations_router)
+api_router_v2.include_router(staging_area_router)
 api_router_v2.include_router(ai_router)
 api_router_v2.include_router(tts_router)
 

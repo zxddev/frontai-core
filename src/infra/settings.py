@@ -31,6 +31,7 @@ class Settings:
     neo4j_user: str  # Neo4j 用户
     neo4j_password: str  # Neo4j 密码
     postgres_dsn: str  # Postgres 连接串
+    amap_api_key: str  # 高德地图Web服务API Key
 
 
 def _require_env(name: str, default: Optional[str] = None) -> str:
@@ -79,6 +80,7 @@ def load_settings() -> Settings:
     neo4j_user = pick("NEO4J_USER", "neo4j")  # Neo4j 用户
     neo4j_password = pick("NEO4J_PASSWORD", "your-neo4j-password")  # Neo4j 密码
     postgres_dsn = pick("POSTGRES_DSN", "postgresql://postgres:password@localhost:5432/emergency_planner")  # Postgres DSN
+    amap_api_key = pick("AMAP_API_KEY", "")  # 高德地图API Key
     return Settings(
         openai_base_url=openai_base_url,
         openai_api_key=openai_api_key,
@@ -96,4 +98,5 @@ def load_settings() -> Settings:
         neo4j_user=neo4j_user,
         neo4j_password=neo4j_password,
         postgres_dsn=postgres_dsn,
+        amap_api_key=amap_api_key,
     )

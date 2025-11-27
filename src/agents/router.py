@@ -21,24 +21,15 @@ from src.core.websocket import broadcast_event_update
 from src.domains.ai_decisions import AIDecisionLogRepository, CreateAIDecisionLogRequest
 from .exceptions import AITaskNotFoundError, AISchemeNotFoundError
 from .schemas import (
-    AnalyzeEventRequest,
-    AnalyzeEventTaskResponse,
-    AnalyzeEventResult,
-    GenerateSchemeRequest,
-    GenerateSchemeTaskResponse,
-    BatchGenerateSchemeRequest,
-    BatchGenerateSchemeResponse,
     EmergencyAnalyzeRequest,
     EmergencyAnalyzeTaskResponse,
     EmergencyAnalyzeResult,
-    DispatchTasksRequest,
-    DispatchTasksTaskResponse,
-    DispatchTasksResult,
+    RoutePlanningRequest,
+    RoutePlanningTaskResponse,
+    RoutePlanningResult,
 )
-from .event_analysis import EventAnalysisAgent
-from .scheme_generation import SchemeGenerationAgent
 from .emergency_ai import EmergencyAIAgent, get_emergency_ai_agent
-from .task_dispatch import TaskDispatchAgent
+from .route_planning import invoke as route_planning_invoke
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +43,7 @@ REDIS_URL = "redis://192.168.31.50:6379/0"
 EMERGENCY_RESULT_PREFIX = "emergency_ai_result:"
 EMERGENCY_RESULT_TTL = 3600  # 结果保存1小时
 
-# Agent实例（延迟初始化）
-_event_analysis_agent: EventAnalysisAgent | None = None
-_scheme_generation_agent: SchemeGenerationAgent | None = None
-_task_dispatch_agent: TaskDispatchAgent | None = None
+
 
 
 async def _save_result_to_redis(task_id: str, result: Dict[str, Any]) -> bool:
@@ -88,28 +76,7 @@ async def _get_result_from_redis(task_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def get_event_analysis_agent() -> EventAnalysisAgent:
-    """获取EventAnalysisAgent单例"""
-    global _event_analysis_agent
-    if _event_analysis_agent is None:
-        _event_analysis_agent = EventAnalysisAgent()
-    return _event_analysis_agent
 
-
-def get_scheme_generation_agent() -> SchemeGenerationAgent:
-    """获取SchemeGenerationAgent单例"""
-    global _scheme_generation_agent
-    if _scheme_generation_agent is None:
-        _scheme_generation_agent = SchemeGenerationAgent()
-    return _scheme_generation_agent
-
-
-def get_task_dispatch_agent() -> TaskDispatchAgent:
-    """获取TaskDispatchAgent单例"""
-    global _task_dispatch_agent
-    if _task_dispatch_agent is None:
-        _task_dispatch_agent = TaskDispatchAgent()
-    return _task_dispatch_agent
 
 
 def _to_serializable(obj: Any) -> Any:
@@ -135,547 +102,9 @@ def _to_serializable(obj: Any) -> Any:
     return str(obj)
 
 
-async def _save_decision_log(
-    request: AnalyzeEventRequest,
-    result: Dict[str, Any],
-) -> Optional[UUID]:
-    """
-    保存AI决策日志到数据库
-    
-    Args:
-        request: 原始分析请求
-        result: 分析结果
-        
-    Returns:
-        日志ID或None（保存失败时）
-    """
-    logger.info(
-        "开始保存AI决策日志",
-        extra={"event_id": str(request.event_id), "scenario_id": str(request.scenario_id) if request.scenario_id else None}
-    )
-    
-    if not request.scenario_id:
-        logger.warning("scenario_id为空，跳过决策日志保存")
-        return None
-    
-    try:
-        async with AsyncSessionLocal() as db:
-            repo = AIDecisionLogRepository(db)
-            
-            trace = result.get("trace", {})
-            algorithms = trace.get("algorithms_used", [])
-            confirmation = result.get("confirmation_decision", {})
-            
-            # 将结果转换为可序列化格式
-            analysis_result = _to_serializable(result.get("analysis_result"))
-            confirmation_serializable = _to_serializable(confirmation)
-            event_status = _to_serializable(result.get("event_status_update"))
-            
-            log_data = CreateAIDecisionLogRequest(
-                scenario_id=request.scenario_id,
-                event_id=request.event_id,
-                scheme_id=None,
-                decision_type="event_analysis",
-                algorithm_used=",".join(algorithms) if algorithms else None,
-                input_snapshot={
-                    "event_id": str(request.event_id),
-                    "disaster_type": request.disaster_type,
-                    "location": {
-                        "longitude": request.location.longitude,
-                        "latitude": request.location.latitude,
-                    },
-                    "initial_data": request.initial_data,
-                    "source_system": request.source_system,
-                    "source_type": request.source_type,
-                    "source_trust_level": request.source_trust_level,
-                    "is_urgent": request.is_urgent,
-                    "estimated_victims": request.estimated_victims,
-                    "priority": request.priority,
-                },
-                output_result={
-                    "analysis_result": analysis_result,
-                    "confirmation_decision": confirmation_serializable,
-                    "event_status_update": event_status,
-                },
-                confidence_score=Decimal(str(confirmation.get("confirmation_score", 0))) if confirmation.get("confirmation_score") is not None else None,
-                reasoning_chain={
-                    "nodes_executed": trace.get("nodes_executed", []),
-                    "algorithms_used": algorithms,
-                    "rationale": confirmation.get("rationale", ""),
-                    "matched_rules": confirmation.get("matched_auto_confirm_rules", []),
-                },
-                processing_time_ms=int(result.get("execution_time_ms", 0)) if result.get("execution_time_ms") else None,
-            )
-            
-            log_entry = await repo.create(log_data)
-            await db.commit()
-            
-            logger.info(
-                "AI决策日志保存成功",
-                extra={
-                    "log_id": str(log_entry.id),
-                    "event_id": str(request.event_id),
-                    "decision_type": "event_analysis",
-                }
-            )
-            
-            return log_entry.id
-            
-    except Exception as e:
-        logger.exception(
-            "AI决策日志保存失败",
-            extra={"event_id": str(request.event_id), "error": str(e)}
-        )
-        return None
-
-
-async def _broadcast_analysis_result(
-    request: AnalyzeEventRequest,
-    result: Dict[str, Any],
-) -> None:
-    """
-    通过WebSocket广播分析结果
-    
-    Args:
-        request: 原始分析请求
-        result: 分析结果
-    """
-    if not request.scenario_id:
-        logger.debug("scenario_id为空，跳过WebSocket推送")
-        return
-    
-    try:
-        confirmation = result.get("confirmation_decision", {})
-        event_status = result.get("event_status_update", {})
-        
-        await broadcast_event_update(
-            scenario_id=request.scenario_id,
-            event_type="event_analyzed",
-            event_data={
-                "event_id": str(request.event_id),
-                "task_id": result.get("task_id"),
-                "status": event_status.get("new_status", "pending"),
-                "auto_confirmed": confirmation.get("auto_confirmed", False),
-                "confirmation_score": confirmation.get("confirmation_score"),
-                "matched_rules": confirmation.get("matched_auto_confirm_rules", []),
-                "analysis_result": result.get("analysis_result"),
-                "timestamp": datetime.utcnow().isoformat() + "Z",
-            },
-        )
-        
-        logger.info(
-            "WebSocket分析结果推送成功",
-            extra={
-                "event_id": str(request.event_id),
-                "scenario_id": str(request.scenario_id),
-                "new_status": event_status.get("new_status"),
-            }
-        )
-        
-    except Exception as e:
-        logger.exception(
-            "WebSocket推送失败",
-            extra={"event_id": str(request.event_id), "error": str(e)}
-        )
-
-
-async def _run_event_analysis(task_id: str, request: AnalyzeEventRequest) -> None:
-    """
-    后台执行事件分析
-    
-    执行流程:
-    1. 调用EventAnalysisAgent执行分析
-    2. 保存AI决策日志到ai_decision_logs_v2表
-    3. 通过WebSocket推送分析结果
-    
-    Args:
-        task_id: 任务ID
-        request: 分析请求
-    """
-    logger.info(
-        "开始后台事件分析任务",
-        extra={"task_id": task_id, "event_id": str(request.event_id)},
-    )
-    
-    try:
-        agent = get_event_analysis_agent()
-        
-        result = await agent.arun(
-            task_id=task_id,
-            event_id=request.event_id,
-            scenario_id=request.scenario_id,
-            disaster_type=request.disaster_type,
-            location={
-                "longitude": request.location.longitude,
-                "latitude": request.location.latitude,
-            },
-            initial_data=request.initial_data,
-            source_system=request.source_system,
-            source_type=request.source_type,
-            source_trust_level=request.source_trust_level,
-            is_urgent=request.is_urgent,
-            estimated_victims=request.estimated_victims,
-            priority=request.priority,
-            context=request.context,
-            nearby_events=request.nearby_events,
-        )
-        
-        _task_results[task_id] = result
-        
-        logger.info(
-            "事件分析任务完成",
-            extra={
-                "task_id": task_id,
-                "status": result.get("status"),
-                "auto_confirmed": result.get("confirmation_decision", {}).get("auto_confirmed"),
-            },
-        )
-        
-        await _save_decision_log(request, result)
-        
-        await _broadcast_analysis_result(request, result)
-        
-    except Exception as e:
-        logger.exception(
-            "事件分析任务失败",
-            extra={"task_id": task_id, "error": str(e)},
-        )
-        
-        _task_results[task_id] = {
-            "success": False,
-            "task_id": task_id,
-            "event_id": str(request.event_id),
-            "status": "failed",
-            "errors": [str(e)],
-            "completed_at": datetime.utcnow().isoformat() + "Z",
-        }
-
-
-@router.post("/analyze-event", response_model=AnalyzeEventTaskResponse, status_code=202)
-async def analyze_event(
-    request: AnalyzeEventRequest,
-    background_tasks: BackgroundTasks,
-) -> AnalyzeEventTaskResponse:
-    """
-    提交事件分析任务
-    
-    异步执行事件分析，立即返回task_id。
-    分析完成后通过WebSocket推送结果，也可通过GET接口查询。
-    
-    分析内容:
-    1. 灾情评估 - 评估灾情等级、影响范围、预估伤亡
-    2. 次生灾害预测 - 预测火灾、滑坡等次生灾害风险
-    3. 损失估算 - 估算经济损失和基础设施损毁
-    4. 确认评分 - 计算确认评分，决定事件状态流转(confirmed/pre_confirmed/pending)
-    """
-    task_id = f"task-{request.event_id}"
-    
-    logger.info(
-        "收到事件分析请求",
-        extra={
-            "task_id": task_id,
-            "event_id": str(request.event_id),
-            "disaster_type": request.disaster_type,
-            "source_system": request.source_system,
-        },
-    )
-    
-    # 检查是否已有相同任务在执行
-    if task_id in _task_results:
-        existing = _task_results[task_id]
-        if existing.get("status") == "processing":
-            return AnalyzeEventTaskResponse(
-                success=True,
-                task_id=task_id,
-                event_id=str(request.event_id),
-                status="processing",
-                message="分析任务正在执行中",
-                created_at=datetime.utcnow(),
-            )
-    
-    # 初始化任务状态
-    _task_results[task_id] = {
-        "success": True,
-        "task_id": task_id,
-        "event_id": str(request.event_id),
-        "status": "processing",
-        "created_at": datetime.utcnow().isoformat() + "Z",
-    }
-    
-    # 添加后台任务
-    background_tasks.add_task(_run_event_analysis, task_id, request)
-    
-    return AnalyzeEventTaskResponse(
-        success=True,
-        task_id=task_id,
-        event_id=str(request.event_id),
-        status="processing",
-        message="分析任务已提交，预计完成时间2-5秒",
-        created_at=datetime.utcnow(),
-    )
-
-
-@router.get("/analyze-event/{task_id}")
-async def get_analysis_result(task_id: str) -> Dict[str, Any]:
-    """
-    查询事件分析任务结果
-    
-    Args:
-        task_id: 任务ID (格式: task-{event_id})
-        
-    Returns:
-        分析结果或任务状态
-    """
-    logger.info("查询分析任务结果", extra={"task_id": task_id})
-    
-    if task_id not in _task_results:
-        raise AITaskNotFoundError(task_id)
-    
-    result = _task_results[task_id]
-    return result
-
-
-async def _run_scheme_generation(task_id: str, request: GenerateSchemeRequest) -> None:
-    """
-    后台执行方案生成
-    
-    使用数据库集成：
-    1. 从数据库查询可用队伍
-    2. 执行方案生成
-    3. 保存方案到数据库
-    
-    Args:
-        task_id: 任务ID
-        request: 生成请求
-    """
-    logger.info(
-        "开始后台方案生成任务",
-        extra={"task_id": task_id, "event_id": str(request.event_id)},
-    )
-    
-    try:
-        agent = get_scheme_generation_agent()
-        
-        # 使用数据库集成运行
-        async with AsyncSessionLocal() as db:
-            result = await agent.run_with_db(
-                db=db,
-                event_id=str(request.event_id),
-                scenario_id=str(request.scenario_id) if request.scenario_id else "",
-                event_analysis=request.event_analysis,
-                constraints=request.constraints or {},
-                optimization_weights=request.optimization_weights or {},
-                options=request.options or {},
-                save_to_db=True,
-            )
-        
-        # 缓存结果
-        _task_results[task_id] = result
-        
-        db_persist = result.get("db_persist", {})
-        logger.info(
-            "方案生成任务完成",
-            extra={
-                "task_id": task_id,
-                "scheme_count": result.get("scheme_count", 0),
-                "db_saved": db_persist.get("success", False),
-                "db_scheme_id": db_persist.get("scheme_id"),
-            },
-        )
-        
-    except Exception as e:
-        logger.exception(
-            "方案生成任务失败",
-            extra={"task_id": task_id, "error": str(e)},
-        )
-        
-        _task_results[task_id] = {
-            "success": False,
-            "task_id": task_id,
-            "event_id": str(request.event_id),
-            "status": "failed",
-            "errors": [str(e)],
-            "completed_at": datetime.utcnow().isoformat() + "Z",
-        }
-
-
-@router.post("/generate-scheme", response_model=GenerateSchemeTaskResponse, status_code=202)
-async def generate_scheme(
-    request: GenerateSchemeRequest,
-    background_tasks: BackgroundTasks,
-) -> GenerateSchemeTaskResponse:
-    """
-    提交方案生成任务
-    
-    基于事件分析结果，生成救援方案。包含：
-    1. 规则触发 - 根据灾情匹配TRR规则
-    2. 能力提取 - 提取所需救援能力
-    3. 资源匹配 - 匹配可用救援力量
-    4. 多目标优化 - NSGA-II生成Pareto最优解
-    5. 硬规则过滤 - 过滤不可行方案
-    6. TOPSIS评分 - 综合评分排序
-    """
-    task_id = f"scheme-{request.event_id}"
-    
-    logger.info(
-        "收到方案生成请求",
-        extra={
-            "task_id": task_id,
-            "event_id": str(request.event_id),
-            "scenario_id": str(request.scenario_id) if request.scenario_id else None,
-        },
-    )
-    
-    # 检查是否已有相同任务在执行
-    if task_id in _task_results:
-        existing = _task_results[task_id]
-        if existing.get("status") == "processing":
-            return GenerateSchemeTaskResponse(
-                success=True,
-                task_id=task_id,
-                event_id=str(request.event_id),
-                status="processing",
-                message="方案生成任务正在执行中",
-                created_at=datetime.utcnow(),
-            )
-    
-    # 初始化任务状态
-    _task_results[task_id] = {
-        "success": True,
-        "task_id": task_id,
-        "event_id": str(request.event_id),
-        "status": "processing",
-        "created_at": datetime.utcnow().isoformat() + "Z",
-    }
-    
-    # 添加后台任务
-    background_tasks.add_task(_run_scheme_generation, task_id, request)
-    
-    return GenerateSchemeTaskResponse(
-        success=True,
-        task_id=task_id,
-        event_id=str(request.event_id),
-        status="processing",
-        message="方案生成任务已提交，预计完成时间3-10秒",
-        created_at=datetime.utcnow(),
-    )
-
-
-@router.get("/generate-scheme/{task_id}")
-async def get_scheme_result(task_id: str) -> Dict[str, Any]:
-    """
-    查询方案生成任务结果
-    
-    Args:
-        task_id: 任务ID (格式: scheme-{event_id})
-        
-    Returns:
-        生成结果或任务状态
-    """
-    logger.info("查询方案生成结果", extra={"task_id": task_id})
-    
-    if task_id not in _task_results:
-        raise AISchemeNotFoundError(task_id)
-    
-    return _task_results[task_id]
-
-
-@router.post("/generate-schemes/batch", response_model=BatchGenerateSchemeResponse)
-async def generate_schemes_batch(
-    request: BatchGenerateSchemeRequest,
-) -> BatchGenerateSchemeResponse:
-    """
-    批量生成方案
-    
-    同时为多个事件生成方案，支持并行/串行执行。
-    最多支持10个事件同时处理。
-    
-    Args:
-        request: 批量请求，包含多个GenerateSchemeRequest
-        
-    Returns:
-        批量结果，包含每个请求的执行结果
-    """
-    import asyncio
-    import time
-    
-    start_time = time.time()
-    
-    logger.info(
-        "收到批量方案生成请求",
-        extra={
-            "total_requests": len(request.requests),
-            "parallel": request.parallel,
-        },
-    )
-    
-    agent = get_scheme_generation_agent()
-    results: list[Dict[str, Any]] = []
-    
-    async def run_single(req: GenerateSchemeRequest) -> Dict[str, Any]:
-        """执行单个方案生成"""
-        try:
-            async with AsyncSessionLocal() as db:
-                result = await agent.run_with_db(
-                    db=db,
-                    event_id=str(req.event_id),
-                    scenario_id=str(req.scenario_id) if req.scenario_id else "",
-                    event_analysis=req.event_analysis,
-                    constraints=req.constraints or {},
-                    optimization_weights=req.optimization_weights or {},
-                    options=req.options or {},
-                    save_to_db=True,
-                )
-            return {
-                "event_id": str(req.event_id),
-                "success": result.get("success", False),
-                "scheme_count": result.get("scheme_count", 0),
-                "execution_time_ms": result.get("execution_time_ms"),
-                "errors": result.get("errors", []),
-            }
-        except Exception as e:
-            logger.error(f"批量生成失败: event_id={req.event_id}, error={e}")
-            return {
-                "event_id": str(req.event_id),
-                "success": False,
-                "scheme_count": 0,
-                "errors": [str(e)],
-            }
-    
-    if request.parallel:
-        # 并行执行
-        tasks = [run_single(req) for req in request.requests]
-        results = await asyncio.gather(*tasks)
-    else:
-        # 串行执行
-        for req in request.requests:
-            result = await run_single(req)
-            results.append(result)
-    
-    # 统计结果
-    succeeded = sum(1 for r in results if r.get("success"))
-    failed = len(results) - succeeded
-    total_time_ms = (time.time() - start_time) * 1000
-    
-    logger.info(
-        "批量方案生成完成",
-        extra={
-            "total": len(results),
-            "succeeded": succeeded,
-            "failed": failed,
-            "execution_time_ms": total_time_ms,
-        },
-    )
-    
-    return BatchGenerateSchemeResponse(
-        success=failed == 0,
-        total=len(results),
-        succeeded=succeeded,
-        failed=failed,
-        results=results,
-        execution_time_ms=round(total_time_ms, 2),
-    )
-
+# ============================================================================
+# 规则管理接口
+# ============================================================================
 
 @router.post("/rules/reload")
 async def reload_rules() -> Dict[str, Any]:
@@ -1093,196 +522,211 @@ async def get_emergency_analyze_result(task_id: str) -> EmergencyAnalyzeResult:
 
 
 # ============================================================================
-# 任务调度接口
+# 路径规划智能体接口
 # ============================================================================
 
-async def _run_task_dispatch(
+# 路径规划结果缓存
+_route_planning_results: Dict[str, Dict[str, Any]] = {}
+ROUTE_PLANNING_PREFIX = "route_planning_result:"
+
+
+async def _save_route_result_to_redis(task_id: str, result: Dict[str, Any]) -> bool:
+    """保存路径规划结果到Redis"""
+    try:
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        key = f"{ROUTE_PLANNING_PREFIX}{task_id}"
+        await redis_client.setex(key, EMERGENCY_RESULT_TTL, json.dumps(result, ensure_ascii=False, default=str))
+        await redis_client.close()
+        logger.info(f"[RoutePlanning] 结果已保存到Redis: {key}")
+        return True
+    except Exception as e:
+        logger.warning(f"[RoutePlanning] Redis保存失败: {e}")
+        return False
+
+
+async def _get_route_result_from_redis(task_id: str) -> Optional[Dict[str, Any]]:
+    """从Redis获取路径规划结果"""
+    try:
+        redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        key = f"{ROUTE_PLANNING_PREFIX}{task_id}"
+        data = await redis_client.get(key)
+        await redis_client.close()
+        if data:
+            return json.loads(data)
+        return None
+    except Exception as e:
+        logger.warning(f"[RoutePlanning] Redis读取失败: {e}")
+        return None
+
+
+async def _run_route_planning(
     task_id: str,
-    request: DispatchTasksRequest,
+    request: RoutePlanningRequest,
 ) -> None:
-    """
-    后台执行任务调度
-    
-    Args:
-        task_id: 任务ID
-        request: 调度请求
-    """
+    """后台执行路径规划任务"""
     import traceback
     
-    logger.info(
-        f"[TaskDispatch] 开始执行任务调度 task_id={task_id} scheme_id={request.scheme_id}"
-    )
+    logger.info(f"[RoutePlanning] 开始执行 task_id={task_id} type={request.request_type}")
     
     try:
-        agent = get_task_dispatch_agent()
+        # 构建参数
+        start = {"lon": request.start.lon, "lat": request.start.lat} if request.start else None
+        end = {"lon": request.end.lon, "lat": request.end.lat} if request.end else None
+        depot = {"lon": request.depot_location.lon, "lat": request.depot_location.lat} if request.depot_location else None
         
-        # 构建调度配置
-        dispatch_config = {}
-        if request.dispatch_config:
-            dispatch_config = request.dispatch_config.model_dump()
+        vehicles = None
+        if request.vehicles:
+            vehicles = [
+                {
+                    "vehicle_id": v.vehicle_id,
+                    "vehicle_code": v.vehicle_code,
+                    "vehicle_type": v.vehicle_type,
+                    "max_speed_kmh": v.max_speed_kmh,
+                    "is_all_terrain": v.is_all_terrain,
+                    "capacity": v.capacity,
+                    "current_location": {"lon": v.current_location.lon, "lat": v.current_location.lat},
+                }
+                for v in request.vehicles
+            ]
         
-        result = agent.run(
-            event_id=str(request.event_id),
-            scenario_id=str(request.scenario_id),
-            scheme_id=str(request.scheme_id),
-            scheme_data=request.scheme_data,
-            dispatch_config=dispatch_config,
+        task_points = None
+        if request.task_points:
+            task_points = [
+                {
+                    "id": tp.id,
+                    "location": {"lon": tp.location.lon, "lat": tp.location.lat},
+                    "demand": tp.demand,
+                    "priority": tp.priority,
+                    "time_window_start": tp.time_window_start,
+                    "time_window_end": tp.time_window_end,
+                    "service_time_min": tp.service_time_min,
+                }
+                for tp in request.task_points
+            ]
+        
+        disaster_context = None
+        if request.disaster_context:
+            disaster_context = {
+                "disaster_type": request.disaster_context.disaster_type,
+                "severity": request.disaster_context.severity,
+                "urgency_level": request.disaster_context.urgency_level,
+                "affected_roads": request.disaster_context.affected_roads,
+                "blocked_areas": request.disaster_context.blocked_areas,
+                "weather_conditions": request.disaster_context.weather_conditions,
+            }
+        
+        # 调用路径规划智能体
+        result = await route_planning_invoke(
+            request_type=request.request_type,
+            start=start,
+            end=end,
+            vehicle_id=request.vehicle_id,
+            vehicles=vehicles,
+            task_points=task_points,
+            depot_location=depot,
+            scenario_id=request.scenario_id,
+            constraints=request.constraints,
+            disaster_context=disaster_context,
+            natural_language_request=request.natural_language_request,
+            request_id=task_id,
         )
+        
+        logger.info(f"[RoutePlanning] 完成 task_id={task_id} success={result.get('success')}")
         
         # 保存结果
-        _task_results[task_id] = result
-        await _save_result_to_redis(task_id, result)
-        
-        logger.info(
-            f"[TaskDispatch] 任务调度完成 task_id={task_id} "
-            f"success={result.get('success')} "
-            f"order_count={result.get('summary', {}).get('order_count', 0)}"
-        )
+        _route_planning_results[task_id] = result
+        await _save_route_result_to_redis(task_id, result)
         
     except Exception as e:
         error_detail = traceback.format_exc()
-        logger.error(
-            f"[TaskDispatch] 任务调度失败 task_id={task_id} error={str(e)}\n{error_detail}"
-        )
+        logger.error(f"[RoutePlanning] 失败 task_id={task_id} error={e}\n{error_detail}")
         
         error_result = {
+            "request_id": task_id,
+            "request_type": request.request_type,
             "success": False,
-            "task_id": task_id,
-            "event_id": str(request.event_id),
-            "scenario_id": str(request.scenario_id),
-            "scheme_id": str(request.scheme_id),
-            "status": "failed",
             "errors": [str(e)],
-            "completed_at": datetime.utcnow().isoformat() + "Z",
         }
-        _task_results[task_id] = error_result
-        await _save_result_to_redis(task_id, error_result)
+        _route_planning_results[task_id] = error_result
+        await _save_route_result_to_redis(task_id, error_result)
 
 
-@router.post("/dispatch-tasks", response_model=DispatchTasksTaskResponse, status_code=202)
-async def dispatch_tasks(
-    request: DispatchTasksRequest,
+@router.post("/route-planning", response_model=RoutePlanningTaskResponse, status_code=202)
+async def route_planning(
+    request: RoutePlanningRequest,
     background_tasks: BackgroundTasks,
-) -> DispatchTasksTaskResponse:
+) -> RoutePlanningTaskResponse:
     """
-    提交任务调度请求
+    提交路径规划任务
     
-    基于方案生成结果，执行任务调度：
-    - 方案拆解为具体任务
-    - 任务依赖排序和时间调度
-    - 多车辆路径规划
-    - 执行者分配
-    - 生成调度单
+    使用LLM增强的双频架构进行路径规划：
+    - 低频层(LLM): 场景分析、策略选择、结果评估、路径解释
+    - 高频层(算法): A*路网规划、VRP多车调度
+    
+    支持三种规划类型：
+    - single: 单车点对点规划
+    - multi: 多车多点VRP规划
+    - replan: 动态重规划
     
     Args:
-        request: 调度请求
+        request: 规划请求
         
     Returns:
-        任务提交响应，包含task_id用于查询结果
+        任务提交响应
     """
-    task_id = f"dispatch-{request.scheme_id}"
+    import uuid
+    task_id = f"route-{uuid.uuid4().hex[:8]}"
     
-    logger.info(
-        "收到任务调度请求",
-        extra={
-            "task_id": task_id,
-            "event_id": str(request.event_id),
-            "scheme_id": str(request.scheme_id),
-        },
-    )
-    
-    # 检查是否已有相同任务在执行
-    if task_id in _task_results:
-        existing = _task_results[task_id]
-        if existing.get("status") == "processing":
-            return DispatchTasksTaskResponse(
-                success=True,
-                task_id=task_id,
-                event_id=str(request.event_id),
-                scheme_id=str(request.scheme_id),
-                status="processing",
-                message="任务调度正在执行中",
-                created_at=datetime.utcnow(),
-            )
-    
-    # 初始化任务状态
-    _task_results[task_id] = {
-        "success": True,
-        "task_id": task_id,
-        "event_id": str(request.event_id),
-        "scheme_id": str(request.scheme_id),
-        "status": "processing",
-        "created_at": datetime.utcnow().isoformat() + "Z",
-    }
+    logger.info(f"[RoutePlanning] 收到请求 task_id={task_id} type={request.request_type}")
     
     # 提交后台任务
-    background_tasks.add_task(_run_task_dispatch, task_id, request)
+    background_tasks.add_task(_run_route_planning, task_id, request)
     
-    return DispatchTasksTaskResponse(
+    return RoutePlanningTaskResponse(
         success=True,
         task_id=task_id,
-        event_id=str(request.event_id),
-        scheme_id=str(request.scheme_id),
+        request_type=request.request_type,
         status="processing",
-        message="任务调度已提交，预计完成时间5-15秒",
+        message="路径规划任务已提交，预计完成时间3-10秒",
         created_at=datetime.utcnow(),
     )
 
 
-@router.get("/dispatch-tasks/{task_id}")
-async def get_dispatch_tasks_result(task_id: str) -> DispatchTasksResult:
+@router.get("/route-planning/{task_id}", response_model=RoutePlanningResult)
+async def get_route_planning_result(task_id: str) -> RoutePlanningResult:
     """
-    查询任务调度结果
+    查询路径规划结果
     
     Args:
         task_id: 任务ID
         
     Returns:
-        调度结果
-        
-    Raises:
-        AITaskNotFoundError: 任务不存在
+        规划结果
     """
     # 优先从内存获取
-    result = _task_results.get(task_id)
+    result = _route_planning_results.get(task_id)
     
     # 内存没有则从Redis获取
     if result is None:
-        result = await _get_result_from_redis(task_id)
+        result = await _get_route_result_from_redis(task_id)
         if result:
-            _task_results[task_id] = result
+            _route_planning_results[task_id] = result
     
     if result is None:
         raise AITaskNotFoundError(task_id)
     
-    # 构建摘要
-    summary = result.get("summary", {})
-    if not summary:
-        summary = {
-            "task_count": 0,
-            "scheduled_count": 0,
-            "order_count": len(result.get("dispatch_orders", [])),
-            "route_count": len(result.get("planned_routes", [])),
-            "makespan_min": result.get("makespan_min", 0),
-            "total_distance_km": result.get("total_travel_distance_km", 0),
-            "total_travel_time_min": result.get("total_travel_time_min", 0),
-            "critical_path_tasks": result.get("critical_path_tasks", []),
-        }
-    
-    return DispatchTasksResult(
+    return RoutePlanningResult(
+        request_id=result.get("request_id", task_id),
+        request_type=result.get("request_type", "unknown"),
         success=result.get("success", False),
-        event_id=result.get("event_id", ""),
-        scenario_id=result.get("scenario_id", ""),
-        scheme_id=result.get("scheme_id", ""),
-        summary=summary,
-        dispatch_orders=result.get("dispatch_orders", []),
-        scheduled_tasks=result.get("scheduled_tasks", []),
-        planned_routes=result.get("planned_routes", []),
-        executor_assignments=result.get("executor_assignments", []),
-        gantt_data=result.get("gantt_data", []),
+        route=result.get("route"),
+        multi_route=result.get("multi_route"),
+        explanation=result.get("explanation"),
         trace=result.get("trace"),
         errors=result.get("errors", []),
-        execution_time_ms=result.get("execution_time_ms"),
-        started_at=result.get("started_at"),
-        completed_at=result.get("completed_at"),
     )
+
+
+# ============ 预警监测智能体路由 ============
+from .early_warning.router import router as early_warning_router
+router.include_router(early_warning_router)

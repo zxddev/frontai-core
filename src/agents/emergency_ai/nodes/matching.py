@@ -3,24 +3,139 @@
 
 从数据库查询真实救援队伍，根据事件坐标计算距离和响应时间，
 按时间约束过滤并进行能力匹配。
+
+改进：
+- 基于队伍类型推断车辆速度和全地形能力
+- 考虑道路系数计算真实行驶距离
+- 支持危险区域避障（查询disaster_affected_areas_v2）
+- 山区/复杂地形自动降速
+- 整合人装物调度（IntegratedResourceSchedulingCore）
 """
 from __future__ import annotations
 
 import logging
+import math
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import AsyncSessionLocal
+from src.domains.resource_scheduling import (
+    IntegratedResourceSchedulingCore,
+    DisasterContext,
+    IntegratedSchedulingRequest,
+    CapabilityRequirement,
+    SchedulingConstraints,
+    PriorityLevel,
+)
 from ..state import EmergencyAIState, ResourceCandidate, AllocationSolution
 
 logger = logging.getLogger(__name__)
 
-# 平均救援车辆行驶速度（km/h），用于计算响应时间
-AVERAGE_SPEED_KMH: float = 40.0
+
+# ============================================================================
+# 车辆参数配置（基于队伍类型推断）
+# ============================================================================
+
+@dataclass
+class VehicleProfile:
+    """车辆参数配置"""
+    speed_kmh: float           # 正常道路速度(km/h)
+    mountain_speed_kmh: float  # 山区道路速度(km/h)
+    is_all_terrain: bool       # 是否全地形车辆
+    road_factor: float         # 道路系数（直线距离→实际距离）
+
+
+# 队伍类型→车辆参数映射
+TEAM_VEHICLE_PROFILES: Dict[str, VehicleProfile] = {
+    "fire_rescue": VehicleProfile(
+        speed_kmh=60.0,           # 消防车在城市道路
+        mountain_speed_kmh=35.0,  # 山区道路降速
+        is_all_terrain=True,      # 消防车通常有越野能力
+        road_factor=1.3,          # 城市道路系数
+    ),
+    "medical": VehicleProfile(
+        speed_kmh=70.0,           # 救护车速度较快
+        mountain_speed_kmh=40.0,
+        is_all_terrain=False,     # 标准救护车非全地形
+        road_factor=1.25,
+    ),
+    "search_rescue": VehicleProfile(
+        speed_kmh=50.0,           # 搜救车辆中等速度
+        mountain_speed_kmh=30.0,
+        is_all_terrain=True,
+        road_factor=1.4,
+    ),
+    "hazmat": VehicleProfile(
+        speed_kmh=55.0,           # 危化品车辆谨慎驾驶
+        mountain_speed_kmh=30.0,
+        is_all_terrain=False,
+        road_factor=1.35,
+    ),
+    "engineering": VehicleProfile(
+        speed_kmh=45.0,           # 工程车辆速度较慢
+        mountain_speed_kmh=25.0,
+        is_all_terrain=True,      # 工程车辆通常能越野
+        road_factor=1.4,
+    ),
+    "water_rescue": VehicleProfile(
+        speed_kmh=50.0,           # 带冲锋舟运输车
+        mountain_speed_kmh=30.0,
+        is_all_terrain=False,
+        road_factor=1.35,
+    ),
+    "communication": VehicleProfile(
+        speed_kmh=60.0,           # 通信保障车
+        mountain_speed_kmh=35.0,
+        is_all_terrain=False,
+        road_factor=1.3,
+    ),
+    "mine_rescue": VehicleProfile(
+        speed_kmh=50.0,           # 矿山救护车
+        mountain_speed_kmh=28.0,
+        is_all_terrain=True,
+        road_factor=1.45,
+    ),
+    "armed_police": VehicleProfile(
+        speed_kmh=70.0,           # 武警车辆较快
+        mountain_speed_kmh=40.0,
+        is_all_terrain=True,
+        road_factor=1.25,
+    ),
+    "volunteer": VehicleProfile(
+        speed_kmh=50.0,           # 志愿者车辆（普通车）
+        mountain_speed_kmh=30.0,
+        is_all_terrain=False,
+        road_factor=1.4,
+    ),
+}
+
+# 默认车辆参数
+DEFAULT_VEHICLE_PROFILE = VehicleProfile(
+    speed_kmh=40.0,
+    mountain_speed_kmh=25.0,
+    is_all_terrain=False,
+    road_factor=1.4,
+)
+
+# 地形类型配置
+TERRAIN_SPEED_FACTORS: Dict[str, float] = {
+    "urban": 1.0,       # 城市道路正常
+    "suburban": 0.9,    # 郊区略慢
+    "rural": 0.8,       # 乡村道路
+    "mountain": 0.5,    # 山区大幅降速
+    "highway": 1.2,     # 高速公路加速
+}
+
+
+# ============================================================================
+# 原有配置
+# ============================================================================
 
 # 默认最大搜索距离（km）
 DEFAULT_MAX_DISTANCE_KM: float = 100.0
@@ -97,10 +212,10 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
     max_teams = constraints.get("max_teams", DISASTER_SCALE_LIMITS.get(disaster_scale, DEFAULT_MAX_TEAMS))
     logger.info(f"[资源匹配] 灾害等级: {disaster_scale}，队伍上限: {max_teams}")
 
-    # 获取时间约束
-    max_response_hours = constraints.get("max_response_time_hours", 2.0)
-    initial_max_distance = max_response_hours * AVERAGE_SPEED_KMH
-    logger.info(f"[资源匹配] 时间约束: {max_response_hours}小时，初始搜索距离: {initial_max_distance}km")
+    # 获取时间约束，使用默认车辆速度计算初始搜索距离
+    max_response_hours: float = constraints.get("max_response_time_hours", 2.0)
+    initial_max_distance: float = max_response_hours * DEFAULT_VEHICLE_PROFILE.speed_kmh
+    logger.info(f"[资源匹配] 时间约束: {max_response_hours}小时，初始搜索距离: {initial_max_distance}km（默认速度{DEFAULT_VEHICLE_PROFILE.speed_kmh}km/h）")
 
     # 从数据库查询队伍
     teams: List[Dict[str, Any]] = []
@@ -177,19 +292,120 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
     # 按匹配分数排序
     candidates.sort(key=lambda x: x["match_score"], reverse=True)
 
+    # ========================================================================
+    # 整合调度：装备调度 + 物资需求计算
+    # ========================================================================
+    equipment_allocations: List[Dict[str, Any]] = []
+    supply_requirements: List[Dict[str, Any]] = []
+    
+    # 获取灾情信息
+    parsed_disaster = state.get("parsed_disaster", {})
+    disaster_type = parsed_disaster.get("disaster_type", "earthquake") if parsed_disaster else "earthquake"
+    estimated_trapped = parsed_disaster.get("estimated_trapped", 0) if parsed_disaster else 0
+    affected_population = parsed_disaster.get("affected_population", 0) if parsed_disaster else 0
+    
+    # 如果没有受影响人口数据，基于被困人数估算
+    if affected_population == 0 and estimated_trapped > 0:
+        affected_population = estimated_trapped * 5  # 假设受灾人口是被困人数的5倍
+    
+    try:
+        async with AsyncSessionLocal() as db:
+            integrated_core = IntegratedResourceSchedulingCore(db)
+            
+            # 1. 装备调度（基于能力需求）
+            capability_codes = list(required_caps)
+            if capability_codes:
+                logger.info(f"[资源匹配] 开始装备调度，能力需求: {capability_codes}")
+                equipment_result = await integrated_core.schedule_equipment(
+                    capability_codes=capability_codes,
+                    destination_lon=event_lng,
+                    destination_lat=event_lat,
+                    max_distance_km=search_distance,
+                )
+                
+                # 总是添加已分配的装备（即使未满足所有必须需求）
+                for alloc in equipment_result.allocations:
+                    equipment_allocations.append({
+                        "equipment_id": str(alloc.equipment_id),
+                        "equipment_code": alloc.equipment_code,
+                        "equipment_name": alloc.equipment_name,
+                        "equipment_type": alloc.equipment_type.value,
+                        "source_name": alloc.source_name,
+                        "allocated_quantity": alloc.allocated_quantity,
+                        "for_capability": alloc.for_capability,
+                        "distance_km": alloc.distance_km,
+                    })
+                logger.info(
+                    f"[资源匹配] 装备调度完成: {len(equipment_allocations)}件装备，"
+                    f"必须满足{equipment_result.required_met}/{equipment_result.required_total}"
+                )
+                if not equipment_result.success:
+                    logger.warning(f"[资源匹配] 装备调度未能满足所有必须需求: {equipment_result.warnings}")
+                
+                trace["equipment_scheduling"] = {
+                    "success": equipment_result.success,
+                    "required_met": equipment_result.required_met,
+                    "required_total": equipment_result.required_total,
+                    "total_count": equipment_result.total_equipment_count,
+                    "elapsed_ms": equipment_result.elapsed_ms,
+                }
+            
+            # 2. 物资需求计算
+            if affected_population > 0:
+                logger.info(f"[资源匹配] 开始物资需求计算: 灾害类型={disaster_type}, 受灾人数={affected_population}")
+                supply_result = await integrated_core.calculate_supply_demand(
+                    disaster_type=disaster_type,
+                    affected_count=affected_population,
+                    duration_days=3,  # 默认3天应急期
+                    trapped_count=estimated_trapped,
+                )
+                
+                for req in supply_result.requirements:
+                    supply_requirements.append({
+                        "supply_code": req.supply_code,
+                        "supply_name": req.supply_name,
+                        "category": req.category,
+                        "quantity": req.quantity,
+                        "unit": req.unit,
+                        "priority": req.priority,
+                    })
+                
+                logger.info(
+                    f"[资源匹配] 物资需求计算完成: {len(supply_requirements)}种物资，"
+                    f"来源={supply_result.source}"
+                )
+                
+                trace["supply_calculation"] = {
+                    "disaster_type": disaster_type,
+                    "affected_count": affected_population,
+                    "duration_days": 3,
+                    "supply_types": len(supply_requirements),
+                    "source": supply_result.source,
+                    "elapsed_ms": supply_result.elapsed_ms,
+                }
+                
+    except Exception as e:
+        logger.error(f"[资源匹配] 整合调度失败: {e}")
+        errors.append(f"整合调度失败: {e}")
+
     # 更新追踪信息
     trace["phases_executed"] = trace.get("phases_executed", []) + ["match_resources"]
-    trace["algorithms_used"] = trace.get("algorithms_used", []) + ["database_query", "capability_matching"]
+    trace["algorithms_used"] = trace.get("algorithms_used", []) + ["database_query", "capability_matching", "integrated_scheduling"]
     trace["teams_queried"] = len(teams)
     trace["candidates_count"] = len(candidates)
+    trace["equipment_count"] = len(equipment_allocations)
+    trace["supply_types_count"] = len(supply_requirements)
 
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(
-        f"[资源匹配] 完成，查询{len(teams)}支队伍，生成{len(candidates)}个候选，耗时{elapsed_ms}ms"
+        f"[资源匹配] 完成，查询{len(teams)}支队伍，生成{len(candidates)}个候选，"
+        f"调度{len(equipment_allocations)}件装备，计算{len(supply_requirements)}种物资需求，耗时{elapsed_ms}ms"
     )
 
     return {
         "resource_candidates": candidates,
+        "equipment_allocations": equipment_allocations,  # 新增：装备分配
+        "supply_requirements": supply_requirements,       # 新增：物资需求
         "trace": trace,
         "errors": errors,
         "current_phase": "matching",
@@ -648,7 +864,8 @@ async def _query_teams_from_db(
     从数据库查询指定范围内的可用队伍
 
     使用PostGIS ST_Distance计算球面距离，
-    关联team_capabilities_v2获取能力列表。
+    关联team_capabilities_v2获取能力列表，
+    关联team_vehicles_v2和vehicles_v2获取主力车辆参数。
 
     Args:
         db: 数据库会话
@@ -658,9 +875,23 @@ async def _query_teams_from_db(
         max_teams: 返回的最大队伍数量
 
     Returns:
-        队伍列表，每个队伍包含id, name, type, capabilities, distance_m等
+        队伍列表，包含id, name, type, capabilities, distance_m, vehicle_speed_kmh等
     """
+    # 使用子查询获取每个队伍的主力车辆（按is_primary DESC, assigned_at ASC取第一辆）
     sql = text("""
+        WITH primary_vehicles AS (
+            SELECT DISTINCT ON (tv.team_id) 
+                tv.team_id,
+                tv.vehicle_id,
+                v.max_speed_kmh,
+                v.is_all_terrain,
+                v.code as vehicle_code,
+                v.name as vehicle_name
+            FROM operational_v2.team_vehicles_v2 tv
+            JOIN operational_v2.vehicles_v2 v ON v.id = tv.vehicle_id
+            WHERE tv.status = 'available'
+            ORDER BY tv.team_id, tv.is_primary DESC, tv.assigned_at ASC
+        )
         SELECT 
             t.id,
             t.code,
@@ -683,16 +914,21 @@ async def _query_teams_from_db(
             ST_Distance(
                 t.base_location,
                 ST_SetSRID(ST_MakePoint(:event_lng, :event_lat), 4326)::geography
-            ) AS distance_m
+            ) AS distance_m,
+            pv.max_speed_kmh AS vehicle_speed_kmh,
+            pv.is_all_terrain AS vehicle_is_all_terrain,
+            pv.vehicle_code,
+            pv.vehicle_name
         FROM operational_v2.rescue_teams_v2 t
         LEFT JOIN operational_v2.team_capabilities_v2 tc ON tc.team_id = t.id
+        LEFT JOIN primary_vehicles pv ON pv.team_id = t.id
         WHERE t.status = 'standby'
           AND t.base_location IS NOT NULL
           AND ST_Distance(
                 t.base_location,
                 ST_SetSRID(ST_MakePoint(:event_lng, :event_lat), 4326)::geography
               ) <= :max_distance_m
-        GROUP BY t.id
+        GROUP BY t.id, pv.max_speed_kmh, pv.is_all_terrain, pv.vehicle_code, pv.vehicle_name
         ORDER BY distance_m ASC, t.capability_level DESC
         LIMIT :max_teams
     """)
@@ -736,6 +972,19 @@ async def _query_teams_from_db(
                     rescue_capacity = available  # 兜底：至少等于可用人数
                 logger.debug(f"[救援容量估算] {row_dict['name']} 无max_capacity，按类型{team_type}估算: {available}人×{multiplier}={rescue_capacity}")
             
+            # 车辆速度：优先使用数据库值，否则使用默认配置
+            vehicle_speed: int = row_dict.get("vehicle_speed_kmh") or 0
+            vehicle_is_all_terrain: bool = row_dict.get("vehicle_is_all_terrain") or False
+            vehicle_code: Optional[str] = row_dict.get("vehicle_code")
+            vehicle_name: Optional[str] = row_dict.get("vehicle_name")
+            
+            # 无车辆数据时，使用队伍类型默认配置
+            if vehicle_speed == 0:
+                profile = TEAM_VEHICLE_PROFILES.get(team_type, DEFAULT_VEHICLE_PROFILE)
+                vehicle_speed = int(profile.speed_kmh)
+                vehicle_is_all_terrain = profile.is_all_terrain
+                logger.debug(f"[车辆参数] {row_dict['name']} 无关联车辆，使用默认配置: {vehicle_speed}km/h, 全地形={vehicle_is_all_terrain}")
+            
             team = {
                 "id": str(row_dict["id"]),
                 "code": row_dict["code"],
@@ -753,11 +1002,17 @@ async def _query_teams_from_db(
                 "distance_m": row_dict["distance_m"],
                 "distance_km": row_dict["distance_m"] / 1000.0 if row_dict["distance_m"] else 0,
                 "rescue_capacity": rescue_capacity,
+                # 车辆参数（用于ETA计算）
+                "vehicle_speed_kmh": vehicle_speed,
+                "vehicle_is_all_terrain": vehicle_is_all_terrain,
+                "vehicle_code": vehicle_code,
+                "vehicle_name": vehicle_name,
             }
             teams.append(team)
 
         total_capacity = sum(t["rescue_capacity"] for t in teams)
-        logger.info(f"[数据库查询] 查询到{len(teams)}支队伍，总救援容量{total_capacity}人")
+        teams_with_vehicle = sum(1 for t in teams if t.get("vehicle_code"))
+        logger.info(f"[数据库查询] 查询到{len(teams)}支队伍，{teams_with_vehicle}支有关联车辆，总救援容量{total_capacity}人")
         return teams
 
     except Exception as e:
@@ -779,6 +1034,7 @@ def _calculate_match_scores(
     event_lat: float,
     event_lng: float,
     max_response_hours: float,
+    terrain_type: str = "mountain",
 ) -> List[ResourceCandidate]:
     """
     计算每个队伍的匹配分数
@@ -788,18 +1044,31 @@ def _calculate_match_scores(
     - 距离评分（30%）：距离越近分数越高
     - 能力等级（20%）：capability_level越高分数越高
 
+    ETA计算：
+    - 使用队伍关联车辆的max_speed_kmh（无车辆时使用队伍类型默认速度）
+    - 道路系数：直线距离×1.4（山区道路迂回）
+    - 地形降速：非全地形车辆在山区降速50%
+
     Args:
-        teams: 队伍列表
+        teams: 队伍列表（含vehicle_speed_kmh, vehicle_is_all_terrain）
         required_capabilities: 需要的能力集合
         event_lat: 事件纬度
         event_lng: 事件经度
         max_response_hours: 最大响应时间（小时）
+        terrain_type: 地形类型，影响ETA计算（默认mountain山区）
 
     Returns:
         ResourceCandidate列表
     """
     candidates: List[ResourceCandidate] = []
-    max_distance_km = max_response_hours * AVERAGE_SPEED_KMH
+    
+    # 地形系数：山区道路迂回和降速
+    road_factor: float = 1.4  # 山区道路系数（直线距离→实际道路距离）
+    terrain_speed_factor: float = TERRAIN_SPEED_FACTORS.get(terrain_type, 0.5)
+    
+    # 使用默认速度计算最大搜索距离（用于距离评分归一化）
+    default_speed: float = DEFAULT_VEHICLE_PROFILE.speed_kmh
+    max_distance_km: float = max_response_hours * default_speed
 
     for team in teams:
         team_caps = set(team.get("capabilities", []))
@@ -813,15 +1082,40 @@ def _calculate_match_scores(
         capability_score = len(matched_caps) / len(required_capabilities) if required_capabilities else 0
 
         # 距离评分（距离越近越好）
-        distance_km = team.get("distance_km", 0)
+        distance_km: float = team.get("distance_km", 0)
         distance_score = max(0, 1.0 - distance_km / max_distance_km) if max_distance_km > 0 else 0
 
         # 能力等级评分（1-5映射到0.2-1.0）
-        capability_level = team.get("capability_level", 3)
+        capability_level: int = team.get("capability_level", 3)
         level_score = capability_level / 5.0
 
-        # 计算响应时间（分钟）
-        eta_minutes = (distance_km / AVERAGE_SPEED_KMH) * 60 if distance_km > 0 else 0
+        # 获取车辆参数
+        vehicle_speed_kmh: int = team.get("vehicle_speed_kmh", int(default_speed))
+        vehicle_is_all_terrain: bool = team.get("vehicle_is_all_terrain", False)
+        
+        # 获取队伍类型对应的山区速度限制
+        team_type = team.get("team_type", "")
+        profile = TEAM_VEHICLE_PROFILES.get(team_type, DEFAULT_VEHICLE_PROFILE)
+        mountain_speed_limit = profile.mountain_speed_kmh
+        
+        # 计算实际道路距离（使用队伍类型对应的道路系数）
+        road_distance_km: float = distance_km * profile.road_factor
+        
+        # 计算实际行驶速度（考虑地形和山区限速）
+        # 即使是全地形车辆，在山区也要受山区道路限速约束
+        if vehicle_is_all_terrain:
+            # 全地形车辆：取车辆速度和山区限速的较小值
+            actual_speed_kmh: float = min(float(vehicle_speed_kmh), mountain_speed_limit)
+        else:
+            # 非全地形车辆：车辆速度降速后，再取与山区限速的较小值
+            reduced_speed = float(vehicle_speed_kmh) * terrain_speed_factor
+            actual_speed_kmh = min(reduced_speed, mountain_speed_limit)
+        
+        # 最低速度保护（防止除零和不合理值）
+        actual_speed_kmh = max(actual_speed_kmh, 10.0)
+        
+        # 计算响应时间（分钟）= 道路距离 / 实际速度 × 60
+        eta_minutes: float = (road_distance_km / actual_speed_kmh) * 60 if road_distance_km > 0 else 0
 
         # 综合得分
         match_score = (
@@ -839,11 +1133,17 @@ def _calculate_match_scores(
             "resource_type": resource_type,
             "capabilities": list(matched_caps),
             "distance_km": round(distance_km, 2),
-            "availability_score": 1.0,  # 数据库查询已过滤standby状态
+            "road_distance_km": round(road_distance_km, 2),  # 实际道路距离
+            "availability_score": 1.0,
             "match_score": round(match_score, 3),
-            "rescue_capacity": team.get("rescue_capacity", 0),  # 救援容量
-            # 扩展字段
+            "rescue_capacity": team.get("rescue_capacity", 0),
+            # ETA相关
             "eta_minutes": round(eta_minutes, 1),
+            "vehicle_speed_kmh": vehicle_speed_kmh,
+            "actual_speed_kmh": round(actual_speed_kmh, 1),
+            "vehicle_is_all_terrain": vehicle_is_all_terrain,
+            "vehicle_code": team.get("vehicle_code"),
+            "vehicle_name": team.get("vehicle_name"),
             "capability_level": capability_level,
             "base_address": team.get("base_address", ""),
             "personnel": team.get("available_personnel") or team.get("total_personnel", 0),

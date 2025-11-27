@@ -20,7 +20,7 @@ from .assessment import DisasterAssessment, SecondaryHazardPredictor, LossEstima
 from .matching import RescueTeamSelector, VehicleCargoMatcher, CapabilityMatcher
 
 # 路径模块
-from .routing import VehicleRoutingPlanner, LogisticsScheduler, OffroadEngine, RoadNetworkEngine
+from .routing import VehicleRoutingPlanner, OffroadEngine
 
 # 优化模块
 from .optimization import PymooOptimizer, MCTSPlanner
@@ -52,9 +52,7 @@ __all__ = [
     "CapabilityMatcher",
     # 路径
     "VehicleRoutingPlanner",
-    "LogisticsScheduler",
     "OffroadEngine",
-    "RoadNetworkEngine",
     # 优化
     "PymooOptimizer",
     "MCTSPlanner",

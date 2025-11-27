@@ -1,24 +1,35 @@
 """
-任务调度Agent节点函数
+任务智能分发节点模块
 
-节点执行顺序：
-1. decompose_scheme - 方案拆解为任务
-2. schedule_tasks - 任务调度
-3. plan_routes - 路径规划
-4. assign_executors - 执行者分配
-5. generate_dispatch_orders - 生成调度单
+包含两种模式的处理节点：
+- Mode 1: 初始分配节点
+- Mode 2: 动态调整节点
 """
 from __future__ import annotations
 
-from .decompose import decompose_scheme
-from .schedule import schedule_tasks
-from .routing import plan_routes
-from .dispatch import assign_executors, generate_dispatch_orders
+from .initial_dispatch import (
+    extract_capability_needs,
+    query_available_executors,
+    match_executors,
+    schedule_tasks,
+    generate_dispatch_orders,
+)
+
+from .analyze_event import analyze_dispatch_event
+from .decide_action import decide_dispatch_action
+from .execute_action import execute_dispatch_action
+from .notify import notify_stakeholders
 
 __all__ = [
-    "decompose_scheme",
+    # Mode 1: 初始分配
+    "extract_capability_needs",
+    "query_available_executors",
+    "match_executors",
     "schedule_tasks",
-    "plan_routes",
-    "assign_executors",
     "generate_dispatch_orders",
+    # Mode 2: 动态调整
+    "analyze_dispatch_event",
+    "decide_dispatch_action",
+    "execute_dispatch_action",
+    "notify_stakeholders",
 ]

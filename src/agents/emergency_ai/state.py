@@ -184,6 +184,8 @@ class EmergencyAIState(TypedDict):
     resource_candidates: List[ResourceCandidate]            # 候选资源
     allocation_solutions: List[AllocationSolution]          # 分配方案
     pareto_solutions: List[AllocationSolution]              # Pareto最优解
+    equipment_allocations: List[Dict[str, Any]]             # 装备分配（人装物：装）
+    supply_requirements: List[Dict[str, Any]]               # 物资需求（人装物：物）
     
     # ========== 阶段4: 方案优化 ==========
     scheme_scores: List[SchemeScore]                        # 方案评分
@@ -252,6 +254,8 @@ def create_initial_state(
         resource_candidates=[],
         allocation_solutions=[],
         pareto_solutions=[],
+        equipment_allocations=[],
+        supply_requirements=[],
         scheme_scores=[],
         recommended_scheme=None,
         scheme_explanation="",
