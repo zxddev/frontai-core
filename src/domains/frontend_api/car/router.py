@@ -232,9 +232,19 @@ async def get_car_list(
                         ai_module_ids.add(mid)
                         ai_module_reasons[mid] = m.get("reason", "")
                 
-                # 获取该设备可适配的模块
+                # 获取该设备可适配的模块（双向匹配）
+                # 1. 设备类型匹配模块的compatible_device_types
+                # 2. 模块类型匹配设备的compatible_module_types
                 device_type = device.device_type.value if device.device_type else ""
-                compatible_modules = modules_by_device_type.get(device_type, [])
+                device_compatible_module_types = device.compatible_module_types or []
+                
+                # 从按设备类型分组的模块中筛选
+                candidate_modules = modules_by_device_type.get(device_type, [])
+                # 再过滤：模块类型必须在设备允许的模块类型中
+                compatible_modules = [
+                    m for m in candidate_modules 
+                    if m.get("module_type") in device_compatible_module_types
+                ]
                 
                 # 构建模块列表
                 module_list = []
