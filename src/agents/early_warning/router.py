@@ -507,3 +507,317 @@ def _warning_to_response(warning) -> WarningRecordResponse:
         responded_at=warning.responded_at,
         resolved_at=warning.resolved_at,
     )
+
+
+# ============ 风险预测接口 ============
+
+from pydantic import BaseModel, Field
+from typing import List, Optional as Opt
+from .state import create_initial_state, RiskPrediction
+from .graph import prediction_graph
+
+
+class PathRiskRequest(BaseModel):
+    """路径风险预测请求"""
+    scenario_id: Opt[UUID] = None
+    team_id: Opt[UUID] = None
+    team_name: Opt[str] = None
+    origin: GeoPoint = Field(..., description="起点")
+    destination: GeoPoint = Field(..., description="终点")
+    prediction_hours: int = Field(6, ge=1, le=24, description="预测时间范围(小时)")
+
+
+class OperationRiskRequest(BaseModel):
+    """作业风险评估请求"""
+    scenario_id: Opt[UUID] = None
+    team_id: Opt[UUID] = None
+    team_name: Opt[str] = None
+    location: GeoPoint = Field(..., description="作业位置")
+    operation_type: str = Field("rescue", description="作业类型: rescue/firefighting/hazmat/height_work/demolition")
+
+
+class DisasterSpreadRequest(BaseModel):
+    """灾害扩散预测请求"""
+    disaster_id: UUID = Field(..., description="灾害ID")
+    prediction_hours_list: List[int] = Field([1, 6, 24], description="预测时间点列表(小时)")
+
+
+class RiskPredictionResponse(BaseModel):
+    """风险预测响应"""
+    request_id: str
+    predictions: List[dict]
+    pending_human_review: List[str]
+    success: bool
+    message: str
+
+
+@router.post(
+    "/predict/path-risk",
+    response_model=RiskPredictionResponse,
+    summary="路径风险预测",
+    description="预测行进队伍的路径风险，综合气象、灾害态势等因素",
+)
+async def predict_path_risk_api(
+    request: PathRiskRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    路径风险预测API
+    
+    分析气象、灾害距离等因素，评估路径风险等级。
+    红色风险会标记为需要人工审核。
+    """
+    logger.info(f"[API] 路径风险预测: team={request.team_name}")
+    
+    request_id = str(uuid4())
+    
+    # 获取灾害态势（如果有活动灾害）
+    disaster_situation = None
+    if request.scenario_id:
+        disaster_repo = DisasterRepository(db)
+        disasters = await disaster_repo.get_by_scenario(request.scenario_id)
+        if disasters:
+            d = disasters[0]
+            # 转换中心点
+            center_point = None
+            if d.center_point:
+                from shapely import wkb
+                point = wkb.loads(bytes(d.center_point.data))
+                center_point = {"lon": point.x, "lat": point.y}
+            disaster_situation = {
+                "id": str(d.id),
+                "disaster_type": d.disaster_type,
+                "disaster_name": d.disaster_name,
+                "center_point": center_point,
+                "spread_direction": d.spread_direction,
+                "spread_speed_mps": float(d.spread_speed_mps) if d.spread_speed_mps else None,
+                "severity_level": d.severity_level,
+            }
+    
+    # 创建初始状态
+    initial_state = create_initial_state(
+        request_id=request_id,
+        scenario_id=str(request.scenario_id) if request.scenario_id else None,
+        prediction_request={
+            "type": "path_risk",
+            "origin": {"lon": request.origin.lon, "lat": request.origin.lat},
+            "destination": {"lon": request.destination.lon, "lat": request.destination.lat},
+            "team_id": str(request.team_id) if request.team_id else None,
+            "team_name": request.team_name,
+            "prediction_hours": request.prediction_hours,
+        },
+    )
+    
+    if disaster_situation:
+        initial_state["disaster_situation"] = disaster_situation
+    
+    # 执行预测图
+    try:
+        from .nodes import predict_path_risk
+        result = await predict_path_risk(initial_state)
+        
+        predictions = result.get("risk_predictions", [])
+        pending = result.get("pending_human_review", [])
+        
+        return RiskPredictionResponse(
+            request_id=request_id,
+            predictions=predictions,
+            pending_human_review=pending,
+            success=True,
+            message=f"路径风险预测完成，风险等级: {predictions[0]['risk_level'] if predictions else 'unknown'}",
+        )
+    except Exception as e:
+        logger.error(f"[API] 路径风险预测失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/predict/operation-risk",
+    response_model=RiskPredictionResponse,
+    summary="作业风险评估",
+    description="评估现场救援作业的风险",
+)
+async def predict_operation_risk_api(
+    request: OperationRiskRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """作业风险评估API"""
+    logger.info(f"[API] 作业风险评估: team={request.team_name}, type={request.operation_type}")
+    
+    request_id = str(uuid4())
+    
+    disaster_situation = None
+    if request.scenario_id:
+        disaster_repo = DisasterRepository(db)
+        disasters = await disaster_repo.get_by_scenario(request.scenario_id)
+        if disasters:
+            d = disasters[0]
+            center_point = None
+            if d.center_point:
+                from shapely import wkb
+                point = wkb.loads(bytes(d.center_point.data))
+                center_point = {"lon": point.x, "lat": point.y}
+            disaster_situation = {
+                "id": str(d.id),
+                "disaster_type": d.disaster_type,
+                "disaster_name": d.disaster_name,
+                "center_point": center_point,
+                "spread_direction": d.spread_direction,
+                "spread_speed_mps": float(d.spread_speed_mps) if d.spread_speed_mps else None,
+                "severity_level": d.severity_level,
+            }
+    
+    initial_state = create_initial_state(
+        request_id=request_id,
+        scenario_id=str(request.scenario_id) if request.scenario_id else None,
+        prediction_request={
+            "type": "operation_risk",
+            "location": {"lon": request.location.lon, "lat": request.location.lat},
+            "operation_type": request.operation_type,
+            "team_id": str(request.team_id) if request.team_id else None,
+            "team_name": request.team_name,
+        },
+    )
+    
+    if disaster_situation:
+        initial_state["disaster_situation"] = disaster_situation
+    
+    try:
+        from .nodes import predict_operation_risk
+        result = await predict_operation_risk(initial_state)
+        
+        predictions = result.get("risk_predictions", [])
+        pending = result.get("pending_human_review", [])
+        
+        return RiskPredictionResponse(
+            request_id=request_id,
+            predictions=predictions,
+            pending_human_review=pending,
+            success=True,
+            message=f"作业风险评估完成",
+        )
+    except Exception as e:
+        logger.error(f"[API] 作业风险评估失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/predict/disaster-spread",
+    response_model=RiskPredictionResponse,
+    summary="灾害扩散预测",
+    description="预测灾害在未来1h/6h/24h的扩散范围",
+)
+async def predict_disaster_spread_api(
+    request: DisasterSpreadRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """灾害扩散预测API"""
+    logger.info(f"[API] 灾害扩散预测: disaster_id={request.disaster_id}")
+    
+    request_id = str(uuid4())
+    
+    # 获取灾害态势
+    disaster_repo = DisasterRepository(db)
+    disaster = await disaster_repo.get_by_id(request.disaster_id)
+    if not disaster:
+        raise HTTPException(status_code=404, detail="灾害不存在")
+    
+    # 转换为字典
+    from shapely import wkb
+    center_point = None
+    if disaster.center_point:
+        point = wkb.loads(bytes(disaster.center_point.data))
+        center_point = {"lon": point.x, "lat": point.y}
+    
+    disaster_dict = {
+        "id": str(disaster.id),
+        "scenario_id": str(disaster.scenario_id) if disaster.scenario_id else None,
+        "disaster_type": disaster.disaster_type,
+        "disaster_name": disaster.disaster_name,
+        "center_point": center_point,
+        "spread_direction": disaster.spread_direction,
+        "spread_speed_mps": float(disaster.spread_speed_mps) if disaster.spread_speed_mps else None,
+        "severity_level": disaster.severity_level,
+    }
+    
+    initial_state = create_initial_state(
+        request_id=request_id,
+        scenario_id=str(disaster.scenario_id) if disaster.scenario_id else None,
+        prediction_request={
+            "type": "disaster_spread",
+            "prediction_hours_list": request.prediction_hours_list,
+        },
+    )
+    initial_state["disaster_situation"] = disaster_dict
+    
+    try:
+        from .nodes import predict_disaster_spread
+        result = await predict_disaster_spread(initial_state)
+        
+        predictions = result.get("risk_predictions", [])
+        pending = result.get("pending_human_review", [])
+        
+        return RiskPredictionResponse(
+            request_id=request_id,
+            predictions=predictions,
+            pending_human_review=pending,
+            success=True,
+            message=f"灾害扩散预测完成",
+        )
+    except Exception as e:
+        logger.error(f"[API] 灾害扩散预测失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class HumanReviewRequest(BaseModel):
+    """人工审核请求"""
+    prediction_id: str = Field(..., description="预测ID")
+    reviewer_id: str = Field(..., description="审核人ID")
+    decision: str = Field(..., description="决策: approved/rejected/modified")
+    new_risk_level: Opt[str] = Field(None, description="修改后的风险等级(仅decision=modified时)")
+    notes: str = Field("", description="审核备注")
+
+
+class HumanReviewResponse(BaseModel):
+    """人工审核响应"""
+    prediction_id: str
+    decision: str
+    success: bool
+    message: str
+
+
+@router.post(
+    "/predictions/{prediction_id}/review",
+    response_model=HumanReviewResponse,
+    summary="人工审核预测",
+    description="对红色风险预测进行人工审核",
+)
+async def review_prediction(
+    prediction_id: str,
+    request: HumanReviewRequest,
+):
+    """
+    人工审核预测结果
+    
+    支持三种决策：
+    - approved: 批准预测，按原风险等级执行
+    - rejected: 拒绝预测，降级为蓝色风险
+    - modified: 修改风险等级
+    """
+    logger.info(f"[API] 人工审核: prediction_id={prediction_id}, decision={request.decision}")
+    
+    if request.decision not in ["approved", "rejected", "modified"]:
+        raise HTTPException(status_code=400, detail="无效的决策类型")
+    
+    if request.decision == "modified" and not request.new_risk_level:
+        raise HTTPException(status_code=400, detail="修改决策需要指定新的风险等级")
+    
+    # TODO: 从数据库加载预测记录并更新
+    # 当前返回模拟响应
+    
+    return HumanReviewResponse(
+        prediction_id=prediction_id,
+        decision=request.decision,
+        success=True,
+        message=f"审核完成: {request.decision}",
+    )

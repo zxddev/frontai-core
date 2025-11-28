@@ -38,6 +38,12 @@ from .equipment_schemas import (
     EquipmentAllocation,
 )
 from .demand_calculator import SupplyDemandCalculator, DemandCalculationResult
+from src.domains.disaster import (
+    DisasterType as DisasterTypeEnum,
+    ResponsePhase,
+    Capability,
+    get_phase_requirements,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +305,26 @@ class IntegratedResourceSchedulingCore:
             supply_types=supply_types,
         )
 
+    # Capability枚举到数据库字段的映射
+    _CAPABILITY_TO_CODE: Dict[Capability, str] = {
+        Capability.LIFE_DETECTION: "LIFE_DETECTION",
+        Capability.HEAVY_RESCUE: "STRUCTURAL_RESCUE",
+        Capability.LIGHT_RESCUE: "STRUCTURAL_RESCUE",
+        Capability.SWIFT_WATER: "WATER_RESCUE",
+        Capability.DIVE_RESCUE: "WATER_RESCUE",
+        Capability.ROPE_RESCUE: "STRUCTURAL_RESCUE",
+        Capability.TRENCH_RESCUE: "STRUCTURAL_RESCUE",
+        Capability.TRAUMA_CARE: "MEDICAL_TRIAGE",
+        Capability.MASS_CASUALTY: "EMERGENCY_TREATMENT",
+        Capability.MEDICAL_EVAC: "EMERGENCY_TREATMENT",
+        Capability.SHELTER_MANAGEMENT: "EVACUATION_COORDINATION",
+        Capability.WASH: "LOGISTICS",
+        Capability.FOOD_DISTRIBUTION: "LOGISTICS",
+        Capability.HAZMAT_RESPONSE: "HAZMAT_RESPONSE",
+        Capability.DECON: "HAZMAT_RESPONSE",
+        Capability.FIRE_SUPPRESSION: "FIRE_SUPPRESSION",
+    }
+
     def _infer_capability_requirements(
         self,
         context: DisasterContext,
@@ -306,45 +332,32 @@ class IntegratedResourceSchedulingCore:
         """
         从灾情上下文推断能力需求
         
-        基于灾害类型的默认能力映射。
-        生产环境应使用TRR规则或知识图谱。
+        使用phase_requirements统一推断，替代硬编码MAP。
         """
-        # 灾害类型 -> 能力需求映射 (capability_code, min_count, priority_level)
-        DISASTER_CAPABILITY_MAP: Dict[str, List[Tuple[str, int, PriorityLevel]]] = {
-            "earthquake": [
-                ("LIFE_DETECTION", 2, PriorityLevel.CRITICAL),       # 生命探测
-                ("STRUCTURAL_RESCUE", 3, PriorityLevel.CRITICAL),   # 结构救援
-                ("MEDICAL_TRIAGE", 2, PriorityLevel.CRITICAL),      # 医疗分诊
-                ("EMERGENCY_TREATMENT", 2, PriorityLevel.HIGH),     # 紧急救治
-                ("COMMUNICATION", 1, PriorityLevel.HIGH),           # 通信保障
-            ],
-            "fire": [
-                ("FIRE_SUPPRESSION", 3, PriorityLevel.CRITICAL),    # 火灾扑救
-                ("EMERGENCY_TREATMENT", 2, PriorityLevel.CRITICAL), # 紧急救治
-                ("RECONNAISSANCE", 1, PriorityLevel.HIGH),          # 侦察
-            ],
-            "flood": [
-                ("WATER_RESCUE", 3, PriorityLevel.CRITICAL),        # 水域救援
-                ("EVACUATION_COORDINATION", 2, PriorityLevel.CRITICAL),  # 疏散协调
-                ("MEDICAL_TRIAGE", 1, PriorityLevel.HIGH),          # 医疗分诊
-            ],
-            "hazmat": [
-                ("HAZMAT_RESPONSE", 3, PriorityLevel.CRITICAL),     # 危化品处置
-                ("EMERGENCY_TREATMENT", 2, PriorityLevel.CRITICAL), # 紧急救治
-                ("EVACUATION_COORDINATION", 1, PriorityLevel.HIGH), # 疏散协调
-            ],
-            "landslide": [
-                ("STRUCTURAL_RESCUE", 2, PriorityLevel.CRITICAL),   # 结构救援
-                ("LIFE_DETECTION", 2, PriorityLevel.CRITICAL),      # 生命探测
-                ("MEDICAL_TRIAGE", 1, PriorityLevel.HIGH),          # 医疗分诊
-            ],
-        }
-
-        capabilities = DISASTER_CAPABILITY_MAP.get(
-            context.disaster_type,
-            [("STRUCTURAL_RESCUE", 2, PriorityLevel.CRITICAL), ("MEDICAL_TRIAGE", 1, PriorityLevel.HIGH)]  # 默认
-        )
-
+        # 解析灾害类型
+        try:
+            dt = DisasterTypeEnum(context.disaster_type)
+        except ValueError:
+            dt = DisasterTypeEnum.EARTHQUAKE
+        
+        # 从phase_requirements获取能力需求
+        reqs = get_phase_requirements(dt, ResponsePhase.IMMEDIATE)
+        
+        if not reqs:
+            # fallback默认值
+            return [
+                CapabilityRequirement(
+                    capability_code="STRUCTURAL_RESCUE",
+                    min_count=2,
+                    priority=PriorityLevel.CRITICAL,
+                ),
+                CapabilityRequirement(
+                    capability_code="MEDICAL_TRIAGE",
+                    min_count=1,
+                    priority=PriorityLevel.HIGH,
+                ),
+            ]
+        
         # 根据被困人数调整需求数量
         multiplier = 1.0
         if context.trapped_count > 50:
@@ -353,16 +366,36 @@ class IntegratedResourceSchedulingCore:
             multiplier = 1.5
         elif context.trapped_count > 10:
             multiplier = 1.2
-
+        
+        # 转换为CapabilityRequirement（去重）
+        seen_codes: set = set()
         requirements: List[CapabilityRequirement] = []
-        for cap_code, min_count, priority in capabilities:
+        
+        for cap in reqs.capabilities:
+            cap_code = self._CAPABILITY_TO_CODE.get(cap, cap.value.upper())
+            
+            # 去重
+            if cap_code in seen_codes:
+                continue
+            seen_codes.add(cap_code)
+            
+            # 确定优先级（从sphere_priorities推断）
+            priority = PriorityLevel.HIGH
+            if cap in [Capability.LIFE_DETECTION, Capability.HEAVY_RESCUE, 
+                       Capability.TRAUMA_CARE, Capability.SWIFT_WATER,
+                       Capability.HAZMAT_RESPONSE, Capability.FIRE_SUPPRESSION]:
+                priority = PriorityLevel.CRITICAL
+            
+            # 确定基础数量
+            base_count = 2 if priority == PriorityLevel.CRITICAL else 1
+            
             req = CapabilityRequirement(
                 capability_code=cap_code,
-                min_count=max(1, int(min_count * multiplier)),
+                min_count=max(1, int(base_count * multiplier)),
                 priority=priority,
             )
             requirements.append(req)
-
+        
         return requirements
 
     async def quick_schedule_teams(

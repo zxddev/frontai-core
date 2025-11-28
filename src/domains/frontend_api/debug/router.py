@@ -150,3 +150,35 @@ async def select_command_point() -> ApiResponse:
         "location": {"longitude": 104.0657, "latitude": 30.6595},
         "name": "现场指挥点A"
     }, "指挥点已选定")
+
+
+# ============================================================================
+# 场景事件推送测试
+# ============================================================================
+
+@router.post("/scenario/{event_type}", response_model=ApiResponse)
+async def test_scenario_event(
+    event_type: str,
+    request: dict[str, Any],
+) -> ApiResponse:
+    """
+    测试场景事件推送
+    
+    event_type: disaster | task | prompt
+    """
+    from src.core.stomp.broker import stomp_broker
+    
+    topic_map = {
+        "disaster": "/topic/scenario.disaster.triggered",
+        "task": "/topic/scenario.task.triggered", 
+        "prompt": "/topic/scenario.prompt.triggered",
+    }
+    
+    topic = topic_map.get(event_type)
+    if not topic:
+        return ApiResponse.error(400, f"无效的事件类型: {event_type}")
+    
+    await stomp_broker.send_to_destination(topic, {"payload": request})
+    logger.info(f"场景事件已发送: {event_type} -> {topic}")
+    
+    return ApiResponse.success(None, f"场景事件 {event_type} 已推送")

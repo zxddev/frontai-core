@@ -10,12 +10,17 @@
 
     # 自定义位置
     python scripts/test_emergency_analyze.py --lat 30.67 --lng 104.06
+
+    # 指定scenario（UUID或名称关键字）
+    python scripts/test_emergency_analyze.py --scenario "地震"
 """
 import asyncio
 import argparse
 import json
 import sys
 import os
+from typing import Optional
+from uuid import UUID
 
 # 添加项目根目录到路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,15 +29,81 @@ import logging
 logging.basicConfig(level=logging.WARNING)
 
 
-async def run_analysis(description: str, lat: float, lng: float, output_json: bool = False):
+async def resolve_scenario_id(scenario_hint: Optional[str], scenario_type: str = "earthquake") -> Optional[str]:
+    """
+    解析scenario_id为有效的UUID字符串
+    
+    Args:
+        scenario_hint: 用户输入的scenario（UUID字符串或名称关键字）
+        scenario_type: 默认scenario类型（earthquake/flood/fire等）
+        
+    Returns:
+        有效的UUID字符串，或None
+    """
+    from src.core.database import AsyncSessionLocal
+    from sqlalchemy import text
+    
+    async with AsyncSessionLocal() as db:
+        # 1. 如果提供了hint，尝试解析
+        if scenario_hint:
+            # 尝试作为UUID解析
+            try:
+                UUID(scenario_hint)
+                return scenario_hint
+            except ValueError:
+                pass
+            
+            # 尝试按名称模糊匹配
+            result = await db.execute(
+                text("SELECT id FROM operational_v2.scenarios_v2 WHERE name ILIKE :pattern LIMIT 1"),
+                {"pattern": f"%{scenario_hint}%"}
+            )
+            row = result.fetchone()
+            if row:
+                return str(row[0])
+        
+        # 2. 无hint或hint无效，按类型查询第一个匹配的scenario
+        result = await db.execute(
+            text("SELECT id, name FROM operational_v2.scenarios_v2 WHERE scenario_type = :type LIMIT 1"),
+            {"type": scenario_type}
+        )
+        row = result.fetchone()
+        if row:
+            logging.info(f"[scenario解析] 使用默认scenario: {row[1]} ({row[0]})")
+            return str(row[0])
+        
+        # 3. 无匹配类型，返回任意一个
+        result = await db.execute(text("SELECT id, name FROM operational_v2.scenarios_v2 LIMIT 1"))
+        row = result.fetchone()
+        if row:
+            logging.warning(f"[scenario解析] 无{scenario_type}类型scenario，使用: {row[1]} ({row[0]})")
+            return str(row[0])
+        
+        return None
+
+
+async def run_analysis(
+    description: str,
+    lat: float,
+    lng: float,
+    scenario_hint: Optional[str] = None,
+    output_json: bool = False,
+) -> dict:
     """运行应急分析"""
     from src.agents.emergency_ai.agent import EmergencyAIAgent
+    
+    # 解析scenario_id
+    scenario_id = await resolve_scenario_id(scenario_hint, scenario_type="earthquake")
+    if scenario_id:
+        print(f"使用scenario: {scenario_id}")
+    else:
+        print("警告: 未找到有效scenario，库存查询将被跳过")
     
     agent = EmergencyAIAgent()
     
     result = await agent.analyze(
         event_id=f'EVENT-TEST-{int(asyncio.get_event_loop().time())}',
-        scenario_id='SCENARIO-EARTHQUAKE-001',
+        scenario_id=scenario_id,
         disaster_description=description,
         structured_input={
             'location': {'latitude': lat, 'longitude': lng},
@@ -140,6 +211,8 @@ def main():
                         help='灾情描述')
     parser.add_argument('--lat', type=float, default=31.68, help='纬度')
     parser.add_argument('--lng', type=float, default=103.85, help='经度')
+    parser.add_argument('--scenario', '-s', type=str, default=None,
+                        help='Scenario ID（UUID）或名称关键字，默认自动从数据库查询')
     parser.add_argument('--json', action='store_true', help='输出JSON格式')
     
     args = parser.parse_args()
@@ -149,7 +222,7 @@ def main():
     print(f"描述: {args.description[:50]}...")
     print()
     
-    result = asyncio.run(run_analysis(args.description, args.lat, args.lng))
+    result = asyncio.run(run_analysis(args.description, args.lat, args.lng, args.scenario))
     print_result(result, args.json)
 
 

@@ -46,10 +46,20 @@ class NetworkType(str, Enum):
     NONE = "none"
 
 
+class PassageStatus(str, Enum):
+    """通行状态枚举"""
+    CONFIRMED_BLOCKED = "confirmed_blocked"        # 已确认完全不可通行（塌方、断桥）
+    NEEDS_RECONNAISSANCE = "needs_reconnaissance"  # 高危险但未确认，需侦察判断
+    PASSABLE_WITH_CAUTION = "passable_with_caution"  # 可通行但有风险（降速、救援优先）
+    CLEAR = "clear"                                # 已确认安全通行
+    UNKNOWN = "unknown"                            # 未知状态（初始值）
+
+
 class RiskZoneType(str, Enum):
     """风险区域类型"""
     SEISMIC_RED = "seismic_red"      # 烈度>=8
     SEISMIC_ORANGE = "seismic_orange"  # 烈度6-8
+    SEISMIC_YELLOW = "seismic_yellow"  # 烈度4-6
     DANGER_ZONE = "danger_zone"
     BLOCKED = "blocked"
     FLOODED = "flooded"
@@ -132,6 +142,8 @@ class RiskZone:
     risk_level: int  # 1-10
     passable: bool = False
     source: str = ""
+    passage_status: PassageStatus = PassageStatus.UNKNOWN  # 通行状态
+    reconnaissance_required: bool = False  # 是否需侦察
 
 
 @dataclass

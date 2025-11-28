@@ -30,24 +30,26 @@ class EntityGeometry(BaseModel):
     """实体几何数据"""
     type: str  # Point/Line/Polygon/Circle
     coordinates: Any = None
+    # 圆形区域补充字段（前端 handleEntity.js 需要）
+    center: Optional[list[float]] = None
+    radius: Optional[float] = None
+    # 天气区域边界框
+    bbox: Optional[list[float]] = None
 
 
 class EntityDto(BaseModel):
-    """实体数据"""
+    """
+    实体数据 - 对接前端地图图层规范
+    
+    参考: docs/地图图层与后端对接规范.md 第2章
+    """
     id: str
-    layerCode: str
     type: str
-    geometry: EntityGeometry
+    layerCode: str
+    geometry: Optional[EntityGeometry] = None
     properties: dict[str, Any] = Field(default_factory=dict)
-    status: Optional[str] = None
-    timestamp: Optional[str] = None
-    startTime: Optional[str] = None
-    endTime: Optional[str] = None
     visibleOnMap: bool = True
-    dynamic: bool = False
-    source: str = "system"
-    lastPositionAt: Optional[str] = None
-    styleOverrides: Optional[dict[str, Any]] = None
+    styleOverrides: dict[str, Any] = Field(default_factory=dict)
     createdAt: str = ""
     updatedAt: str = ""
 

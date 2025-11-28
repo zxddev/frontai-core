@@ -13,9 +13,36 @@ from .schemas import (
     BatchConfirmRequest, BatchConfirmResponse, BatchConfirmResult,
 )
 from src.core.exceptions import NotFoundError, ConflictError, ValidationError
+from src.core.stomp.broker import stomp_broker
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# 事件类型映射（内部类型 -> 前端数字类型）
+EVENT_TYPE_MAP = {
+    "earthquake": 1,  # 地震（主震）- 前端图标目录为 event/1/
+    "trapped_person": 1,
+    "fire": 2,
+    "flood": 3,
+    "landslide": 4,
+    "building_collapse": 5,
+    "road_damage": 6,
+    "power_outage": 7,
+    "communication_lost": 8,
+    "hazmat_leak": 9,
+    "epidemic": 10,
+    "earthquake_secondary": 11,
+    "other": 99,
+}
+
+# 优先级映射（内部优先级 -> 前端eventLevel）
+PRIORITY_LEVEL_MAP = {
+    "critical": 4,
+    "high": 3,
+    "medium": 2,
+    "low": 1,
+}
 
 
 AUTO_CONFIRM_THRESHOLD = Decimal("0.85")
@@ -39,7 +66,57 @@ class EventService:
             elif data.priority == "critical" and data.is_time_critical:
                 event = await self.repo.pre_confirm(event)
         
-        return self._to_response(event)
+        response = self._to_response(event)
+        
+        # 广播事件到前端
+        await self._broadcast_event_to_frontend(response)
+        
+        # 异步触发装备准备智能体分析
+        await self._trigger_equipment_analysis(response, data)
+        
+        return response
+    
+    async def _trigger_equipment_analysis(
+        self, 
+        event: EventResponse, 
+        data: EventCreate
+    ) -> None:
+        """异步触发装备准备智能体分析"""
+        try:
+            from src.domains.equipment_recommendation.service import EquipmentRecommendationService
+            
+            # 构建灾情描述
+            disaster_description = f"{event.title}\n{event.description or ''}"
+            if event.address:
+                disaster_description += f"\n位置: {event.address}"
+            
+            # 构建结构化输入
+            structured_input = {
+                "disaster_type": event.event_type.value,
+                "location": {
+                    "longitude": event.location.longitude,
+                    "latitude": event.location.latitude,
+                },
+                "severity": event.priority.value,
+                "estimated_victims": event.estimated_victims,
+                "is_time_critical": event.is_time_critical,
+            }
+            
+            # 使用新的db session触发（因为原session可能已提交）
+            from src.core.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as db:
+                service = EquipmentRecommendationService(db)
+                await service.trigger_analysis(
+                    event_id=event.id,
+                    disaster_description=disaster_description,
+                    structured_input=structured_input,
+                    scenario_id=event.scenario_id,
+                )
+            
+            logger.info(f"已触发装备分析: event_id={event.id}")
+        except Exception as e:
+            # 装备分析失败不应影响事件创建
+            logger.error(f"触发装备分析失败: {e}")
     
     async def get_by_id(self, event_id: UUID) -> EventResponse:
         event = await self.repo.get_by_id(event_id)
@@ -373,3 +450,30 @@ class EventService:
             created_at=event.created_at,
             updated_at=event.updated_at,
         )
+    
+    async def _broadcast_event_to_frontend(self, event: EventResponse) -> None:
+        """广播事件到前端（符合前端期望的消息格式）"""
+        try:
+            # 转换为前端期望的格式
+            frontend_payload = {
+                "eventId": str(event.id),
+                "title": event.title,
+                "eventLevel": PRIORITY_LEVEL_MAP.get(event.priority.value, 2),
+                "eventType": EVENT_TYPE_MAP.get(event.event_type.value, 99),
+                "location": [event.location.longitude, event.location.latitude],
+                "time": event.reported_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "origin": event.source_type.value,
+                "data": event.description or "",
+                # 附加字段（前端可选使用）
+                "eventCode": event.event_code,
+                "status": event.status.value,
+                "address": event.address,
+                "estimatedVictims": event.estimated_victims,
+                "isTimeCritical": event.is_time_critical,
+                "scenarioId": str(event.scenario_id),
+            }
+            
+            await stomp_broker.broadcast_event("disaster", frontend_payload, event.scenario_id)
+            logger.info(f"已广播事件到前端: {event.event_code} - {event.title}")
+        except Exception as e:
+            logger.error(f"广播事件失败: {e}")

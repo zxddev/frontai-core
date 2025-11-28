@@ -51,16 +51,40 @@ class StompConnection:
     # 消息计数器
     _message_counter: int = 0
     
+    # SockJS 模式标志
+    sockjs_mode: bool = False
+    
     def __post_init__(self):
         if not self.session_id:
             self.session_id = str(uuid4())
     
     async def send_frame(self, frame: StompFrame):
         """发送STOMP帧"""
+        from starlette.websockets import WebSocketState
+        
         self.last_activity = datetime.utcnow()
         try:
-            # 使用JSON格式传输（前端更容易解析）
-            await self.websocket.send_text(frame.to_json())
+            # 检查 WebSocket application_state（Starlette 用此属性判断连接状态）
+            if self.websocket.application_state != WebSocketState.CONNECTED:
+                logger.warning(f"WebSocket not connected for {self.session_id}, state={self.websocket.application_state}")
+                self.is_connected = False
+                return
+            
+            if self.sockjs_mode:
+                # SockJS 格式: a["STOMP帧文本"]
+                stomp_text = frame.to_text()
+                await self.websocket.send_text('a' + json.dumps([stomp_text]))
+            else:
+                # 原生 WebSocket 使用 JSON 格式
+                await self.websocket.send_text(frame.to_json())
+        except RuntimeError as e:
+            # WebSocket 已断开
+            if "not connected" in str(e).lower() or "accept" in str(e).lower():
+                logger.warning(f"WebSocket disconnected for {self.session_id}: {e}")
+                self.is_connected = False
+            else:
+                logger.error(f"Failed to send frame to {self.session_id}: {e}")
+                raise
         except Exception as e:
             logger.error(f"Failed to send frame to {self.session_id}: {e}")
             raise
@@ -72,6 +96,7 @@ class StompConnection:
             heart_beat=f"{self.heart_beat_server},{self.heart_beat_server}",
         )
         frame.headers["session"] = self.session_id
+        logger.info(f"Sending CONNECTED frame: {repr(frame.to_text()[:200])}")
         await self.send_frame(frame)
         self.is_connected = True
     

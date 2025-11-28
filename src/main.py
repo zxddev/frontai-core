@@ -20,6 +20,9 @@ from src.domains.supplies import router as supplies_router
 from src.domains.messages import router as messages_router
 from src.domains.integrations import integrations_router
 from src.domains.staging_area import router as staging_area_router
+from src.domains.movement_simulation import movement_router
+from src.domains.simulation import simulation_router
+from src.domains.equipment_recommendation import router as equipment_rec_router
 from src.agents import router as ai_router
 from src.domains.frontend_api import frontend_router
 from src.domains.frontend_api.websocket import frontend_ws_router
@@ -89,6 +92,9 @@ api_router_v2.include_router(supplies_router)
 api_router_v2.include_router(messages_router)
 api_router_v2.include_router(integrations_router)
 api_router_v2.include_router(staging_area_router)
+api_router_v2.include_router(movement_router)
+api_router_v2.include_router(simulation_router)
+api_router_v2.include_router(equipment_rec_router)
 api_router_v2.include_router(ai_router)
 api_router_v2.include_router(tts_router)
 
@@ -112,18 +118,29 @@ app.include_router(voice_router, prefix="/ws/voice")
 # v2 STOMP WebSocket端点 (基于Redis Pub/Sub)
 # /ws/stomp - 完整STOMP协议支持
 app.include_router(stomp_router, prefix="/ws")
+app.include_router(stomp_router, prefix="/web-api/ws")
 
 
 @app.on_event("startup")
 async def startup_event():
-    """启动时初始化STOMP消息代理"""
+    """启动时初始化STOMP消息代理和移动仿真管理器"""
     await stomp_broker.start()
     logger.info("STOMP broker started")
+    
+    # 启动移动仿真管理器
+    from src.domains.movement_simulation import get_movement_manager
+    await get_movement_manager()
+    logger.info("Movement simulation manager started")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """关闭时停止STOMP消息代理"""
+    """关闭时停止STOMP消息代理和移动仿真管理器"""
+    # 停止移动仿真管理器
+    from src.domains.movement_simulation import shutdown_movement_manager
+    await shutdown_movement_manager()
+    logger.info("Movement simulation manager stopped")
+    
     await stomp_broker.stop()
     logger.info("STOMP broker stopped")
 

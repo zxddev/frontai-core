@@ -1,4 +1,11 @@
-"""越野 A* 引擎：用于路网不可达时的地面越野规划。"""
+"""越野 A* 引擎：用于路网不可达时的地面越野规划。
+
+TODO: [refactor-architecture-conventions] 待改造项：
+1. 异步化 - 当前是同步实现，需要改为 async/await
+2. 与 DatabaseRouteEngine 集成 - 作为路网不通时的 fallback
+3. 初始化代码 - 需要添加加载 DEM (data/四川省.tif) 和水域数据的代码
+4. 性能优化 - 80米网格在大范围搜索时性能较差
+"""
 
 from __future__ import annotations
 
@@ -22,6 +29,7 @@ from .types import (
     PathSearchMetrics,
     Point,
     dedupe,
+    slope_deg_to_percent,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,10 +108,12 @@ class OffroadEngine:
                 if h_hits:
                     continue
                 try:
-                    slope = self._slope_at(nlon, nlat)
+                    slope_deg = self._slope_at(nlon, nlat)  # DEM计算返回角度
+                    slope_percent = slope_deg_to_percent(slope_deg)  # 转换为百分比
                 except Exception:
                     continue
-                if capability.slope_deg and slope > capability.slope_deg:
+                # 使用百分比比较，与数据库字段 max_gradient_percent 保持一致
+                if capability.slope_percent and slope_percent > capability.slope_percent:
                     continue
 
                 g_cost = current.g + self._distance_m(current.lon, current.lat, nlon, nlat)

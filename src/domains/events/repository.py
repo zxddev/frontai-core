@@ -160,6 +160,29 @@ class EventRepository:
         count = result.scalar() or 0
         return f"EVT-{count + 1:04d}"
     
+    async def find_earthquake_by_params(
+        self,
+        scenario_id: UUID,
+        epicenter_name: str,
+        magnitude: float,
+    ) -> Optional[Event]:
+        """
+        根据想定ID、震中名称、震级查找已存在的地震事件（用于幂等）
+        
+        唯一键: scenario_id + epicenter_name + magnitude
+        """
+        from sqlalchemy import Float
+        result = await self.db.execute(
+            select(Event)
+            .where(Event.scenario_id == scenario_id)
+            .where(Event.event_type == "earthquake")
+            .where(Event.address == epicenter_name)
+            .where(Event.source_detail["magnitude"].astext.cast(Float) == magnitude)
+            .order_by(Event.reported_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+    
     async def get_statistics(self, scenario_id: UUID) -> dict:
         base = select(Event).where(Event.scenario_id == scenario_id)
         

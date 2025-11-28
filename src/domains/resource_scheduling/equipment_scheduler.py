@@ -379,33 +379,44 @@ class EquipmentScheduler:
 
         except Exception as e:
             logger.debug(f"[装备调度] equipment_inventory_v2查询失败（可能表不存在）: {e}")
+            # 回滚事务以清除错误状态，允许后续查询继续执行
+            await self._db.rollback()
 
-        # 备选方案：从shelters查询物资储备点
-        sql_shelter = text("""
+        # 备选方案：从V14物资库存体系查询 (supply_depots_v2 + supply_inventory_v2)
+        sql_depot = text("""
             SELECT 
-                sh.id,
-                sh.name,
-                ST_X(sh.location::geometry) as longitude,
-                ST_Y(sh.location::geometry) as latitude,
-                sh.supply_inventory,
+                sd.id AS depot_id,
+                sd.name AS depot_name,
+                sd.depot_type::text,
+                ST_X(sd.location::geometry) as longitude,
+                ST_Y(sd.location::geometry) as latitude,
+                s.id AS supply_id,
+                s.code AS supply_code,
+                s.name AS supply_name,
+                (si.quantity - si.reserved_quantity) AS available_quantity,
                 ST_Distance(
-                    sh.location::geography,
+                    sd.location::geography,
                     ST_SetSRID(ST_MakePoint(:dest_lon, :dest_lat), 4326)::geography
                 ) / 1000.0 as distance_km
-            FROM public.evacuation_shelters_v2 sh
-            WHERE sh.shelter_type = 'supply_depot'
-            AND sh.status = 'open'
+            FROM operational_v2.supply_depots_v2 sd
+            JOIN operational_v2.supply_inventory_v2 si ON sd.id = si.depot_id
+            JOIN operational_v2.supplies_v2 s ON si.supply_id = s.id
+            WHERE sd.is_active = true
+            AND sd.location IS NOT NULL
+            AND s.code = ANY(:supply_codes)
+            AND (si.quantity - si.reserved_quantity) > 0
             AND ST_DWithin(
-                sh.location::geography,
+                sd.location::geography,
                 ST_SetSRID(ST_MakePoint(:dest_lon, :dest_lat), 4326)::geography,
                 :max_distance_m
             )
             ORDER BY distance_km ASC
-            LIMIT 20
+            LIMIT 50
         """)
 
         try:
-            result = await self._db.execute(sql_shelter, {
+            result = await self._db.execute(sql_depot, {
+                "supply_codes": supply_codes,
                 "dest_lon": destination_lon,
                 "dest_lat": destination_lat,
                 "max_distance_m": max_distance_km * 1000,
@@ -413,37 +424,43 @@ class EquipmentScheduler:
 
             candidates = []
             for row in result.fetchall():
-                shelter_id = row[0]
-                shelter_name = row[1]
-                lon = row[2]
-                lat = row[3]
-                inventory = row[4] or {}
-                distance = row[5]
+                depot_id = row[0]
+                depot_name = row[1]
+                depot_type = row[2]
+                lon = row[3]
+                lat = row[4]
+                supply_id = row[5]
+                supply_code = row[6]
+                supply_name = row[7]
+                available_qty = row[8]
+                distance = row[9]
 
-                # 从inventory中查找匹配的装备
-                for code in supply_codes:
-                    # inventory格式可能是 {supply_code: quantity} 或 {supply_name: quantity}
-                    quantity = inventory.get(code, 0)
-                    if quantity > 0:
-                        candidate = EquipmentCandidate(
-                            equipment_id=shelter_id,
-                            equipment_code=code,
-                            equipment_name=code,
-                            equipment_type=EquipmentType.SUPPLY,
-                            location_type=LocationType.SHELTER,
-                            location_id=shelter_id,
-                            location_name=shelter_name,
-                            longitude=lon,
-                            latitude=lat,
-                            available_quantity=quantity,
-                            distance_km=distance,
-                        )
-                        candidates.append(candidate)
+                # 根据depot_type映射到LocationType
+                location_type = LocationType.WAREHOUSE
+                if depot_type == 'team_base':
+                    location_type = LocationType.TEAM
+                elif depot_type == 'vehicle':
+                    location_type = LocationType.VEHICLE
+
+                candidate = EquipmentCandidate(
+                    equipment_id=supply_id,
+                    equipment_code=supply_code,
+                    equipment_name=supply_name,
+                    equipment_type=EquipmentType.SUPPLY,
+                    location_type=location_type,
+                    location_id=depot_id,
+                    location_name=depot_name,
+                    longitude=lon or 0,
+                    latitude=lat or 0,
+                    available_quantity=available_qty,
+                    distance_km=distance or 0,
+                )
+                candidates.append(candidate)
 
             return candidates
 
         except Exception as e:
-            logger.warning(f"[装备调度] 查询物资储备点失败: {e}")
+            logger.warning(f"[装备调度] 查询物资存放点失败: {e}")
             return []
 
     def _allocate_equipment(

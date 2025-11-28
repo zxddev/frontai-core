@@ -1,5 +1,7 @@
 """
 救援队驻扎点选址 API 路由
+
+遵循调用规范：Router → Service → Core
 """
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
-from src.domains.staging_area.core import StagingAreaCore
+from src.domains.staging_area.service import StagingAreaService
 from src.domains.staging_area.schemas import (
     StagingRecommendation,
     StagingRecommendationRequest,
@@ -26,7 +28,7 @@ router = APIRouter(
 @router.post(
     "/recommend",
     response_model=StagingRecommendation,
-    summary="推荐救援队驻扎点",
+    summary="推荐救援队驻扎点（纯算法模式）",
     description="""
     根据地震参数、救援目标和队伍信息，推荐安全的前沿驻扎点。
     
@@ -37,6 +39,8 @@ router = APIRouter(
     4. 多目标评估排序（响应时间、安全性、后勤、设施、通信）
     
     **返回**：按总分排序的驻扎点推荐列表
+    
+    **注意**：此为纯算法接口，如需LLM分析请使用 /api/v2/ai/staging-area
     """,
 )
 async def recommend_staging_site(
@@ -44,18 +48,14 @@ async def recommend_staging_site(
     db: AsyncSession = Depends(get_db),
 ) -> StagingRecommendation:
     """
-    推荐救援队驻扎点
+    推荐救援队驻扎点（纯算法模式）
+    
+    遵循调用规范：Router调用Service，Service调用Core
     """
     try:
-        core = StagingAreaCore(db)
-        result = await core.recommend(
-            scenario_id=request.scenario_id,
-            earthquake=request.earthquake,
-            rescue_targets=request.rescue_targets,
-            team=request.team,
-            constraints=request.constraints,
-            weights=request.weights,
-        )
+        # 遵循调用规范：实例化Service，由Service管理Core
+        service = StagingAreaService(db)
+        result = await service.recommend(request)
         
         if not result.success and result.error:
             logger.warning(f"[驻扎点API] 推荐失败: {result.error}")

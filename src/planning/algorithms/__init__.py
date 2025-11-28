@@ -17,7 +17,7 @@ from .base import AlgorithmBase, AlgorithmResult, AlgorithmStatus, Location, Tim
 from .assessment import DisasterAssessment, SecondaryHazardPredictor, LossEstimator, ConfirmationScorer
 
 # 匹配模块
-from .matching import RescueTeamSelector, VehicleCargoMatcher, CapabilityMatcher
+from .matching import VehicleCargoMatcher, CapabilityMatcher
 
 # 路径模块
 from .routing import VehicleRoutingPlanner, OffroadEngine
@@ -47,7 +47,6 @@ __all__ = [
     "LossEstimator",
     "ConfirmationScorer",
     # 匹配
-    "RescueTeamSelector",
     "VehicleCargoMatcher",
     "CapabilityMatcher",
     # 路径

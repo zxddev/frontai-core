@@ -138,14 +138,14 @@ class ASRManager:
         except Exception as e:
             logger.warning("阿里云ASR Provider创建失败: %s", str(e))
 
-        # 尝试创建本地FunASR Provider（WebSocket）
-        try:
-            from .local_provider import LocalFunASRProvider
-
-            providers.append(LocalFunASRProvider())
-            logger.info("本地FunASR Provider创建成功")
-        except Exception as e:
-            logger.warning("本地FunASR Provider创建失败: %s", str(e))
+        # 本地FunASR Provider（WebSocket）已弃用，不再创建
+        # 保留代码供需要时启用：
+        # try:
+        #     from .local_provider import LocalFunASRProvider
+        #     providers.append(LocalFunASRProvider())
+        #     logger.info("本地FunASR Provider创建成功")
+        # except Exception as e:
+        #     logger.warning("本地FunASR Provider创建失败: %s", str(e))
 
         if not providers:
             raise RuntimeError("没有可用的ASR Provider")

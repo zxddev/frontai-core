@@ -33,6 +33,15 @@ from src.domains.resource_scheduling import (
     SchedulingConstraints,
     PriorityLevel,
 )
+from src.domains.resource_scheduling.sphere_demand_calculator import SphereDemandCalculator
+from src.domains.supplies.inventory_service import SupplyInventoryService
+from src.domains.disaster import (
+    ResponsePhase,
+    ClimateType,
+    CasualtyEstimator,
+    DisasterType as DisasterTypeEnum,
+)
+from src.domains.disaster.casualty_estimator import CasualtyEstimate
 from ..state import EmergencyAIState, ResourceCandidate, AllocationSolution
 
 logger = logging.getLogger(__name__)
@@ -293,10 +302,11 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
     candidates.sort(key=lambda x: x["match_score"], reverse=True)
 
     # ========================================================================
-    # 整合调度：装备调度 + 物资需求计算
+    # 整合调度：装备调度 + 物资需求计算 + 前线库存缺口分析
     # ========================================================================
     equipment_allocations: List[Dict[str, Any]] = []
     supply_requirements: List[Dict[str, Any]] = []
+    supply_shortages: List[Dict[str, Any]] = []
     
     # 获取灾情信息
     parsed_disaster = state.get("parsed_disaster", {})
@@ -350,14 +360,44 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
                     "elapsed_ms": equipment_result.elapsed_ms,
                 }
             
-            # 2. 物资需求计算
+            # 2. 物资需求计算 - 使用SphereDemandCalculator
             if affected_population > 0:
-                logger.info(f"[资源匹配] 开始物资需求计算: 灾害类型={disaster_type}, 受灾人数={affected_population}")
-                supply_result = await integrated_core.calculate_supply_demand(
-                    disaster_type=disaster_type,
-                    affected_count=affected_population,
-                    duration_days=3,  # 默认3天应急期
-                    trapped_count=estimated_trapped,
+                logger.info(f"[资源匹配] 开始物资需求计算(Sphere): 灾害类型={disaster_type}, 受灾人数={affected_population}")
+                
+                # 构造伤亡估算
+                estimator = CasualtyEstimator()
+                severity = parsed_disaster.get("severity", "medium") if parsed_disaster else "medium"
+                severity_score = {"critical": 0.9, "high": 0.7, "medium": 0.5, "low": 0.3}.get(severity, 0.5)
+                
+                try:
+                    dt = DisasterTypeEnum(disaster_type)
+                except ValueError:
+                    dt = DisasterTypeEnum.EARTHQUAKE
+                
+                casualty = estimator.estimate_generic(
+                    disaster_type=dt,
+                    severity=severity_score,
+                    population=affected_population,
+                )
+                # 如果有明确被困人数，覆盖估算值
+                if estimated_trapped > 0:
+                    casualty = CasualtyEstimate(
+                        fatalities=casualty.fatalities,
+                        severe_injuries=casualty.severe_injuries,
+                        minor_injuries=casualty.minor_injuries,
+                        trapped=estimated_trapped,
+                        displaced=casualty.displaced,
+                        affected=affected_population,
+                        confidence=casualty.confidence,
+                        methodology=casualty.methodology,
+                    )
+                
+                sphere_calculator = SphereDemandCalculator(db)
+                supply_result = await sphere_calculator.calculate(
+                    phase=ResponsePhase.IMMEDIATE,
+                    casualty_estimate=casualty,
+                    duration_days=3,
+                    climate=ClimateType.TEMPERATE,
                 )
                 
                 for req in supply_result.requirements:
@@ -371,8 +411,8 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
                     })
                 
                 logger.info(
-                    f"[资源匹配] 物资需求计算完成: {len(supply_requirements)}种物资，"
-                    f"来源={supply_result.source}"
+                    f"[资源匹配] 物资需求计算完成(Sphere): {len(supply_requirements)}种物资，"
+                    f"耗时={supply_result.elapsed_ms}ms"
                 )
                 
                 trace["supply_calculation"] = {
@@ -380,13 +420,61 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
                     "affected_count": affected_population,
                     "duration_days": 3,
                     "supply_types": len(supply_requirements),
-                    "source": supply_result.source,
+                    "source": "SphereDemandCalculator",
                     "elapsed_ms": supply_result.elapsed_ms,
                 }
+            
+            # 3. 查询前线可用库存并计算缺口
+            scenario_id_raw = state.get("scenario_id")
+            scenario_uuid: Optional[UUID] = None
+            
+            # 验证并转换scenario_id为UUID
+            if scenario_id_raw and supply_requirements:
+                scenario_uuid = await _resolve_scenario_id(db, scenario_id_raw)
+                if scenario_uuid is None:
+                    logger.warning(
+                        f"[资源匹配] scenario_id '{scenario_id_raw}' 无法解析为有效UUID，跳过库存查询"
+                    )
+            
+            if scenario_uuid and supply_requirements:
+                logger.info(f"[资源匹配] 查询前线可用库存，scenario_id={scenario_uuid}")
+                inventory_service = SupplyInventoryService(db)
+                
+                # 查询前线所有depot的库存（field_depot/vehicle/team_base）
+                field_inventory = await inventory_service.get_field_available_supplies(
+                    scenario_id=scenario_uuid
+                )
+                
+                # 计算缺口
+                supply_shortages = await inventory_service.calculate_shortage(
+                    requirements=supply_requirements,
+                    available=field_inventory,
+                )
+                
+                logger.info(
+                    f"[资源匹配] 前线库存查询完成: {len(field_inventory)}条库存，"
+                    f"{len(supply_shortages)}种物资存在缺口"
+                )
+                
+                trace["field_inventory"] = {
+                    "scenario_id": str(scenario_uuid),
+                    "inventory_count": len(field_inventory),
+                    "shortage_count": len(supply_shortages),
+                }
+                
+                # 将缺口信息添加到返回值
+                if supply_shortages:
+                    for shortage in supply_shortages:
+                        # 标记需要从后方调拨的物资
+                        shortage["needs_transfer"] = True
+                        shortage["transfer_suggestion"] = (
+                            f"前线缺口{shortage['shortage']}，建议从后方仓库调拨"
+                        )
                 
     except Exception as e:
         logger.error(f"[资源匹配] 整合调度失败: {e}")
         errors.append(f"整合调度失败: {e}")
+        supply_shortages = []
 
     # 更新追踪信息
     trace["phases_executed"] = trace.get("phases_executed", []) + ["match_resources"]
@@ -395,17 +483,20 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
     trace["candidates_count"] = len(candidates)
     trace["equipment_count"] = len(equipment_allocations)
     trace["supply_types_count"] = len(supply_requirements)
+    trace["supply_shortages_count"] = len(supply_shortages)
 
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(
         f"[资源匹配] 完成，查询{len(teams)}支队伍，生成{len(candidates)}个候选，"
-        f"调度{len(equipment_allocations)}件装备，计算{len(supply_requirements)}种物资需求，耗时{elapsed_ms}ms"
+        f"调度{len(equipment_allocations)}件装备，计算{len(supply_requirements)}种物资需求，"
+        f"缺口{len(supply_shortages)}种，耗时{elapsed_ms}ms"
     )
 
     return {
         "resource_candidates": candidates,
-        "equipment_allocations": equipment_allocations,  # 新增：装备分配
-        "supply_requirements": supply_requirements,       # 新增：物资需求
+        "equipment_allocations": equipment_allocations,
+        "supply_requirements": supply_requirements,
+        "supply_shortages": supply_shortages,
         "trace": trace,
         "errors": errors,
         "current_phase": "matching",
@@ -760,6 +851,67 @@ def _run_nsga2_optimization(
     solutions.sort(key=lambda s: s["coverage_rate"], reverse=True)
     
     return solutions
+
+
+async def _resolve_scenario_id(
+    db: AsyncSession,
+    scenario_id_raw: Any,
+) -> Optional[UUID]:
+    """
+    解析scenario_id为UUID
+    
+    支持以下输入格式：
+    1. 已经是UUID对象 -> 直接返回
+    2. 有效的UUID字符串 -> 转换为UUID
+    3. scenario名称 -> 从数据库查找对应的UUID
+    4. 无效输入 -> 返回None
+    
+    Args:
+        db: 数据库会话
+        scenario_id_raw: 原始scenario_id（可能是UUID、字符串或其他）
+        
+    Returns:
+        有效的UUID，或None表示无法解析
+    """
+    if scenario_id_raw is None:
+        return None
+    
+    # 已经是UUID对象
+    if isinstance(scenario_id_raw, UUID):
+        return scenario_id_raw
+    
+    # 尝试转换为UUID字符串
+    if isinstance(scenario_id_raw, str):
+        # 尝试直接解析为UUID
+        try:
+            return UUID(scenario_id_raw)
+        except ValueError:
+            pass
+        
+        # 不是有效UUID格式，尝试按名称查找
+        try:
+            sql = text("""
+                SELECT id FROM operational_v2.scenarios_v2
+                WHERE name ILIKE :name_pattern
+                LIMIT 1
+            """)
+            result = await db.execute(sql, {"name_pattern": f"%{scenario_id_raw}%"})
+            row = result.fetchone()
+            if row:
+                logger.info(f"[scenario解析] 按名称'{scenario_id_raw}'找到scenario: {row[0]}")
+                return row[0]
+            else:
+                logger.warning(f"[scenario解析] 未找到名称匹配'{scenario_id_raw}'的scenario")
+                return None
+        except Exception as e:
+            logger.warning(f"[scenario解析] 查询失败: {e}")
+            return None
+    
+    # 其他类型，尝试转换为字符串再解析
+    try:
+        return UUID(str(scenario_id_raw))
+    except (ValueError, TypeError):
+        return None
 
 
 def _extract_event_location(state: EmergencyAIState) -> Optional[Tuple[float, float]]:

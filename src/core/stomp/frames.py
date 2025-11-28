@@ -65,6 +65,22 @@ class StompFrame:
         
         return frame.encode("utf-8")
     
+    def to_text(self) -> str:
+        """序列化为STOMP文本格式"""
+        lines = [self.command.value]
+        
+        for key, value in self.headers.items():
+            lines.append(f"{key}:{value}")
+        
+        # STOMP 帧格式：headers 和 body 之间需要空行（两个换行符）
+        frame = "\n".join(lines)
+        frame += "\n\n"  # 空行分隔 headers 和 body
+        if self.body:
+            frame += self.body
+        frame += "\x00"  # NULL终止符
+        
+        return frame
+    
     def to_json(self) -> str:
         """序列化为JSON格式（用于简化传输）"""
         return json.dumps({

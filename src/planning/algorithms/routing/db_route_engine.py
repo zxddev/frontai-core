@@ -115,6 +115,15 @@ class RouteEdge:
     tunnel_height_m: Optional[float]
 
 
+class PassageStatus:
+    """通行状态枚举"""
+    CONFIRMED_BLOCKED = "confirmed_blocked"        # 已确认不可通行
+    NEEDS_RECONNAISSANCE = "needs_reconnaissance"  # 需侦察确认
+    PASSABLE_WITH_CAUTION = "passable_with_caution"  # 可通行但需谨慎
+    CLEAR = "clear"                                # 已确认安全
+    UNKNOWN = "unknown"                            # 未知状态
+
+
 @dataclass
 class DisasterArea:
     """灾害影响区域"""
@@ -124,6 +133,8 @@ class DisasterArea:
     passable_vehicle_types: List[str]
     speed_reduction_percent: int
     risk_level: int
+    passage_status: str = PassageStatus.UNKNOWN  # 新增：通行状态
+    reconnaissance_required: bool = False         # 新增：是否需侦察
 
 
 @dataclass
@@ -346,7 +357,9 @@ class DatabaseRouteEngine:
         """加载想定关联的灾害影响区域"""
         sql = text("""
             SELECT id, area_type, passable, passable_vehicle_types,
-                   speed_reduction_percent, risk_level
+                   speed_reduction_percent, risk_level,
+                   COALESCE(passage_status, 'unknown') as passage_status,
+                   COALESCE(reconnaissance_required, false) as reconnaissance_required
             FROM operational_v2.disaster_affected_areas_v2
             WHERE scenario_id = :scenario_id
             AND (estimated_end_at IS NULL OR estimated_end_at > now())
@@ -363,6 +376,8 @@ class DatabaseRouteEngine:
                 passable_vehicle_types=row[3] or [],
                 speed_reduction_percent=row[4] or 100,
                 risk_level=row[5] or 5,
+                passage_status=row[6] or PassageStatus.UNKNOWN,
+                reconnaissance_required=row[7] or False,
             )
             areas.append(area)
         
@@ -372,11 +387,23 @@ class DatabaseRouteEngine:
         self,
         scenario_id: UUID,
         vehicle_type: str,
+        allow_unverified_areas: bool = False,
     ) -> Set[UUID]:
         """
         获取被灾害区域封锁的边ID
         
         使用PostGIS ST_Intersects检查边与灾害区域是否相交
+        
+        通行状态决策逻辑：
+        - confirmed_blocked: 绝对绕行
+        - needs_reconnaissance: 默认绕行，除非 allow_unverified_areas=True
+        - passable_with_caution: 允许通行（通过速度惩罚处理）
+        - clear/unknown: 允许通行
+        
+        Args:
+            scenario_id: 想定ID
+            vehicle_type: 车辆类型代码
+            allow_unverified_areas: 是否允许进入未验证区域（侦察任务时为True）
         """
         sql = text("""
             SELECT DISTINCT e.id
@@ -384,14 +411,28 @@ class DatabaseRouteEngine:
             JOIN operational_v2.disaster_affected_areas_v2 d 
                 ON ST_Intersects(e.geometry::geometry, d.geometry::geometry)
             WHERE d.scenario_id = :scenario_id
-            AND d.passable = false
             AND (d.estimated_end_at IS NULL OR d.estimated_end_at > now())
+            AND (
+                -- 已确认不可通行：绝对绕行
+                COALESCE(d.passage_status, 'unknown') = 'confirmed_blocked'
+                OR (
+                    -- 需侦察区域：根据参数决定是否绕行
+                    COALESCE(d.passage_status, 'unknown') = 'needs_reconnaissance'
+                    AND :allow_unverified = false
+                )
+                OR (
+                    -- 兼容旧数据：passable=false 且 passage_status 未设置
+                    d.passable = false 
+                    AND COALESCE(d.passage_status, 'unknown') = 'unknown'
+                )
+            )
             AND NOT (:vehicle_type = ANY(COALESCE(d.passable_vehicle_types, ARRAY[]::text[])))
         """)
         
         result = await self._db.execute(sql, {
             "scenario_id": scenario_id,
             "vehicle_type": vehicle_type,
+            "allow_unverified": allow_unverified_areas,
         })
         
         return {row[0] for row in result.fetchall()}

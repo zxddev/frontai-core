@@ -71,15 +71,21 @@ class StompBroker:
         logger.info("Starting STOMP broker...")
         self._running = True
         
-        # 初始化Redis连接
-        self._redis = await get_redis_client()
-        self._pubsub = self._redis.pubsub()
-        
-        # 订阅Redis通配符频道
-        await self._pubsub.psubscribe(f"{self.REDIS_CHANNEL_PREFIX}*")
-        
-        # 启动Redis消息监听
-        self._listener_task = asyncio.create_task(self._redis_listener())
+        # 初始化Redis连接（允许失败，降级到本地模式）
+        try:
+            self._redis = await get_redis_client()
+            self._pubsub = self._redis.pubsub()
+            
+            # 订阅Redis通配符频道
+            await self._pubsub.psubscribe(f"{self.REDIS_CHANNEL_PREFIX}*")
+            
+            # 启动Redis消息监听
+            self._listener_task = asyncio.create_task(self._redis_listener())
+            logger.info("STOMP broker Redis mode enabled")
+        except Exception as e:
+            logger.warning(f"Redis connection failed, running in local-only mode: {e}")
+            self._redis = None
+            self._pubsub = None
         
         # 启动心跳检测
         self._heartbeat_task = asyncio.create_task(self._heartbeat_checker())
@@ -315,8 +321,12 @@ class StompBroker:
         await self.send_to_destination("/topic/map.entity.update", {"payload": entity_data}, scenario_id)
     
     async def broadcast_entity_delete(self, entity_id: str, scenario_id: Optional[UUID] = None):
-        """广播实体删除"""
+        """广播实体删除（仅ID）"""
         await self.send_to_destination("/topic/map.entity.delete", {"payload": {"id": entity_id}}, scenario_id)
+    
+    async def broadcast_entity_delete_full(self, entity_data: dict, scenario_id: Optional[UUID] = None):
+        """广播实体删除（包含完整信息：id, type, layerCode）"""
+        await self.send_to_destination("/topic/map.entity.delete", {"payload": entity_data}, scenario_id)
     
     async def broadcast_location(self, location_data: dict, scenario_id: Optional[UUID] = None):
         """广播实时位置"""

@@ -59,24 +59,41 @@ class EntityIdsRequest(BaseModel):
 
 
 def _convert_entity_to_dto(entity) -> EntityDto:
-    """将v2实体转换为前端格式"""
+    """
+    将v2实体转换为前端格式
+    
+    参考: docs/地图图层与后端对接规范.md 第2章
+    """
     geometry = None
     if entity.geometry:
-        geometry = EntityGeometry(
-            type=entity.geometry.type,
-            coordinates=entity.geometry.coordinates,
-        )
+        geometry_dict = {
+            "type": entity.geometry.type,
+            "coordinates": entity.geometry.coordinates,
+        }
+        # 圆形区域需要补充 center 和 radius（前端 handleEntity.js 需要）
+        circle_types = {'danger_area', 'safety_area', 'command_post_candidate'}
+        if entity.type in circle_types:
+            coords = entity.geometry.coordinates
+            if coords and len(coords) >= 2:
+                geometry_dict['center'] = coords[:2]
+            props = entity.properties or {}
+            if 'range' in props:
+                geometry_dict['radius'] = props['range']
+        # weather_area 需要 bbox
+        if entity.type == 'weather_area':
+            props = entity.properties or {}
+            if 'bbox' in props:
+                geometry_dict['bbox'] = props['bbox']
+        geometry = EntityGeometry(**geometry_dict)
     
     return EntityDto(
         id=str(entity.id),
-        layerCode=entity.layer_code,
         type=entity.type,
+        layerCode=entity.layer_code,
         geometry=geometry,
         properties=entity.properties or {},
-        status=None,
         visibleOnMap=entity.visible_on_map,
-        dynamic=entity.is_dynamic,
-        source=entity.source,
+        styleOverrides={},
         createdAt=entity.created_at.isoformat() if entity.created_at else "",
         updatedAt=entity.updated_at.isoformat() if entity.updated_at else "",
     )
@@ -86,6 +103,7 @@ def _convert_entity_to_dto(entity) -> EntityDto:
 async def fetch_entities(
     layerCode: Optional[str] = Query(None, description="图层编码"),
     type: Optional[str] = Query(None, description="实体类型"),
+    scenarioId: Optional[str] = Query(None, description="场景ID"),
     includeHidden: bool = Query(False, description="是否包含隐藏实体"),
     updatedSince: Optional[str] = Query(None, description="增量查询起始时间"),
     page: int = Query(1, ge=1),
@@ -94,12 +112,16 @@ async def fetch_entities(
 ) -> ApiResponse[EntityPage]:
     """
     获取实体列表 - 对接v2真实数据
+    
+    页面刷新/初始化时调用此接口获取所有实体
     """
-    logger.info(f"获取实体列表, layerCode={layerCode}, type={type}")
+    logger.info(f"获取实体列表, layerCode={layerCode}, type={type}, scenarioId={scenarioId}")
     
     try:
         is_visible = None if includeHidden else True
+        scenario_uuid = UUID(scenarioId) if scenarioId else None
         result = await service.list(
+            scenario_id=scenario_uuid,
             layer_code=layerCode,
             entity_types=type,
             is_visible=is_visible,

@@ -1,20 +1,17 @@
 """
 救援队驻扎点选址核心算法
 
-参考 ResourceSchedulingCore 设计模式，提供纯算法实现。
-不使用 LangGraph，因为核心是空间优化问题，不需要LLM参与决策。
+遵循调用规范：Core层不持有db，通过Repository和RouteEngine依赖注入。
+可作为Agent的底层Tool使用。
 """
 from __future__ import annotations
 
 import logging
 import math
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from src.domains.staging_area.repository import StagingAreaRepository
 from src.domains.staging_area.schemas import (
     CandidateSite,
     CandidateWithRoutes,
@@ -39,6 +36,9 @@ from src.planning.algorithms.routing.db_route_engine import (
     InfeasiblePathError,
 )
 
+if TYPE_CHECKING:
+    from src.domains.staging_area.repository import StagingAreaRepository
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,12 +59,27 @@ class StagingAreaCore:
     2. 搜索并过滤候选驻扎点
     3. 计算到救援目标的实际路径
     4. 多目标评估和排序
+    
+    遵循调用规范：
+    - 不持有 db/session
+    - 通过构造函数接收 Repository 和 RouteEngine
+    - Service 层负责实例化依赖
     """
     
-    def __init__(self, db: AsyncSession) -> None:
-        self._db = db
-        self._repository = StagingAreaRepository(db)
-        self._route_engine = DatabaseRouteEngine(db)
+    def __init__(
+        self,
+        repository: "StagingAreaRepository",
+        route_engine: DatabaseRouteEngine,
+    ) -> None:
+        """
+        初始化核心算法
+        
+        Args:
+            repository: 驻扎点数据仓库（由Service层注入）
+            route_engine: 路径规划引擎（由Service层注入）
+        """
+        self._repo = repository
+        self._route_engine = route_engine
     
     async def recommend(
         self,
@@ -212,7 +227,7 @@ class StagingAreaCore:
         ))
         
         # 2. 查询数据库中的危险区域
-        db_zones = await self._repository.get_danger_zones(scenario_id)
+        db_zones = await self._repo.get_danger_zones(scenario_id)
         for z in db_zones:
             zone_type = self._map_area_type_to_risk_zone(z["area_type"])
             zones.append(RiskZone(
@@ -263,7 +278,7 @@ class StagingAreaCore:
         
         使用PostGIS空间查询，排除危险区域内的点位。
         """
-        return await self._repository.search_candidates(
+        return await self._repo.search_candidates(
             scenario_id=scenario_id,
             center_lon=earthquake.epicenter_lon,
             center_lat=earthquake.epicenter_lat,

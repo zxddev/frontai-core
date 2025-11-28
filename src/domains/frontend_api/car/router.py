@@ -3,12 +3,13 @@
 
 接口路径: /car/* 和 /item/*
 对接v2 VehicleService/DeviceService真实数据
+集成AI装备推荐智能体结果
 """
 
 import json
 import logging
-from typing import Optional
-from uuid import uuid4, UUID
+from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Query, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,9 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_db
 from src.domains.resources.vehicles.service import VehicleService
 from src.domains.resources.devices.service import DeviceService
+from src.domains.equipment_recommendation.repository import EquipmentRecommendationRepository
 from src.domains.frontend_api.common import ApiResponse
 from .schemas import (
-    CarListData, CarItem, ItemData,
+    CarListData, CarItem, ItemData, ShortageAlertData,
     ItemDetailResponse, ItemProperty,
     CarItemSelect, EventIdForm,
 )
@@ -74,16 +76,85 @@ def _get_mock_cars(user_id: str) -> CarListData:
     )
 
 
+def _build_recommended_device_map(
+    ai_recommendation: Optional[Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """构建AI推荐设备映射表 {device_id -> {reason, priority, modules}}"""
+    if not ai_recommendation:
+        return {}
+    
+    device_map: Dict[str, Dict[str, Any]] = {}
+    recommended_devices = ai_recommendation.get("recommended_devices", [])
+    
+    for rec in recommended_devices:
+        device_id = rec.get("device_id", "")
+        if device_id:
+            device_map[device_id] = {
+                "reason": rec.get("reason", ""),
+                "priority": rec.get("priority", "medium"),
+                "modules": rec.get("modules", []),
+            }
+    
+    return device_map
+
+
+def _build_shortage_alerts(
+    ai_recommendation: Optional[Dict[str, Any]]
+) -> Optional[List[ShortageAlertData]]:
+    """构建缺口告警列表"""
+    if not ai_recommendation:
+        return None
+    
+    alerts = ai_recommendation.get("shortage_alerts", [])
+    if not alerts:
+        return None
+    
+    return [
+        ShortageAlertData(
+            itemType=a.get("item_type", ""),
+            itemName=a.get("item_name", ""),
+            required=a.get("required", 0),
+            available=a.get("available", 0),
+            shortage=a.get("shortage", 0),
+            severity=a.get("severity", "warning"),
+            suggestion=a.get("suggestion", ""),
+        )
+        for a in alerts
+    ]
+
+
 @router.get("/car/car-item-select-list", response_model=ApiResponse[CarListData])
 async def get_car_list(
     userId: str = Query(..., description="用户ID"),
+    eventId: Optional[str] = Query(None, description="事件ID，用于获取AI装备推荐"),
+    db: AsyncSession = Depends(get_db),
     vehicle_service: VehicleService = Depends(get_vehicle_service),
     device_service: DeviceService = Depends(get_device_service),
 ) -> ApiResponse[CarListData]:
     """
-    获取车辆和装备载荷列表 - 尝试对接v2真实数据，失败时回退Mock
+    获取车辆和装备载荷列表
+    
+    - 对接v2真实数据
+    - 若传入eventId，集成AI装备推荐结果，AI推荐的设备isSelected=1
     """
-    logger.info(f"获取车辆列表, userId={userId}")
+    logger.info(f"获取车辆列表, userId={userId}, eventId={eventId}")
+    
+    # 获取AI推荐（如果有eventId）
+    ai_recommendation: Optional[Dict[str, Any]] = None
+    if eventId:
+        try:
+            rec_repo = EquipmentRecommendationRepository(db)
+            ai_recommendation = await rec_repo.get_by_event_id(UUID(eventId))
+            if ai_recommendation:
+                logger.info(
+                    f"获取到AI推荐: status={ai_recommendation.get('status')}, "
+                    f"devices={len(ai_recommendation.get('recommended_devices', []))}"
+                )
+        except Exception as e:
+            logger.warning(f"获取AI推荐失败: {e}")
+    
+    # 构建推荐设备映射
+    rec_device_map = _build_recommended_device_map(ai_recommendation)
     
     try:
         # 尝试获取真实车辆数据
@@ -99,12 +170,17 @@ async def get_car_list(
             
             item_list = []
             for device in device_result.items:
+                device_id_str = str(device.id)
+                rec_info = rec_device_map.get(device_id_str)
+                
                 item_list.append(ItemData(
-                    id=str(device.id),
+                    id=device_id_str,
                     name=device.name,
                     model=device.properties.get('model', device.code),
                     type="device",
-                    isSelected=1 if device.status == 'available' else 0,
+                    isSelected=1 if rec_info else 0,
+                    aiReason=rec_info["reason"] if rec_info else None,
+                    priority=rec_info["priority"] if rec_info else None,
                 ))
             
             status_map = {
@@ -125,12 +201,18 @@ async def get_car_list(
         return ApiResponse.success(CarListData(
             carItemDataList=cars,
             carQuestStatus=_car_data["carQuestStatus"],
+            recommendationId=str(ai_recommendation["id"]) if ai_recommendation else None,
+            recommendationStatus=ai_recommendation.get("status") if ai_recommendation else None,
+            shortageAlerts=_build_shortage_alerts(ai_recommendation),
         ))
         
     except Exception as e:
-        # 数据库表结构不匹配，回退到Mock数据
         logger.warning(f"获取真实车辆数据失败，使用Mock数据: {e}")
-        return ApiResponse.success(_get_mock_cars(userId))
+        mock_data = _get_mock_cars(userId)
+        mock_data.recommendationId = str(ai_recommendation["id"]) if ai_recommendation else None
+        mock_data.recommendationStatus = ai_recommendation.get("status") if ai_recommendation else None
+        mock_data.shortageAlerts = _build_shortage_alerts(ai_recommendation)
+        return ApiResponse.success(mock_data)
 
 
 @router.get("/item/get-item-detail", response_model=ApiResponse[ItemDetailResponse])

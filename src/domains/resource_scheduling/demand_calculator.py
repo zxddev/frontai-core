@@ -2,9 +2,11 @@
 物资需求计算器
 
 根据灾情计算物资需求量:
-1. 从supply_standards_v2查询物资需求标准
+1. 优先从 supplies_v2 查询物资及其 properties 中的需求参数
 2. 根据受灾人数和持续天数计算总需求量
 3. 考虑优先级和紧急程度
+
+与 equipment_preparation 智能体共享相同的物资编码体系。
 """
 from __future__ import annotations
 
@@ -19,43 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .equipment_schemas import SupplyRequirement
 
 logger = logging.getLogger(__name__)
-
-
-# 内置默认标准（数据库无数据时使用）
-DEFAULT_SUPPLY_STANDARDS: Dict[str, Dict[str, Dict]] = {
-    "earthquake": {
-        "SP-LIFE-WATER": {"name": "饮用水", "per_day": 2.5, "unit": "liter", "priority": "critical"},
-        "SP-LIFE-FOOD": {"name": "应急食品", "per_day": 0.5, "unit": "kg", "priority": "critical"},
-        "SP-SHELTER-TENT": {"name": "救灾帐篷", "per_day": 0.2, "unit": "unit", "priority": "high"},
-        "SP-SHELTER-BLANKET": {"name": "保暖毯", "per_day": 1.0, "unit": "piece", "priority": "high"},
-        "SP-MED-KIT": {"name": "急救包", "per_day": 0.1, "unit": "set", "priority": "high"},
-    },
-    "flood": {
-        "SP-LIFE-WATER": {"name": "饮用水", "per_day": 3.0, "unit": "liter", "priority": "critical"},
-        "SP-LIFE-FOOD": {"name": "应急食品", "per_day": 0.5, "unit": "kg", "priority": "critical"},
-        "SP-WATER-VEST": {"name": "救生衣", "per_day": 1.0, "unit": "piece", "priority": "critical"},
-        "SP-SHELTER-TENT": {"name": "救灾帐篷", "per_day": 0.2, "unit": "unit", "priority": "high"},
-        "SP-MED-KIT": {"name": "急救包", "per_day": 0.15, "unit": "set", "priority": "high"},
-    },
-    "fire": {
-        "SP-LIFE-WATER": {"name": "饮用水", "per_day": 3.0, "unit": "liter", "priority": "critical"},
-        "SP-MED-KIT": {"name": "急救包", "per_day": 0.2, "unit": "set", "priority": "critical"},
-        "SP-MED-BURN": {"name": "烧伤药膏", "per_day": 0.5, "unit": "tube", "priority": "critical"},
-        "SP-PROT-MASK": {"name": "防烟面罩", "per_day": 1.0, "unit": "piece", "priority": "critical"},
-    },
-    "hazmat": {
-        "SP-LIFE-WATER": {"name": "饮用水", "per_day": 2.5, "unit": "liter", "priority": "critical"},
-        "SP-MED-KIT": {"name": "急救包", "per_day": 0.2, "unit": "set", "priority": "critical"},
-        "SP-PROT-MASK": {"name": "防毒面具", "per_day": 1.0, "unit": "piece", "priority": "critical"},
-        "SP-MED-ANTIDOTE": {"name": "解毒药品", "per_day": 0.5, "unit": "dose", "priority": "critical"},
-    },
-    "landslide": {
-        "SP-LIFE-WATER": {"name": "饮用水", "per_day": 2.5, "unit": "liter", "priority": "critical"},
-        "SP-LIFE-FOOD": {"name": "应急食品", "per_day": 0.5, "unit": "kg", "priority": "critical"},
-        "SP-SHELTER-TENT": {"name": "救灾帐篷", "per_day": 0.2, "unit": "unit", "priority": "high"},
-        "SP-MED-KIT": {"name": "急救包", "per_day": 0.15, "unit": "set", "priority": "high"},
-    },
-}
 
 
 @dataclass
@@ -187,52 +152,51 @@ class SupplyDemandCalculator:
         """
         获取物资需求标准
         
-        优先从数据库查询，无数据时使用内置默认值。
+        从 supplies_v2 表查询适用于该灾害类型的物资，
+        使用 properties.per_person_per_day 作为需求计算参数。
         """
-        # 尝试从数据库查询
         if self._db is not None:
-            standards = await self._query_standards_from_db(disaster_type)
+            standards = await self._query_supplies_as_standards(disaster_type)
             if standards:
-                return standards, "database"
+                return standards, "supplies_v2"
 
-        # 使用内置默认值
-        defaults = DEFAULT_SUPPLY_STANDARDS.get(disaster_type, {})
-        standards = []
-        for code, info in defaults.items():
-            std = SupplyStandard(
-                supply_code=code,
-                supply_name=info.get("name", code),
-                category=info.get("category", "life"),
-                per_person_per_day=info.get("per_day", 1.0),
-                unit=info.get("unit", "unit"),
-                priority=info.get("priority", "medium"),
-            )
-            standards.append(std)
+        logger.warning(f"[物资需求计算] 无法从数据库获取{disaster_type}的物资标准")
+        return [], "none"
 
-        return standards, "default"
-
-    async def _query_standards_from_db(
+    async def _query_supplies_as_standards(
         self,
         disaster_type: str,
     ) -> List[SupplyStandard]:
-        """从数据库查询物资标准"""
+        """
+        从 supplies_v2 表查询物资作为需求标准
+        
+        使用 applicable_disasters 和 required_for_disasters 过滤，
+        从 properties JSON 读取 per_person_per_day 参数。
+        """
         sql = text("""
             SELECT 
-                supply_code,
-                supply_name,
-                COALESCE(supply_category, 'life') as category,
-                per_person_per_day,
-                unit,
-                priority
-            FROM operational_v2.supply_standards_v2
-            WHERE disaster_type = :disaster_type
+                code AS supply_code,
+                name AS supply_name, 
+                category,
+                COALESCE((properties->>'per_person_per_day')::float, 1.0) AS per_person_per_day,
+                COALESCE(unit, 'piece') AS unit,
+                CASE 
+                    WHEN :disaster_type = ANY(required_for_disasters) THEN 'critical'
+                    WHEN :disaster_type = ANY(applicable_disasters) THEN 'high'
+                    ELSE 'medium'
+                END AS priority
+            FROM operational_v2.supplies_v2
+            WHERE :disaster_type = ANY(applicable_disasters)
+               OR :disaster_type = ANY(required_for_disasters)
+               OR category IN ('medical', 'life')
             ORDER BY 
-                CASE priority 
-                    WHEN 'critical' THEN 1 
-                    WHEN 'high' THEN 2 
-                    WHEN 'medium' THEN 3 
-                    ELSE 4 
-                END
+                CASE 
+                    WHEN :disaster_type = ANY(required_for_disasters) THEN 1
+                    WHEN :disaster_type = ANY(applicable_disasters) THEN 2
+                    ELSE 3
+                END,
+                category,
+                code
         """)
 
         try:
@@ -241,19 +205,20 @@ class SupplyDemandCalculator:
             standards: List[SupplyStandard] = []
             for row in result.fetchall():
                 std = SupplyStandard(
-                    supply_code=row[0],
-                    supply_name=row[1] or row[0],
-                    category=row[2],
-                    per_person_per_day=float(row[3]),
-                    unit=row[4],
-                    priority=row[5],
+                    supply_code=row.supply_code,
+                    supply_name=row.supply_name,
+                    category=row.category,
+                    per_person_per_day=float(row.per_person_per_day),
+                    unit=row.unit,
+                    priority=row.priority,
                 )
                 standards.append(std)
 
+            logger.info(f"[物资需求计算] 从supplies_v2查询到{len(standards)}种物资")
             return standards
 
         except Exception as e:
-            logger.warning(f"[物资需求计算] 数据库查询失败: {e}")
+            logger.warning(f"[物资需求计算] 查询supplies_v2失败: {e}")
             return []
 
     def _round_up_quantity(self, quantity: float, unit: str) -> float:
@@ -270,38 +235,4 @@ class SupplyDemandCalculator:
             # 其他单位，保留1位小数
             return round(quantity, 1)
 
-    def calculate_sync(
-        self,
-        disaster_type: str,
-        affected_count: int,
-        duration_days: int = 3,
-        trapped_count: int = 0,
-    ) -> List[SupplyRequirement]:
-        """
-        同步版本的需求计算（不查数据库，只用默认值）
-        
-        用于不需要异步的场景。
-        """
-        defaults = DEFAULT_SUPPLY_STANDARDS.get(disaster_type, {})
-        requirements: List[SupplyRequirement] = []
 
-        for code, info in defaults.items():
-            per_day = info.get("per_day", 1.0)
-            base_quantity = affected_count * per_day * duration_days
-
-            if trapped_count > 0 and info.get("category") in ["medical", "rescue"]:
-                base_quantity += trapped_count * per_day * duration_days * 0.5
-
-            quantity = self._round_up_quantity(base_quantity, info.get("unit", "unit"))
-
-            req = SupplyRequirement(
-                supply_code=code,
-                supply_name=info.get("name", code),
-                category=info.get("category", "life"),
-                quantity=quantity,
-                unit=info.get("unit", "unit"),
-                priority=info.get("priority", "medium"),
-            )
-            requirements.append(req)
-
-        return requirements

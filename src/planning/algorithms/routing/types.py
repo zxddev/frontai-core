@@ -2,11 +2,30 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Literal
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def slope_deg_to_percent(deg: float) -> float:
+    """将坡度从角度转换为百分比。
+    
+    公式: percent = tan(deg) * 100
+    示例: 10° ≈ 17.6%, 30° ≈ 57.7%, 45° = 100%
+    """
+    return math.tan(math.radians(deg)) * 100
+
+
+def slope_percent_to_deg(percent: float) -> float:
+    """将坡度从百分比转换为角度。
+    
+    公式: deg = atan(percent / 100)
+    示例: 10% ≈ 5.7°, 30% ≈ 16.7°, 100% = 45°
+    """
+    return math.degrees(math.atan(percent / 100))
 
 
 class Point(BaseModel):
@@ -15,11 +34,15 @@ class Point(BaseModel):
 
 
 class CapabilityMetrics(BaseModel):
+    """轻量级能力参数模型，用于算法接口。
+    
+    注意：slope_percent 使用百分比单位，与数据库字段 max_gradient_percent 一致。
+    """
     width_m: Optional[float] = Field(None, ge=0)
     height_m: Optional[float] = Field(None, ge=0)
     weight_kg: Optional[float] = Field(None, ge=0)
     turn_radius_m: Optional[float] = Field(None, ge=0)
-    slope_deg: Optional[float] = Field(None, ge=0)
+    slope_percent: Optional[float] = Field(None, ge=0, description="最大爬坡能力，百分比单位")
     tilt_deg: Optional[float] = Field(None, ge=0)
     wading_depth_m: Optional[float] = Field(None, ge=0)
     range_km: Optional[float] = Field(None, ge=0)

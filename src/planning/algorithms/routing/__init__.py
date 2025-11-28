@@ -31,6 +31,8 @@ from .types import (
     MissingDataError,
     InfeasiblePathError,
     dedupe,
+    slope_deg_to_percent,
+    slope_percent_to_deg,
 )
 
 __all__ = [
@@ -63,4 +65,7 @@ __all__ = [
     "MissingDataError",
     "InfeasiblePathError",
     "dedupe",
+    # 工具函数
+    "slope_deg_to_percent",
+    "slope_percent_to_deg",
 ]

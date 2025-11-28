@@ -350,7 +350,6 @@ class LayerRepository:
         result = await self._db.execute(
             select(Layer)
             .where(Layer.code == code)
-            .where(Layer.deleted_at.is_(None))
         )
         return result.scalar_one_or_none()
     
@@ -359,7 +358,6 @@ class LayerRepository:
         result = await self._db.execute(
             select(Layer)
             .where(Layer.id == layer_id)
-            .where(Layer.deleted_at.is_(None))
         )
         return result.scalar_one_or_none()
     
@@ -367,8 +365,7 @@ class LayerRepository:
         """获取所有图层"""
         result = await self._db.execute(
             select(Layer)
-            .where(Layer.deleted_at.is_(None))
-            .order_by(Layer.sort_order)
+            .order_by(Layer.code)
         )
         return result.scalars().all()
     

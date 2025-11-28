@@ -116,9 +116,51 @@ class WarningRecord(TypedDict):
     created_at: str
 
 
+class RiskLevel(str, Enum):
+    """风险等级"""
+    BLUE = "blue"
+    YELLOW = "yellow"
+    ORANGE = "orange"
+    RED = "red"
+
+
+class PredictionType(str, Enum):
+    """预测类型"""
+    PATH_RISK = "path_risk"
+    OPERATION_RISK = "operation_risk"
+    DISASTER_SPREAD = "disaster_spread"
+
+
+class RiskFactor(TypedDict):
+    """风险因素"""
+    factor_type: str
+    risk_level: str
+    value: float
+    description: str
+
+
+class RiskPrediction(TypedDict):
+    """风险预测结果"""
+    prediction_id: str
+    prediction_type: str
+    target_type: str
+    target_id: Optional[str]
+    target_name: Optional[str]
+    risk_level: str
+    risk_score: float
+    confidence_score: float
+    risk_factors: List[RiskFactor]
+    recommendations: List[str]
+    explanation: str
+    prediction_horizon_hours: int
+    requires_human_review: bool
+    weather_data: Optional[Dict[str, Any]]
+    created_at: str
+
+
 class EarlyWarningState(TypedDict):
     """
-    预警监测智能体状态
+    预警监测智能体状态（扩展为RealTimeRiskAgent）
     """
     # ========== 输入参数 ==========
     request_id: str
@@ -144,6 +186,12 @@ class EarlyWarningState(TypedDict):
     notifications_sent: int
     notification_errors: List[str]
     
+    # ========== 风险预测扩展 ==========
+    prediction_request: Optional[Dict[str, Any]]
+    risk_predictions: List[RiskPrediction]
+    weather_context: Optional[Dict[str, Any]]
+    pending_human_review: List[str]
+    
     # ========== 最终输出 ==========
     success: bool
     summary: str
@@ -158,6 +206,7 @@ def create_initial_state(
     request_id: str,
     scenario_id: Optional[str] = None,
     disaster_input: Optional[Dict[str, Any]] = None,
+    prediction_request: Optional[Dict[str, Any]] = None,
 ) -> EarlyWarningState:
     """创建初始状态"""
     return EarlyWarningState(
@@ -171,6 +220,10 @@ def create_initial_state(
         warning_records=[],
         notifications_sent=0,
         notification_errors=[],
+        prediction_request=prediction_request,
+        risk_predictions=[],
+        weather_context=None,
+        pending_human_review=[],
         success=False,
         summary="",
         trace={

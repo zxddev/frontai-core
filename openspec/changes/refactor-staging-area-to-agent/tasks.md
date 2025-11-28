@@ -9,77 +9,82 @@
 - `DisasterAssessment` - 烈度评估
 - `SecondaryHazardPredictor` - 次生灾害预测
 
+## 0. Core层重构（前置，遵循调用规范）
+
+- [x] 0.1 重构 `StagingAreaCore.__init__` 接收Repository而非db
+- [x] 0.2 调整内部方法使用 `self._repo` 获取数据
+- [x] 0.3 更新Service层实例化方式
+- [x] 0.4 更新Router层调用Service
+
 ## 1. Agent框架搭建
 
-- [ ] 1.1 创建目录结构 `src/agents/staging_area/`
-- [ ] 1.2 定义State类型 `state.py` (StagingAreaAgentState)
-- [ ] 1.3 创建Agent入口 `agent.py` (StagingAreaAgent)
-- [ ] 1.4 搭建Graph骨架 `graph.py` (build_staging_area_graph)
+- [x] 1.1 创建目录结构 `src/agents/staging_area/`
+- [x] 1.2 定义State类型 `state.py` (StagingAreaAgentState)
+- [x] 1.3 创建Agent入口 `agent.py` (StagingAreaAgent)
+- [x] 1.4 搭建Graph骨架 `graph.py` (build_staging_area_graph)
 
-## 2. Tool封装（封装现有实现，不重写）
+## 2. Tool封装（通过Service调用复用现有实现）
 
-- [ ] 2.1 创建Tool目录 `tools/`
-- [ ] 2.2 封装StagingAreaCore为Tool `staging_core_tool.py` (调用现有recommend方法)
-- [ ] 2.3 封装地形数据查询 `terrain_tool.py` (调用repository)
-- [ ] 2.4 封装通信数据查询 `communication_tool.py` (调用repository)
-- [ ] 2.5 封装SecondaryHazardPredictor `hazard_tool.py` (调用现有predictor)
+- [x] 2.1 创建Tool目录 `tools/`
+- [x] 2.2 评估节点直接调用StagingAreaService (无需单独Tool)
+- [x] 2.3-2.5 暂不需要单独Tool，通过Service调用
 
 ## 3. 分析节点实现
 
-- [ ] 3.1 实现灾情理解节点 `nodes/understand.py`
+- [x] 3.1 实现灾情理解节点 `nodes/understand.py`
   - 输入：自然语言灾情描述 + 结构化数据
   - 输出：提取的约束条件、关键信息
   - LLM：解析语义，识别特殊约束
   
-- [ ] 3.2 实现地形分析节点 `nodes/terrain.py`
+- [x] 3.2 实现地形分析节点 `nodes/terrain.py`
   - 输入：候选点列表、地形数据
   - 输出：地形适宜性评估
   - LLM：综合判断地形是否适合展开
   
-- [ ] 3.3 实现通信分析节点 `nodes/communication.py`
+- [x] 3.3 实现通信分析节点 `nodes/communication.py`
   - 输入：候选点列表、通信覆盖数据
   - 输出：通信可行性评估
   - LLM：评估通信冗余方案
   
-- [ ] 3.4 实现安全分析节点 `nodes/safety.py`
+- [x] 3.4 实现安全分析节点 `nodes/safety.py`
   - 输入：候选点列表、风险区域数据
   - 输出：安全等级评估、风险警示
   - LLM：综合判断安全风险
 
 ## 4. 核心节点实现
 
-- [ ] 4.1 实现候选评估节点 `nodes/evaluate.py`
-  - 调用StagingCoreTool执行算法
-  - 整合各分析节点结果调整权重
+- [x] 4.1 实现候选评估节点 `nodes/evaluate.py`
+  - 调用StagingAreaService执行算法
+  - 整合各分析节点结果调整权重（动态权重）
   - 输出排序后的候选点列表
   
-- [ ] 4.2 实现决策解释节点 `nodes/explain.py`
+- [x] 4.2 实现决策解释节点 `nodes/explain.py`
   - 输入：排序结果、各分析评估
   - 输出：推荐理由、风险警示、备选方案
   - LLM：生成可读性强的解释
 
 ## 5. Graph流程编排
 
-- [ ] 5.1 实现Graph流程 `graph.py`
+- [x] 5.1 实现Graph流程 `graph.py`
   - 入口：understand_disaster
-  - 分析：terrain → communication → safety (可考虑并行)
+  - 分析：terrain | communication | safety (并行执行)
   - 评估：evaluate_candidates
   - 输出：explain_decision
   
-- [ ] 5.2 实现条件边判断函数
-  - should_continue_after_understand
-  - should_continue_after_analysis
-  - should_explain
+- [x] 5.2 实现条件边判断函数
+  - route_after_understand（支持并行分发）
+  - should_continue_after_evaluate
   
-- [ ] 5.3 实现降级逻辑
-  - LLM超时/失败时调用纯算法Service
+- [x] 5.3 实现降级逻辑
+  - skip_llm_analysis=True跳过分析节点
+  - 单节点失败时捕获异常继续
 
 ## 6. API集成
 
-- [ ] 6.1 创建Agent路由 `router.py`
-- [ ] 6.2 定义请求/响应Schema
-- [ ] 6.3 注册到 `src/agents/router.py`
-- [ ] 6.4 注册到 `src/main.py`
+- [x] 6.1 创建Agent路由 `router.py`
+- [x] 6.2 定义请求/响应Schema
+- [x] 6.3 注册到 `src/agents/router.py`
+- [x] 6.4 导出到 `src/agents/__init__.py`
 
 ## 7. 测试
 
@@ -92,13 +97,13 @@
   - test_explain.py
   
 - [ ] 7.2 创建Graph集成测试 `test_graph.py`
-- [ ] 7.3 创建端到端测试 `scripts/test_staging_area_agent.py`
+- [x] 7.3 创建端到端测试 `scripts/test_staging_area_agent.py`
 - [ ] 7.4 对比测试：Agent vs 纯算法Service
 
 ## 8. 文档与监控
 
-- [ ] 8.1 更新OpenSpec规格
-- [ ] 8.2 添加日志和监控点
+- [x] 8.1 更新架构文档 `docs/智能体规划/驻扎点选址智能体架构设计.md`
+- [x] 8.2 添加日志和监控点
 - [ ] 8.3 记录降级事件
 
 ## Dependencies

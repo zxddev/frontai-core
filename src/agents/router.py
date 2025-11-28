@@ -730,3 +730,121 @@ async def get_route_planning_result(task_id: str) -> RoutePlanningResult:
 # ============ 预警监测智能体路由 ============
 from .early_warning.router import router as early_warning_router
 router.include_router(early_warning_router)
+
+# ============ 驻扎点选址智能体路由 ============
+from .staging_area.router import router as staging_area_agent_router
+router.include_router(staging_area_agent_router)
+
+# ============ 任务分发智能体路由 ============
+from .task_dispatch.router import router as task_dispatch_router
+router.include_router(task_dispatch_router)
+
+
+# ============================================================================
+# 态势标绘API
+# ============================================================================
+
+from src.domains.plotting.service import PlottingService
+from src.domains.plotting.schemas import (
+    PlotPointRequest, PlotCircleRequest, PlotPolygonRequest,
+    PlotRouteRequest, PlottingResponse,
+    PlotEventRangeRequest, PlotWeatherAreaRequest
+)
+from .situation_plot import get_situation_plot_agent
+from .situation_plot.schemas import SituationPlotRequest, SituationPlotResponse
+
+
+@router.post("/plotting/point", response_model=PlottingResponse)
+async def plot_point_api(request: PlotPointRequest) -> PlottingResponse:
+    """
+    标绘点位
+    
+    支持类型:
+    - event_point: 事件点
+    - rescue_target: 救援目标(波纹动画)
+    - situation_point: 态势标注(文字)
+    - resettle_point: 安置点
+    - resource_point: 资源点
+    """
+    return await PlottingService.plot_point(request)
+
+
+@router.post("/plotting/circle", response_model=PlottingResponse)
+async def plot_circle_api(request: PlotCircleRequest) -> PlottingResponse:
+    """
+    标绘圆形区域
+    
+    支持类型:
+    - danger_area: 危险区(橙色)
+    - safety_area: 安全区(绿色)
+    - command_post_candidate: 指挥点(蓝色)
+    """
+    return await PlottingService.plot_circle(request)
+
+
+@router.post("/plotting/polygon", response_model=PlottingResponse)
+async def plot_polygon_api(request: PlotPolygonRequest) -> PlottingResponse:
+    """标绘多边形区域"""
+    return await PlottingService.plot_polygon(request)
+
+
+@router.post("/plotting/route", response_model=PlottingResponse)
+async def plot_route_api(request: PlotRouteRequest) -> PlottingResponse:
+    """标绘规划路线"""
+    return await PlottingService.plot_route(request)
+
+
+@router.delete("/plotting/{entity_id}", response_model=PlottingResponse)
+async def delete_plot_api(entity_id: UUID) -> PlottingResponse:
+    """删除标绘"""
+    return await PlottingService.delete_plot(entity_id)
+
+
+@router.post("/plotting/event-range", response_model=PlottingResponse)
+async def plot_event_range_api(request: PlotEventRangeRequest) -> PlottingResponse:
+    """
+    标绘事件区域范围（三层多边形）
+    
+    用于标注灾害影响范围的外/中/内三层区域
+    """
+    return await PlottingService.plot_event_range(request)
+
+
+@router.post("/plotting/weather", response_model=PlottingResponse)
+async def plot_weather_area_api(request: PlotWeatherAreaRequest) -> PlottingResponse:
+    """
+    标绘天气区域（雨区）
+    
+    用于标注降雨/恶劣天气影响区域，会显示雨区粒子特效
+    """
+    return await PlottingService.plot_weather_area(request)
+
+
+@router.post("/situation-plot", response_model=SituationPlotResponse)
+async def situation_plot_dialog(request: SituationPlotRequest) -> SituationPlotResponse:
+    """
+    对话式态势标绘
+    
+    通过自然语言指令在地图上创建/删除标绘。
+    
+    示例:
+    - "在北京市朝阳区标一个救援点"
+    - "画一个500米的危险区，位置在116.4,39.9"
+    - "删除标绘xxx-xxx-xxx"
+    """
+    agent = get_situation_plot_agent()
+    
+    # 将scenario_id注入到用户消息中供LLM提取
+    user_message = f"[Context: scenario_id={request.scenario_id}]\n\n{request.message}"
+    
+    result = await agent.ainvoke(
+        {"messages": [{"role": "user", "content": user_message}]},
+    )
+    
+    # 提取最后一条AI消息
+    ai_message = result["messages"][-1]
+    
+    return SituationPlotResponse(
+        success=True,
+        response=ai_message.content,
+    )

@@ -9,10 +9,13 @@ from .route_planning import (
     amap_route_planning_async,
     amap_route_planning_with_avoidance_async,
 )
+from .geocode import amap_geocode, amap_geocode_async
 
 __all__ = [
     "amap_route_planning",
     "amap_route_planning_with_avoidance",
     "amap_route_planning_async",
     "amap_route_planning_with_avoidance_async",
+    "amap_geocode",
+    "amap_geocode_async",
 ]

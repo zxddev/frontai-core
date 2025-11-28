@@ -2,7 +2,7 @@
 前端车辆装备模块数据结构
 """
 
-from typing import Optional, Literal
+from typing import Any, Optional, Literal
 from pydantic import BaseModel, Field
 
 
@@ -13,6 +13,19 @@ class ItemData(BaseModel):
     model: str = ""
     type: Literal["device", "supply"] = "device"
     isSelected: int = 0
+    aiReason: Optional[str] = None
+    priority: Optional[str] = None
+
+
+class ShortageAlertData(BaseModel):
+    """缺口告警数据"""
+    itemType: str
+    itemName: str
+    required: int
+    available: int
+    shortage: int
+    severity: str
+    suggestion: str
 
 
 class CarItem(BaseModel):
@@ -29,6 +42,9 @@ class CarListData(BaseModel):
     """车辆列表响应"""
     carItemDataList: list[CarItem] = Field(default_factory=list)
     carQuestStatus: Literal["pending", "dispatched", "ready", "departed"] = "pending"
+    recommendationId: Optional[str] = None
+    recommendationStatus: Optional[str] = None
+    shortageAlerts: Optional[list[ShortageAlertData]] = None
 
 
 class ItemProperty(BaseModel):

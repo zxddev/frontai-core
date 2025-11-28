@@ -17,8 +17,13 @@ from geoalchemy2.functions import ST_AsGeoJSON
 from geoalchemy2.shape import to_shape
 
 from src.core.exceptions import NotFoundError, ConflictError, ValidationError
-from src.core.websocket import broadcast_entity_update
 from .repository import EntityRepository, LayerRepository
+
+
+def _get_stomp_broker():
+    """延迟导入避免循环依赖"""
+    from src.core.stomp.broker import stomp_broker
+    return stomp_broker
 from .schemas import (
     EntityCreate, EntityUpdate, EntityResponse, EntityListResponse,
     EntityLocationUpdate, BatchLocationUpdate, EntityWithDistance,
@@ -58,13 +63,34 @@ class EntityService:
         entity = await self._entity_repo.create(data, created_by)
         response = await self._to_response(entity)
         
-        # 广播实体创建事件
-        if data.scenario_id:
-            await broadcast_entity_update(data.scenario_id, "entity_created", {
-                "entity_id": str(entity.id),
-                "type": entity.type,
-                "layer_code": entity.layer_code,
-            })
+        # 构建广播用的 geometry（为圆形区域补充 center 和 radius）
+        broadcast_geometry = response.geometry.model_dump() if response.geometry else {}
+        circle_types = {'danger_area', 'safety_area', 'command_post_candidate'}
+        if response.type.value in circle_types:
+            # 前端 handleEntity.js 需要 geometry.center 和 geometry.radius
+            coords = broadcast_geometry.get('coordinates', [])
+            if coords and len(coords) >= 2:
+                broadcast_geometry['center'] = coords[:2]
+            # 半径从 properties.range 获取
+            if 'range' in response.properties:
+                broadcast_geometry['radius'] = response.properties['range']
+        
+        # 广播实体创建事件（通过WebSocket发送给前端，包含完整数据）
+        broadcast_data = {
+            "id": str(response.id),
+            "type": response.type.value,
+            "layerCode": response.layer_code,
+            "geometry": broadcast_geometry,
+            "properties": response.properties,
+            "visibleOnMap": response.visible_on_map,
+            "styleOverrides": response.style_overrides,
+            "source": response.source.value,
+            "scenarioId": str(data.scenario_id) if data.scenario_id else None,
+            "createdAt": response.created_at.isoformat(),
+            "updatedAt": response.updated_at.isoformat(),
+        }
+        logger.info(f"广播实体创建: type={response.type.value}, geometry={broadcast_data['geometry']}")
+        await _get_stomp_broker().broadcast_entity_create(broadcast_data)
         
         return response
     
@@ -182,11 +208,19 @@ class EntityService:
         entity = await self._entity_repo.update(entity, data)
         response = await self._to_response(entity)
         
-        # 广播实体更新事件
-        if entity.scenario_id:
-            await broadcast_entity_update(entity.scenario_id, "entity_updated", {
-                "entity_id": str(entity.id),
-            })
+        # 广播实体更新事件（通过WebSocket发送给前端，包含完整数据）
+        await _get_stomp_broker().broadcast_entity_update({
+            "id": str(response.id),
+            "type": response.type.value,
+            "layerCode": response.layer_code,
+            "geometry": response.geometry.model_dump(),
+            "properties": response.properties,
+            "visibleOnMap": response.visible_on_map,
+            "styleOverrides": response.style_overrides,
+            "source": response.source.value,
+            "scenarioId": str(entity.scenario_id) if entity.scenario_id else None,
+            "updatedAt": response.updated_at.isoformat(),
+        })
         
         return response
     
@@ -219,14 +253,14 @@ class EntityService:
             )
             logger.debug(f"实体{entity_id}轨迹点已记录")
         
-        # 广播位置更新
-        if entity.scenario_id:
-            await broadcast_entity_update(entity.scenario_id, "entity_location_updated", {
-                "entity_id": str(entity.id),
-                "location": data.location.model_dump(),
-                "speed_kmh": float(data.speed_kmh) if data.speed_kmh else None,
-                "heading": data.heading,
-            })
+        # 广播位置更新（通过WebSocket发送给前端）
+        await _get_stomp_broker().broadcast_location({
+            "id": str(entity.id),
+            "type": entity.type,
+            "location": data.location.model_dump(),
+            "speed_kmh": float(data.speed_kmh) if data.speed_kmh else None,
+            "heading": data.heading,
+        })
         
         return await self._to_response(entity)
     
@@ -249,14 +283,14 @@ class EntityService:
             )
             success_count += 1
             
-            # 广播位置更新
-            if entity.scenario_id:
-                await broadcast_entity_update(entity.scenario_id, "entity_location_updated", {
-                    "entity_id": str(entity.id),
-                    "location": item.location.model_dump(),
-                    "speed_kmh": float(item.speed_kmh) if item.speed_kmh else None,
-                    "heading": item.heading,
-                })
+            # 广播位置更新（通过WebSocket发送给前端）
+            await _get_stomp_broker().broadcast_location({
+                "id": str(entity.id),
+                "type": entity.type,
+                "location": item.location.model_dump(),
+                "speed_kmh": float(item.speed_kmh) if item.speed_kmh else None,
+                "heading": item.heading,
+            })
         
         return {
             "success_count": success_count,
@@ -283,14 +317,18 @@ class EntityService:
         if not entity:
             raise NotFoundError("Entity", str(entity_id))
         
-        scenario_id = entity.scenario_id
+        # 保存删除前的实体信息用于广播
+        delete_info = {
+            "id": str(entity.id),
+            "type": entity.type,
+            "layerCode": entity.layer_code,
+        }
+        
         await self._entity_repo.delete(entity)
         
-        # 广播实体删除事件
-        if scenario_id:
-            await broadcast_entity_update(scenario_id, "entity_deleted", {
-                "entity_id": str(entity_id),
-            })
+        # 广播实体删除事件（通过WebSocket发送给前端，包含完整信息）
+        # 注意：不传入 scenario_id，广播给所有订阅者（前端未绑定场景）
+        await _get_stomp_broker().broadcast_entity_delete_full(delete_info)
     
     async def create_plot(
         self, 

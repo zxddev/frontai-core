@@ -64,6 +64,12 @@ def load_settings() -> Settings:
             return str(priv[name]).strip()
         return _require_env(name, default)  # 回退到环境变量/默认
 
+    def pick_optional(name: str, default: str = "") -> str:
+        """可选配置，允许空字符串，不抛异常。"""
+        if name in priv and str(priv[name]).strip():
+            return str(priv[name]).strip()
+        return os.getenv(name, default) or default
+
     openai_base_url = pick("OPENAI_BASE_URL", "http://localhost:8000/v1")  # vLLM 网关地址
     openai_api_key = pick("OPENAI_API_KEY", "your-api-key")  # 必填密钥
     llm_model = pick("LLM_MODEL", "gpt-4")  # 模型名称
@@ -80,7 +86,7 @@ def load_settings() -> Settings:
     neo4j_user = pick("NEO4J_USER", "neo4j")  # Neo4j 用户
     neo4j_password = pick("NEO4J_PASSWORD", "your-neo4j-password")  # Neo4j 密码
     postgres_dsn = pick("POSTGRES_DSN", "postgresql://postgres:password@localhost:5432/emergency_planner")  # Postgres DSN
-    amap_api_key = pick("AMAP_API_KEY", "")  # 高德地图API Key
+    amap_api_key = pick_optional("AMAP_API_KEY", "")  # 高德地图API Key（可选）
     return Settings(
         openai_base_url=openai_base_url,
         openai_api_key=openai_api_key,

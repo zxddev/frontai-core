@@ -78,12 +78,8 @@ class FrontendWebSocketManager:
         
         logger.info(f"Frontend WS connected: {client_id}")
         
-        # 发送CONNECTED帧
-        await self._send_frame(websocket, "CONNECTED", {
-            "version": "1.2",
-            "heart-beat": "4000,4000",
-            "server": "frontai-ws/1.0",
-        })
+        # 发送SockJS open帧
+        await websocket.send_text("o")
         
         return conn
     
@@ -126,12 +122,14 @@ class FrontendWebSocketManager:
     async def broadcast_to_topic(self, topic: str, payload: dict):
         """向主题广播消息"""
         client_ids = self.topic_subscriptions.get(topic, set())
+        logger.info(f"Broadcasting to {topic}: {len(client_ids)} subscribers")
         
         for client_id in list(client_ids):
             conn = self.connections.get(client_id)
             if conn:
                 try:
                     await self._send_message(conn.websocket, topic, payload)
+                    logger.info(f"Sent to {client_id} on {topic}")
                 except Exception as e:
                     logger.error(f"Failed to send to {client_id}: {e}")
                     self.disconnect(client_id)
@@ -165,13 +163,21 @@ class FrontendWebSocketManager:
         await self.broadcast_to_topic("/topic/scenario.prompt.triggered", {"payload": prompt_data})
     
     async def _send_frame(self, websocket: WebSocket, command: str, headers: dict, body: str = ""):
-        """发送STOMP帧（JSON格式简化版）"""
-        frame = {
-            "command": command,
-            "headers": headers,
-            "body": body,
-        }
-        await websocket.send_json(frame)
+        """发送STOMP帧（SockJS包装格式）"""
+        # 构建标准STOMP帧格式
+        lines = [command]
+        for key, value in headers.items():
+            lines.append(f"{key}:{value}")
+        lines.append("")  # 空行分隔headers和body
+        lines.append(body)
+        lines.append("\x00")  # NULL结束符
+        
+        frame = "\n".join(lines)
+        
+        # SockJS消息格式: a["message"] 
+        # 需要将STOMP帧JSON编码后包装
+        sockjs_message = 'a' + json.dumps([frame])
+        await websocket.send_text(sockjs_message)
     
     async def _send_message(self, websocket: WebSocket, destination: str, content: dict):
         """发送MESSAGE帧"""
@@ -195,10 +201,15 @@ class FrontendWebSocketManager:
         await self._send_frame(websocket, "ERROR", {"message": message})
     
     async def heartbeat(self, client_id: str):
-        """心跳"""
+        """心跳 - 记录时间并发送响应"""
         conn = self.connections.get(client_id)
         if conn:
             conn.last_heartbeat = datetime.utcnow()
+            # 发送SockJS心跳帧 (STOMP心跳是换行符，SockJS包装为 a["\n"])
+            try:
+                await conn.websocket.send_text('a["\\n"]')
+            except Exception:
+                pass
 
 
 # 全局实例
@@ -394,10 +405,25 @@ async def _handle_websocket(websocket: WebSocket, client_id: str):
         while True:
             try:
                 raw_data = await websocket.receive_text()
+                logger.info(f"[WS {client_id}] Received: {raw_data[:200] if raw_data else 'empty'}...")
                 
                 if not raw_data or raw_data.strip() in ("", "\n", "\r\n"):
                     await frontend_ws_manager.heartbeat(client_id)
                     continue
+                
+                # SockJS包装的消息格式: ["message"]
+                if raw_data.startswith("[") and raw_data.endswith("]"):
+                    try:
+                        sockjs_messages = json.loads(raw_data)
+                        if isinstance(sockjs_messages, list) and sockjs_messages:
+                            raw_data = sockjs_messages[0]
+                            logger.info(f"[WS {client_id}] Unwrapped SockJS: {repr(raw_data[:50])}...")
+                            # 解包后检查是否为心跳
+                            if raw_data in ("\n", "\r\n", ""):
+                                await frontend_ws_manager.heartbeat(client_id)
+                                continue
+                    except:
+                        pass
                 
                 try:
                     data = json.loads(raw_data)
@@ -407,9 +433,16 @@ async def _handle_websocket(websocket: WebSocket, client_id: str):
                 command = data.get("command", "").upper()
                 headers = data.get("headers", {})
                 body = data.get("body", "")
+                logger.info(f"[WS {client_id}] Command: {command}, Headers: {headers}")
                 
                 if command == "CONNECT" or command == "STOMP":
-                    pass
+                    # 发送STOMP CONNECTED响应
+                    await frontend_ws_manager._send_frame(websocket, "CONNECTED", {
+                        "version": "1.2",
+                        "heart-beat": "4000,4000",
+                        "server": "frontai-ws/1.0",
+                    })
+                    logger.info(f"[WS {client_id}] Sent CONNECTED frame")
                 elif command == "SUBSCRIBE":
                     destination = headers.get("destination", "")
                     sub_id = headers.get("id", str(uuid4()))

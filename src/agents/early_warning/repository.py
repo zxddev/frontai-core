@@ -99,6 +99,15 @@ class DisasterRepository:
         result = await self._db.execute(query)
         return result.scalars().all()
     
+    async def get_by_scenario(self, scenario_id: UUID) -> Sequence[DisasterSituation]:
+        """根据想定ID获取灾害态势列表"""
+        result = await self._db.execute(
+            select(DisasterSituation)
+            .where(DisasterSituation.scenario_id == scenario_id)
+            .order_by(DisasterSituation.created_at.desc())
+        )
+        return result.scalars().all()
+    
     async def update_status(self, disaster_id: UUID, status: str) -> bool:
         """更新灾害状态"""
         result = await self._db.execute(

@@ -3,6 +3,11 @@
 
 对应SQL表: operational_v2.events_v2, operational_v2.event_updates_v2
 参考: sql/v2_event_scheme_model.sql
+
+ENUM类型说明:
+- 使用 PostgreSQL 原生 ENUM 类型，强约束数据有效性
+- create_type=False 表示类型已在数据库中存在（由迁移脚本创建）
+- 所有ENUM类型定义在 operational_v2 schema 下
 """
 
 from __future__ import annotations
@@ -16,10 +21,73 @@ import uuid as uuid_lib
 from sqlalchemy import (
     Column, String, Integer, Boolean, DateTime, Text, Numeric, ForeignKey, ARRAY
 )
-from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB, ENUM
 from geoalchemy2 import Geometry
 
 from src.core.database import Base
+
+
+# ============================================================================
+# ENUM 类型定义 - 对应 operational_v2 schema 中的枚举类型
+# ============================================================================
+
+# 事件类型枚举
+EventTypeEnum = ENUM(
+    'earthquake',          # 地震（主震）
+    'trapped_person',      # 被困人员
+    'fire',                # 火灾
+    'flood',               # 洪水
+    'landslide',           # 滑坡
+    'building_collapse',   # 建筑倒塌
+    'road_damage',         # 道路损毁
+    'power_outage',        # 电力中断
+    'communication_lost',  # 通信中断
+    'hazmat_leak',         # 危化品泄漏
+    'epidemic',            # 疫情
+    'earthquake_secondary',# 地震次生灾害
+    'other',               # 其他
+    name='event_type_v2',
+    schema='operational_v2',
+    create_type=False,     # 类型已存在，不重复创建
+)
+
+# 事件来源类型枚举
+EventSourceTypeEnum = ENUM(
+    'manual_report',       # 人工上报
+    'ai_detection',        # AI识别(无人机图像等)
+    'sensor_alert',        # 传感器告警
+    'system_inference',    # 系统推演
+    'external_system',     # 外部系统接入
+    name='event_source_type_v2',
+    schema='operational_v2',
+    create_type=False,
+)
+
+# 事件状态枚举
+EventStatusEnum = ENUM(
+    'pending',             # 待确认 (AI评分<0.6)
+    'pre_confirmed',       # 预确认 (0.6≤AI评分<0.85)
+    'confirmed',           # 已确认 (AI评分≥0.85自动确认 或 人工确认)
+    'planning',            # 方案制定中
+    'executing',           # 执行中
+    'resolved',            # 已解决
+    'escalated',           # 已升级
+    'cancelled',           # 已取消(误报等)
+    name='event_status_v2',
+    schema='operational_v2',
+    create_type=False,
+)
+
+# 事件优先级枚举
+EventPriorityEnum = ENUM(
+    'critical',            # 紧急(人命关天)
+    'high',                # 高
+    'medium',              # 中
+    'low',                 # 低
+    name='event_priority_v2',
+    schema='operational_v2',
+    create_type=False,
+)
 
 
 class Event(Base):
@@ -30,6 +98,7 @@ class Event(Base):
     - 事件是救援行动的触发点
     - 支持多种来源：手动上报、传感器、AI检测、第三方系统
     - 使用pre_confirmed状态实现30分钟自动确认倒计时
+    - 所有状态字段使用PostgreSQL ENUM类型强约束
     """
     __tablename__ = "events_v2"
     __table_args__ = {"schema": "operational_v2"}
@@ -53,17 +122,17 @@ class Event(Base):
         comment="事件编号，场景内唯一"
     )
     
-    # ==================== 事件分类 ====================
+    # ==================== 事件分类（使用ENUM强约束）====================
     event_type: str = Column(
-        String(50), 
+        EventTypeEnum, 
         nullable=False,
-        comment="事件类型: trapped_person/building_collapse/fire/etc"
+        comment="事件类型枚举"
     )
     source_type: str = Column(
-        String(50), 
+        EventSourceTypeEnum, 
         nullable=False, 
         default='manual_report',
-        comment="来源类型: manual_report/sensor/ai_detection/third_party"
+        comment="来源类型枚举"
     )
     source_detail: dict[str, Any] = Column(
         JSONB, 
@@ -97,18 +166,18 @@ class Event(Base):
         comment="地址描述"
     )
     
-    # ==================== 状态与优先级 ====================
+    # ==================== 状态与优先级（使用ENUM强约束）====================
     status: str = Column(
-        String(20), 
+        EventStatusEnum, 
         nullable=False, 
         default='pending',
-        comment="状态: pending/pre_confirmed/confirmed/planning/executing/resolved/escalated/cancelled"
+        comment="事件状态枚举"
     )
     priority: str = Column(
-        String(20), 
+        EventPriorityEnum, 
         nullable=False, 
         default='medium',
-        comment="优先级: critical/high/medium/low"
+        comment="优先级枚举"
     )
     
     # ==================== 人员统计 ====================

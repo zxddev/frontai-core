@@ -6,6 +6,7 @@ from enum import Enum
 
 
 class EventType(str, Enum):
+    earthquake = "earthquake"  # 地震（主震）
     trapped_person = "trapped_person"
     fire = "fire"
     flood = "flood"
