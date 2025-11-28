@@ -198,18 +198,29 @@ async def get_car_list(
                     modules_by_device_type[dtype] = []
                 modules_by_device_type[dtype].append(mod)
         
+        # 构建设备→分配车辆的映射 {device_id -> (vehicle_id, vehicle_name)}
+        device_to_vehicle_map: Dict[str, tuple] = {}
+        for vid, plan in loading_plan.items():
+            vname = plan.get("vehicle_name", "")
+            for dev_id in plan.get("devices", []):
+                device_to_vehicle_map[dev_id] = (vid, vname)
+        
         def build_item_list(
             devices, 
-            assigned_device_ids: set,
-            vehicle_id: str,
+            current_vehicle_id: str,
         ) -> List[ItemData]:
             """构建设备列表（含模块）"""
             items = []
             for device in devices:
                 device_id_str = str(device.id)
                 
-                # 判断设备是否被AI分配到该车辆
-                is_assigned = device_id_str in assigned_device_ids
+                # 查找该设备被AI分配到哪辆车
+                assigned_vehicle = device_to_vehicle_map.get(device_id_str)
+                assigned_to_vid = assigned_vehicle[0] if assigned_vehicle else None
+                assigned_to_vname = assigned_vehicle[1] if assigned_vehicle else None
+                
+                # 判断设备是否被AI分配到当前车辆
+                is_assigned_to_current = assigned_to_vid == current_vehicle_id
                 
                 # 获取设备的AI推荐信息（含推荐模块）
                 rec_info = rec_device_map.get(device_id_str)
@@ -243,11 +254,13 @@ async def get_car_list(
                 items.append(ItemData(
                     id=device_id_str,
                     name=device.name,
-                    model=device.properties.get('model', device.code),
+                    model=device.model or device.properties.get('model', device.code),
                     type="device",
-                    isSelected=1 if is_assigned else 0,
+                    isSelected=1 if is_assigned_to_current else 0,
                     aiReason=rec_info["reason"] if rec_info else None,
                     priority=rec_info["priority"] if rec_info else None,
+                    assignedToVehicle=assigned_to_vid,
+                    assignedToVehicleName=assigned_to_vname,
                     hasModules=bool(has_modules),
                     modules=module_list,
                 ))
@@ -265,7 +278,6 @@ async def get_car_list(
             
             # 判断车辆是否在AI装载方案中
             is_vehicle_selected = vehicle_id_str in vehicle_device_map
-            assigned_devices = vehicle_device_map.get(vehicle_id_str, set())
             
             cars.append(CarItem(
                 id=vehicle_id_str,
@@ -273,7 +285,7 @@ async def get_car_list(
                 status=status_map.get(vehicle.status.value, 'available'),
                 isSelected=is_vehicle_selected,
                 isBelongsToThisCar=0,
-                itemDataList=build_item_list(all_devices, assigned_devices, vehicle_id_str),
+                itemDataList=build_item_list(all_devices, vehicle_id_str),
             ))
         
         # 如果没有车辆数据，创建一个虚拟车辆来展示设备
@@ -284,7 +296,7 @@ async def get_car_list(
                 status="available",
                 isSelected=False,
                 isBelongsToThisCar=0,
-                itemDataList=build_item_list(all_devices, set(), "default-vehicle"),
+                itemDataList=build_item_list(all_devices, "default-vehicle"),
             ))
         
         return ApiResponse.success(CarListData(

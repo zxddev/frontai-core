@@ -24,6 +24,8 @@ class ItemData(BaseModel):
     isSelected: int = 0
     aiReason: Optional[str] = None
     priority: Optional[str] = None
+    assignedToVehicle: Optional[str] = None  # AI分配到哪辆车（车辆ID）
+    assignedToVehicleName: Optional[str] = None  # AI分配到哪辆车（车辆名称）
     hasModules: bool = False
     modules: list[ModuleData] = Field(default_factory=list)
 
