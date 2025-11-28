@@ -318,19 +318,15 @@ async def get_equipment_detail(
             
             properties = [
                 {"key": "编号", "value": device.code},
-                {"key": "型号", "value": device.properties.get('model', '-')},
+                {"key": "型号", "value": device.model or device.properties.get('model', '-')},
                 {"key": "类型", "value": device.device_type.value if device.device_type else '-'},
                 {"key": "状态", "value": device.status.value if device.status else '-'},
             ]
             
-            if device.battery_level is not None:
-                properties.append({"key": "电量", "value": f"{device.battery_level}%"})
             if device.weight_kg:
                 properties.append({"key": "重量", "value": f"{device.weight_kg}kg"})
-            if device.max_speed_kmh:
-                properties.append({"key": "最大速度", "value": f"{device.max_speed_kmh}km/h"})
-            if device.max_flight_time_min:
-                properties.append({"key": "续航", "value": f"{device.max_flight_time_min}分钟"})
+            if device.manufacturer:
+                properties.append({"key": "厂商", "value": device.manufacturer})
             
             detail = {
                 "image": device.properties.get('image', ''),

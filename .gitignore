@@ -39,3 +39,12 @@ dist/
 # *.bak
 .DS_Store
 config/private.yaml
+sql/完整sql/operational_v2.sql
+
+# 敏感配置文件
+config/private.yaml.example
+scripts/check_passage_status_migration.py
+scripts/test_passage_status_api_e2e.py
+scripts/test_passage_status_e2e.py
+scripts/test_risk_area_api.py
+docs/智能体规划/应急救援智能体架构设计.md
