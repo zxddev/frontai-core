@@ -205,6 +205,11 @@ async def get_car_list(
             for dev_id in plan.get("devices", []):
                 device_to_vehicle_map[dev_id] = (vid, vname)
         
+        # 构建车辆ID→名称映射（用于专属车辆名称查找）
+        vehicle_id_to_name: Dict[str, str] = {
+            str(v.id): v.name for v in vehicle_result.items
+        }
+        
         def build_item_list(
             devices, 
             current_vehicle_id: str,
@@ -246,20 +251,31 @@ async def get_car_list(
                     if m.get("module_type") in device_compatible_module_types
                 ]
                 
-                # 构建模块列表
+                # 构建模块列表（含专有模块过滤）
                 module_list = []
                 has_modules = device.module_slots and device.module_slots > 0 and compatible_modules
                 
                 if has_modules:
                     for mod in compatible_modules:
                         mod_id = mod["id"]
+                        exclusive_device_id = mod.get("exclusive_to_device_id")
+                        
+                        # 如果是专有模块且不属于当前设备，跳过
+                        if exclusive_device_id and exclusive_device_id != device_id_str:
+                            continue
+                        
                         module_list.append(ModuleData(
                             id=mod_id,
                             name=mod["name"],
                             moduleType=mod.get("module_type", ""),
                             isSelected=1 if mod_id in ai_module_ids else 0,
                             aiReason=ai_module_reasons.get(mod_id),
+                            exclusiveToDeviceId=exclusive_device_id,
                         ))
+                
+                # 获取设备的专属车辆信息
+                exclusive_vehicle_id = str(device.exclusive_to_vehicle_id) if device.exclusive_to_vehicle_id else None
+                exclusive_vehicle_name = vehicle_id_to_name.get(exclusive_vehicle_id) if exclusive_vehicle_id else None
                 
                 items.append(ItemData(
                     id=device_id_str,
@@ -271,6 +287,8 @@ async def get_car_list(
                     priority=rec_info["priority"] if rec_info else None,
                     assignedToVehicle=assigned_to_vid,
                     assignedToVehicleName=assigned_to_vname,
+                    exclusiveToVehicleId=exclusive_vehicle_id,
+                    exclusiveToVehicleName=exclusive_vehicle_name,
                     hasModules=bool(has_modules),
                     modules=module_list,
                 ))

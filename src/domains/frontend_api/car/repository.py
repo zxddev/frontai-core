@@ -281,6 +281,7 @@ class ModuleRepository:
                     compatible_device_types,
                     provides_capability, capability_params,
                     applicable_disasters,
+                    exclusive_to_device_id,
                     created_at, updated_at
                 FROM operational_v2.modules_v2
                 ORDER BY name
@@ -304,6 +305,7 @@ class ModuleRepository:
             "provides_capability": row.provides_capability,
             "capability_params": row.capability_params or {},
             "applicable_disasters": row.applicable_disasters or [],
+            "exclusive_to_device_id": str(row.exclusive_to_device_id) if row.exclusive_to_device_id else None,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }

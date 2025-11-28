@@ -155,6 +155,11 @@ class Device(Base):
         ForeignKey("operational_v2.vehicles_v2.id"),
         comment="当前所在车辆ID"
     )
+    exclusive_to_vehicle_id: Optional[UUID] = Column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("operational_v2.vehicles_v2.id"),
+        comment="专属车辆ID，非NULL表示只能被此车辆选择"
+    )
     entity_id: Optional[UUID] = Column(
         PG_UUID(as_uuid=True),
         comment="关联地图实体ID"

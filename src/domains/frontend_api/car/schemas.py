@@ -13,6 +13,7 @@ class ModuleData(BaseModel):
     moduleType: str = ""  # sensor/communication/utility/power
     isSelected: int = 0
     aiReason: Optional[str] = None
+    exclusiveToDeviceId: Optional[str] = None  # 专属设备ID，非NULL只能被该设备使用
 
 
 class ItemData(BaseModel):
@@ -26,6 +27,8 @@ class ItemData(BaseModel):
     priority: Optional[str] = None
     assignedToVehicle: Optional[str] = None  # AI分配到哪辆车（车辆ID）
     assignedToVehicleName: Optional[str] = None  # AI分配到哪辆车（车辆名称）
+    exclusiveToVehicleId: Optional[str] = None  # 专属车辆ID，非NULL只能被该车辆选择
+    exclusiveToVehicleName: Optional[str] = None  # 专属车辆名称
     hasModules: bool = False
     modules: list[ModuleData] = Field(default_factory=list)
 
