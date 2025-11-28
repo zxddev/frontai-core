@@ -235,14 +235,14 @@ class Vehicle(Base):
     )
     
     # ==================== 实时位置（GPS遥测更新） ====================
-    current_location = Column(
-        Geography('POINT', srid=4326),
-        comment="车辆当前位置（由GPS遥测数据写入）"
-    )
-    last_location_update: Optional[datetime] = Column(
-        DateTime(timezone=True),
-        comment="位置最后更新时间"
-    )
+    # current_location = Column(
+    #     Geography('POINT', srid=4326),
+    #     comment="车辆当前位置（由GPS遥测数据写入）"
+    # )
+    # last_location_update: Optional[datetime] = Column(
+    #     DateTime(timezone=True),
+    #     comment="位置最后更新时间"
+    # )
     
     # ==================== 时间戳 ====================
     created_at: datetime = Column(

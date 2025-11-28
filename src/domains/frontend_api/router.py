@@ -18,6 +18,7 @@ from .layers import layers_router
 from .entities import entities_router
 from .phase import phase_router
 from .disaster_plan import disaster_plan_router
+from .risk_area import router as risk_area_router
 from .websocket import frontend_ws_router
 
 
@@ -45,6 +46,9 @@ frontend_router.include_router(phase_router)
 
 # 灾害预案
 frontend_router.include_router(disaster_plan_router)
+
+# 风险区域
+frontend_router.include_router(risk_area_router)
 
 # 调试接口
 frontend_router.include_router(debug_router)
