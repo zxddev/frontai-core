@@ -146,6 +146,7 @@ class DeviceResponse(BaseModel):
     # 状态与关联
     status: DeviceStatus
     in_vehicle_id: Optional[UUID]
+    exclusive_to_vehicle_id: Optional[UUID] = None  # 专属车辆ID
     entity_id: Optional[UUID]
     
     # 扩展
