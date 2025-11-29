@@ -365,25 +365,18 @@ class VoiceChatManager:
             # 添加当前用户消息
             messages.append(HumanMessage(content=user_text))
 
-            logger.info(f"调用LLM(流式): '{user_text[:50]}...'")
+            logger.info(f"调用LLM: '{user_text[:50]}...'")
             start_ts = time.time()
 
-            # 流式调用 LLM
-            ai_text = ""
-            async for chunk in llm.astream(messages):
-                chunk_text = chunk.content
-                if chunk_text:
-                    ai_text += chunk_text
-                    # 发送流式文字块
-                    await self._send_json(
-                        session.websocket,
-                        {"type": "llm_chunk", "text": chunk_text},
-                    )
-
-            llm_latency = int((time.time() - start_ts) * 1000)
-            ai_text = ai_text.strip()
-
-            logger.info(f"LLM流式完成: '{ai_text[:50]}...' ({llm_latency}ms)")
+            # 非流式调用 LLM（更稳定）
+            try:
+                response = await llm.ainvoke(messages)
+                ai_text = response.content.strip() if response.content else ""
+                llm_latency = int((time.time() - start_ts) * 1000)
+                logger.info(f"LLM完成: '{ai_text[:50]}...' ({llm_latency}ms)")
+            except Exception as llm_err:
+                logger.exception(f"LLM调用异常: {llm_err}")
+                raise
 
             # 发送完整文本
             await self._send_json(

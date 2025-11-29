@@ -19,6 +19,7 @@
 2. **未利用系统数据**：未利用EmergencyAI分析结果和资源库数据
 3. **缺乏专业估算**：未使用SPHERE等国际人道主义标准计算资源需求
 4. **无审批流程**：缺少指挥官审核环节（HITL）
+5. **错误处理不透明**：Agent失败时缺少统一状态机与错误暴露机制，存在静默降级或仅返回模板兜底的风险
 
 ## What Changes
 
@@ -53,12 +54,18 @@
 - `src/agents/overall_plan/nodes/human_review.py` - HITL审核节点（interrupt）
 - `src/agents/overall_plan/nodes/document_generation.py` - 正式文件生成节点
 
+**错误处理与任务标识**
+- 统一总体方案生成的工作流状态：`pending`、`running`、`awaiting_approval`、`completed`、`failed`
+- 为每次方案生成创建独立的 `task_id` 并与 LangGraph 的 `thread_id` 一一对应
+- 当 CrewAI / MetaGPT / SPHERE 估算或上下游集成任意一步失败时，采用 fail-fast 策略，直接将工作流标记为 `failed`
+- 明确禁止在失败时返回带占位符的模板或单次 LLM fallback 输出，错误信息通过状态查询接口统一对外暴露
+
 **API端点**
 - `src/domains/frontend_api/overall_plan/router.py` - API路由
-  - `GET /api/overall-plan/{event_id}/modules` - 获取9个模块（触发Agent流程）
-  - `GET /api/overall-plan/{event_id}/status` - 查询流程状态
-  - `PUT /api/overall-plan/{event_id}/approve` - 指挥官审核通过
-  - `GET /api/overall-plan/{event_id}/document` - 获取最终文档
+  - `GET /api/overall-plan/{event_id}/modules` - 触发总体方案生成，创建 `task_id` 并返回初始状态
+  - `GET /api/overall-plan/{event_id}/status` - 基于 `event_id` + `task_id` 查询指定run的流程状态与9个模块内容
+  - `PUT /api/overall-plan/{event_id}/approve` - 指挥官审批指定 `task_id` 的方案，可携带修改与"批准/退回"决策
+  - `GET /api/overall-plan/{event_id}/document` - 基于 `event_id` + `task_id` 获取最终文档内容
 
 ### MODIFIED
 

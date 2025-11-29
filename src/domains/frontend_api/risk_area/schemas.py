@@ -171,6 +171,11 @@ class PassageStatusUpdateRequest(BaseModel):
         alias="verifiedBy",
         description="验证者ID（侦察队伍/无人机）"
     )
+    reason: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="不可通行原因（如：塌方、断桥、深水、火灾蔓延等）"
+    )
 
 
 class RiskAreaResponse(BaseModel):

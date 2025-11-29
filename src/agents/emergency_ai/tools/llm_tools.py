@@ -299,7 +299,11 @@ async def parse_disaster_description_async(
     context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """异步版本的灾情解析"""
+    import asyncio
+    import time
+    
     logger.info("异步调用LLM解析灾情描述", extra={"description_length": len(description)})
+    start_time = time.time()
     
     llm = _get_llm()
     parser = JsonOutputParser(pydantic_object=DisasterParseResult)
@@ -332,15 +336,25 @@ async def parse_disaster_description_async(
     chain = prompt | llm | parser
     
     try:
-        result = await chain.ainvoke({
-            "description": description,
-            "context_info": context_info,
-            "format_instructions": parser.get_format_instructions(),
-        })
-        logger.info("异步LLM灾情解析完成", extra={"disaster_type": result.get("disaster_type")})
+        logger.info("[LLM] 开始调用 chain.ainvoke...")
+        result = await asyncio.wait_for(
+            chain.ainvoke({
+                "description": description,
+                "context_info": context_info,
+                "format_instructions": parser.get_format_instructions(),
+            }),
+            timeout=180.0  # 3分钟超时
+        )
+        elapsed = int((time.time() - start_time) * 1000)
+        logger.info(f"异步LLM灾情解析完成 ({elapsed}ms)", extra={"disaster_type": result.get("disaster_type")})
         return result
+    except asyncio.TimeoutError:
+        elapsed = int((time.time() - start_time) * 1000)
+        logger.error(f"[LLM] 调用超时 ({elapsed}ms)")
+        raise RuntimeError("LLM解析超时(180s)")
     except Exception as e:
-        logger.error("异步LLM灾情解析失败", extra={"error": str(e)})
+        elapsed = int((time.time() - start_time) * 1000)
+        logger.error(f"异步LLM灾情解析失败 ({elapsed}ms)", extra={"error": str(e)})
         raise RuntimeError(f"LLM解析失败: {e}") from e
 
 

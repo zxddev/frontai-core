@@ -20,6 +20,10 @@ from .task_dispatch import TaskDispatchAgent, get_task_dispatch_agent
 from .scheme_parsing import SchemeParsingAgent, parse_scheme_text
 from .early_warning import EarlyWarningAgent, get_early_warning_agent
 from .staging_area import StagingAreaAgent, staging_area_graph
+try:
+    from .overall_plan import OverallPlanAgent
+except ImportError:
+    OverallPlanAgent = None  # type: ignore[misc,assignment]
 from .router import router
 
 __all__ = [
@@ -35,5 +39,6 @@ __all__ = [
     "StagingAreaAgent",
     "staging_area_graph",
     "route_planning_invoke",
+    "OverallPlanAgent",
     "router",
 ]

@@ -33,6 +33,10 @@ llama-index-vector-stores-qdrant>=0.2.0
 llama-index-graph-stores-neo4j>=0.2.0
 llama-index-retrievers-bm25>=0.2.0
 jieba>=0.42.1
+# Agent frameworks
+crewai>=0.86.0
+instructor>=1.0.0
+jinja2>=3.1.0
 # ASR语音识别
 dashscope>=1.14.0
 websockets>=12.0

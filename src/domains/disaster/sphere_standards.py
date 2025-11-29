@@ -93,6 +93,7 @@ class ScalingBasis(str, Enum):
     - Medical supplies scale with casualties
     - Tents scale with displaced persons only
     - SAR equipment scales with search area
+    - Communication equipment scales with rescue teams/personnel
     """
     PER_PERSON = "per_person"           # Total affected population
     PER_DISPLACED = "per_displaced"     # Only displaced/evacuated persons
@@ -101,6 +102,10 @@ class ScalingBasis(str, Enum):
     PER_AREA_KM2 = "per_area_km2"       # Affected area in km²
     PER_TEAM = "per_team"               # Per rescue team
     FIXED = "fixed"                      # Fixed quantity regardless of scale
+    # v2: 新增缩放基准（通信设备/救援人员保障）
+    PER_RESCUER = "per_rescuer"         # 每名救援人员
+    PER_COMMAND_GROUP = "per_command_group"  # 每个指挥组
+    PER_BED = "per_bed"                 # 每张床位（医疗资源）
 
 
 class SphereCategory(str, Enum):
@@ -113,6 +118,9 @@ class SphereCategory(str, Enum):
     HEALTH = "HEALTH"   # Health
     NFI = "NFI"         # Non-Food Items
     OTHER = "OTHER"     # Project-specific items
+    # v2: 新增类别（通信/救援作业支持）
+    COMM = "COMM"               # 通信设备
+    RESCUE_OPS = "RESCUE_OPS"   # 救援作业支持（人员保障）
 
 
 @dataclass(frozen=True)
@@ -431,6 +439,190 @@ SPHERE_STANDARDS: Dict[str, SphereStandard] = {
         climate_factors=_DEFAULT_CLIMATE_FACTORS,
         reference="Sphere Handbook 2018, WASH Standard",
         description="Personal hygiene items kit per person per month",
+    ),
+
+    # =========================================================================
+    # COMM - 通信设备 (国家地震应急预案)
+    # 第五章：通信与信息保障
+    # =========================================================================
+    "SPHERE-COMM-001": SphereStandard(
+        code="SPHERE-COMM-001",
+        name="Satellite Phone",
+        name_cn="卫星电话",
+        category=SphereCategory.COMM,
+        min_quantity=1.0,  # 1部/救援队
+        target_quantity=2.0,  # 备用
+        unit="unit",
+        scaling_basis=ScalingBasis.PER_TEAM,
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors=_DEFAULT_CLIMATE_FACTORS,
+        reference="国家地震应急预案 2025, 通信保障",
+        description="每支救援队伍配备1部卫星电话，确保断网条件下通信",
+    ),
+    "SPHERE-COMM-002": SphereStandard(
+        code="SPHERE-COMM-002",
+        name="Digital Radio",
+        name_cn="数字对讲机",
+        category=SphereCategory.COMM,
+        min_quantity=1.0,  # 1部/人
+        target_quantity=1.0,
+        unit="unit",
+        scaling_basis=ScalingBasis.PER_RESCUER,
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors=_DEFAULT_CLIMATE_FACTORS,
+        reference="国家地震应急预案 2025, 通信保障",
+        description="每名救援人员配备1部数字对讲机，短距离通信",
+    ),
+    "SPHERE-COMM-003": SphereStandard(
+        code="SPHERE-COMM-003",
+        name="Portable Repeater",
+        name_cn="便携中继台",
+        category=SphereCategory.COMM,
+        min_quantity=1.0,  # 1台/指挥组
+        target_quantity=1.0,
+        unit="unit",
+        scaling_basis=ScalingBasis.PER_COMMAND_GROUP,
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors=_DEFAULT_CLIMATE_FACTORS,
+        reference="国家地震应急预案 2025, 通信保障",
+        description="每个指挥组配备1台便携中继台，扩展通信覆盖范围",
+    ),
+    "SPHERE-COMM-004": SphereStandard(
+        code="SPHERE-COMM-004",
+        name="Emergency Communication Vehicle",
+        name_cn="应急通信车",
+        category=SphereCategory.COMM,
+        min_quantity=0.002,  # 1辆/500受灾群众
+        target_quantity=0.002,
+        unit="unit",
+        scaling_basis=ScalingBasis.PER_DISPLACED,
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors=_DEFAULT_CLIMATE_FACTORS,
+        reference="国家地震应急预案 2025, 通信保障",
+        description="按每500受灾群众配备1辆应急通信车，恢复民用通信",
+    ),
+
+    # =========================================================================
+    # RESCUE_OPS - 救援人员保障
+    # 第七章：救援力量自身保障
+    # =========================================================================
+    "SPHERE-RES-001": SphereStandard(
+        code="SPHERE-RES-001",
+        name="Rescuer Drinking Water",
+        name_cn="救援人员饮水",
+        category=SphereCategory.RESCUE_OPS,
+        min_quantity=5.0,  # 5L/人/天（高强度作业，是Sphere群众标准的2倍）
+        target_quantity=7.0,
+        unit="liter",
+        scaling_basis=ScalingBasis.PER_RESCUER,
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors={
+            ClimateType.TROPICAL: 1.4,  # 高温高湿，大量出汗
+            ClimateType.TEMPERATE: 1.0,
+            ClimateType.COLD: 0.8,
+            ClimateType.ARID: 1.6,  # 干旱地区需要更多水
+        },
+        reference="消防员健康标准, 应急救援作业规范",
+        description="救援人员高强度作业需要5L/人/天饮水（群众标准的2倍）",
+    ),
+    "SPHERE-RES-002": SphereStandard(
+        code="SPHERE-RES-002",
+        name="Rescuer Hot Meals",
+        name_cn="救援人员热食",
+        category=SphereCategory.RESCUE_OPS,
+        min_quantity=3.0,  # 3餐/人/天
+        target_quantity=3.0,
+        unit="meal",
+        scaling_basis=ScalingBasis.PER_RESCUER,
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors={
+            ClimateType.TROPICAL: 1.0,
+            ClimateType.TEMPERATE: 1.0,
+            ClimateType.COLD: 1.2,  # 寒冷环境需要更多热量
+            ClimateType.ARID: 1.0,
+        },
+        reference="应急救援作业规范",
+        description="每名救援人员每天3餐热食，含能量补充",
+    ),
+    "SPHERE-RES-003": SphereStandard(
+        code="SPHERE-RES-003",
+        name="Max Continuous Work Hours",
+        name_cn="连续作业上限",
+        category=SphereCategory.RESCUE_OPS,
+        min_quantity=8.0,  # 8小时
+        target_quantity=6.0,  # 建议6小时更安全
+        unit="hour",
+        scaling_basis=ScalingBasis.FIXED,  # 固定值，非缩放
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors={
+            ClimateType.TROPICAL: 0.75,  # 高温减少作业时间
+            ClimateType.TEMPERATE: 1.0,
+            ClimateType.COLD: 0.9,  # 寒冷也影响持久力
+            ClimateType.ARID: 0.8,
+        },
+        reference="消防员健康标准",
+        description="救援人员连续作业不超过8小时，需强制轮换",
+    ),
+    "SPHERE-RES-004": SphereStandard(
+        code="SPHERE-RES-004",
+        name="Minimum Rest Period",
+        name_cn="最低休息时间",
+        category=SphereCategory.RESCUE_OPS,
+        min_quantity=6.0,  # 6小时
+        target_quantity=8.0,  # 建议8小时
+        unit="hour",
+        scaling_basis=ScalingBasis.FIXED,  # 固定值，非缩放
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors=_DEFAULT_CLIMATE_FACTORS,
+        reference="消防员健康标准",
+        description="每轮换周期后至少休息6小时",
+    ),
+
+    # =========================================================================
+    # HEALTH - 医疗资源扩展 (P1)
+    # 第三章：医疗部署
+    # =========================================================================
+    "SPHERE-HEALTH-004": SphereStandard(
+        code="SPHERE-HEALTH-004",
+        name="Basic Medical Station",
+        name_cn="基础医疗点",
+        category=SphereCategory.HEALTH,
+        min_quantity=0.0001,  # 1/10000受灾群众
+        target_quantity=0.0002,  # 1/5000
+        unit="unit",
+        scaling_basis=ScalingBasis.PER_DISPLACED,
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors=_DEFAULT_CLIMATE_FACTORS,
+        reference="WHO Emergency Standards",
+        description="每10000名受灾群众设置1个基础医疗点",
+    ),
+    "SPHERE-HEALTH-005": SphereStandard(
+        code="SPHERE-HEALTH-005",
+        name="Patient Beds",
+        name_cn="伤员床位",
+        category=SphereCategory.HEALTH,
+        min_quantity=1.2,  # 重伤员数×1.2（预留周转）
+        target_quantity=1.5,
+        unit="unit",
+        scaling_basis=ScalingBasis.PER_CASUALTY,
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors=_DEFAULT_CLIMATE_FACTORS,
+        reference="WHO Emergency Standards",
+        description="床位数=重伤员数×1.2，预留周转",
+    ),
+    "SPHERE-HEALTH-006": SphereStandard(
+        code="SPHERE-HEALTH-006",
+        name="Medical Personnel",
+        name_cn="医护人员",
+        category=SphereCategory.HEALTH,
+        min_quantity=0.3,  # 每床0.3人
+        target_quantity=0.5,
+        unit="person",
+        scaling_basis=ScalingBasis.PER_BED,
+        applicable_phases=frozenset({ResponsePhase.IMMEDIATE, ResponsePhase.SHORT_TERM}),
+        climate_factors=_DEFAULT_CLIMATE_FACTORS,
+        reference="WHO Emergency Standards",
+        description="医护人员配比：每10张床位3名医护人员",
     ),
 }
 

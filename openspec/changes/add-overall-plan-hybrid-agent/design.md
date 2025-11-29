@@ -88,7 +88,7 @@
 ### 2. State定义
 
 ```python
-from typing import TypedDict, Annotated, List, Dict, Any, Optional
+from typing import TypedDict, Annotated, List, Dict, Any, Optional, Literal
 from langgraph.graph import add_messages
 from langchain_core.messages import BaseMessage
 
@@ -97,6 +97,7 @@ class OverallPlanState(TypedDict):
     # 输入
     event_id: str
     scenario_id: str
+    task_id: str                              # 本次方案生成任务ID
     
     # 数据聚合（load_context节点输出）
     event_data: Dict[str, Any]           # events_v2数据
@@ -127,7 +128,8 @@ class OverallPlanState(TypedDict):
     final_document: Optional[str]        # 正式方案文档
     
     # 追踪
-    current_phase: str                   # 当前阶段
+    status: Literal["pending", "running", "awaiting_approval", "completed", "failed"]
+    current_phase: str                   # 当前阶段（用于细分内部节点）
     errors: List[str]                    # 错误信息
     
     # 消息历史（用于LLM对话）
@@ -344,11 +346,44 @@ def build_overall_plan_graph(checkpointer: PostgresSaver) -> StateGraph:
     graph.set_entry_point("load_context")
     graph.set_finish_point("document_generation")
     
-    # 编译，启用interrupt_before实现HITL
+    # 编译，启用持久化；具体人机回环通过 human_review 节点中的 interrupt + Command 实现
     return graph.compile(
         checkpointer=checkpointer,
-        interrupt_before=["document_generation"],  # 在文档生成前暂停
     )
+```
+
+人机回环节点示意（伪代码）：
+
+```python
+from typing import Literal
+from langgraph.types import interrupt, Command
+
+def human_review_node(state: OverallPlanState) -> Command[Literal["document_generation", "end"]]:
+    """指挥官审核节点，支持批准或退回"""
+    review = interrupt({
+        "modules": {
+            "module_0": state["module_0_basic_disaster"],
+            "module_1": state["module_1_rescue_force"],
+            # ... 其余模块
+        },
+        "calculation_details": state["calculation_details"],
+    })
+
+    decision = review.get("decision")  # "approve" | "reject"
+    feedback = review.get("feedback")
+
+    update: OverallPlanState = {"commander_feedback": feedback or ""}  # 实际实现中合并到原state
+
+    if decision == "approve":
+        update["approved"] = True
+        update["status"] = "awaiting_approval"  # 审批通过后即将进入文书生成
+        return Command(goto="document_generation", update=update)
+
+    # 显式退回：标记为失败，不再继续执行文书生成
+    update["approved"] = False
+    update["status"] = "failed"
+    update.setdefault("errors", []).append("rejected_by_commander")
+    return Command(goto="end", update=update)
 ```
 
 ### 8. API设计

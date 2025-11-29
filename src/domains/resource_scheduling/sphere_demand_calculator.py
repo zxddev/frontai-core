@@ -27,10 +27,13 @@ from src.domains.disaster.sphere_standards import (
     ScalingBasis,
     SphereCategory,
     SphereStandard,
-    SPHERE_STANDARDS,
-    get_standards_by_phase,
 )
 from src.domains.disaster.casualty_estimator import CasualtyEstimate
+from src.infra.config.algorithm_config_service import (
+    AlgorithmConfigService,
+    ConfigurationMissingError,
+)
+from src.domains.disaster.sphere_standards_loader import SphereStandardsLoader
 
 logger = logging.getLogger(__name__)
 
@@ -90,10 +93,22 @@ class SphereDemandCalculator:
     3. 考虑气候因素
     4. 支持特殊需求群体
     5. 提供置信区间
+    6. 【v19】从数据库加载配置，无Fallback
+    
+    注意：必须提供config_service参数，否则无法加载Sphere标准
     """
 
-    def __init__(self, db: Optional[AsyncSession] = None) -> None:
+    def __init__(
+        self, 
+        db: Optional[AsyncSession] = None,
+        config_service: Optional[AlgorithmConfigService] = None,
+    ) -> None:
         self._db = db
+        self._config_service = config_service
+        # Sphere标准加载器（从数据库加载）
+        self._standards_loader: Optional[SphereStandardsLoader] = None
+        if config_service:
+            self._standards_loader = SphereStandardsLoader(config_service)
         # 物资编码映射缓存 (Sphere标准代码 -> 系统物资编码)
         self._supply_code_cache: Optional[Dict[str, str]] = None
 
@@ -106,6 +121,9 @@ class SphereDemandCalculator:
         climate: ClimateType = ClimateType.TEMPERATE,
         special_needs: Optional[SpecialNeeds] = None,
         category_filter: Optional[List[SphereCategory]] = None,
+        rescuer_count: int = 0,
+        command_group_count: int = 0,
+        bed_count: int = 0,
     ) -> DemandCalculationResult:
         """
         计算物资需求
@@ -118,6 +136,9 @@ class SphereDemandCalculator:
             climate: 气候类型
             special_needs: 特殊需求群体比例
             category_filter: 只计算指定品类
+            rescuer_count: 救援人员总数（用于COMM/RESCUE_OPS类别）
+            command_group_count: 指挥组数量（用于COMM类别）
+            bed_count: 床位数量（用于医护人员配比）
             
         Returns:
             DemandCalculationResult
@@ -141,8 +162,16 @@ class SphereDemandCalculator:
             f"displaced={pop_displaced} casualties={pop_casualties} days={duration_days}"
         )
         
-        # 2. 获取适用于该阶段的Sphere标准
-        applicable_standards = get_standards_by_phase(phase)
+        # 2. 获取适用于该阶段的Sphere标准（从数据库加载，无Fallback）
+        if self._standards_loader:
+            # 【v19】从数据库加载Sphere标准
+            applicable_standards = await self._standards_loader.load_by_phase(phase)
+        else:
+            # 没有配置服务时直接报错，不使用硬编码Fallback
+            raise ConfigurationMissingError(
+                category="sphere",
+                code="*",
+            )
         
         # 3. 按品类过滤
         if category_filter:
@@ -166,6 +195,9 @@ class SphereDemandCalculator:
                 pop_displaced=pop_displaced,
                 pop_casualties=pop_casualties,
                 pop_trapped=pop_trapped,
+                rescuer_count=rescuer_count,
+                command_group_count=command_group_count,
+                bed_count=bed_count,
             )
             
             if base_count <= 0:
@@ -268,8 +300,15 @@ class SphereDemandCalculator:
         pop_displaced: int,
         pop_casualties: int,
         pop_trapped: int,
+        rescuer_count: int = 0,
+        command_group_count: int = 0,
+        bed_count: int = 0,
     ) -> int:
-        """根据缩放基准获取人口基数"""
+        """
+        根据缩放基准获取人口/资源基数
+        
+        v2扩展: 支持救援人员、指挥组、床位等新缩放基准
+        """
         mapping = {
             ScalingBasis.PER_PERSON: pop_affected,
             ScalingBasis.PER_DISPLACED: pop_displaced,
@@ -278,6 +317,10 @@ class SphereDemandCalculator:
             ScalingBasis.PER_AREA_KM2: 1,  # 面积需要外部传入
             ScalingBasis.PER_TEAM: 1,       # 队伍数需要外部传入
             ScalingBasis.FIXED: 1,
+            # v2: 新增缩放基准
+            ScalingBasis.PER_RESCUER: rescuer_count,
+            ScalingBasis.PER_COMMAND_GROUP: command_group_count,
+            ScalingBasis.PER_BED: bed_count,
         }
         return mapping.get(scaling_basis, pop_affected)
 
@@ -293,6 +336,12 @@ class SphereDemandCalculator:
                 return "critical"
             if std.code in ["SPHERE-FOOD-002", "SPHERE-SHELTER-003"]:
                 return "critical"
+            # 通信设备在立即响应阶段是关键
+            if std.category == SphereCategory.COMM:
+                return "critical"
+            # 救援人员保障是高优先级
+            if std.category == SphereCategory.RESCUE_OPS:
+                return "high"
             return "high"
         
         # 短期救济阶段
@@ -300,6 +349,9 @@ class SphereDemandCalculator:
             if std.category == SphereCategory.SHELTER:
                 return "critical"
             if std.category in [SphereCategory.WASH, SphereCategory.FOOD]:
+                return "high"
+            # 通信和救援人员保障继续保持高优先级
+            if std.category in [SphereCategory.COMM, SphereCategory.RESCUE_OPS]:
                 return "high"
             return "medium"
         
