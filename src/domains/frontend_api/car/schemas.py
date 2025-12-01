@@ -31,6 +31,11 @@ class ItemData(BaseModel):
     exclusiveToVehicleName: Optional[str] = None  # 专属车辆名称
     hasModules: bool = False
     modules: list[ModuleData] = Field(default_factory=list)
+    # 展示字段
+    image: Optional[str] = None              # 设备图片URL
+    description: Optional[str] = None        # 设备描述
+    manufacturer: Optional[str] = None       # 生产厂家
+    specifications: Optional[dict] = None    # 规格参数
 
 
 class ShortageAlertData(BaseModel):
@@ -216,3 +221,65 @@ class CarModuleUpdateResponse(BaseModel):
     """模块更新响应"""
     deviceId: str
     modules: list[ModuleToggleItem]
+
+
+# ==================== 车辆成员装备查看/修改 Schema ====================
+
+class MyEquipmentModule(BaseModel):
+    """我的装备-模块"""
+    id: str
+    name: str
+    moduleType: str = ""
+    isSelected: bool = True
+
+
+class MyEquipmentDevice(BaseModel):
+    """我的装备-设备"""
+    id: str
+    name: str
+    model: str = ""
+    deviceType: str = ""
+    quantity: int = 1
+    modules: list[MyEquipmentModule] = Field(default_factory=list)
+    # 展示字段
+    image: Optional[str] = None              # 设备图片URL
+    description: Optional[str] = None        # 设备描述
+    manufacturer: Optional[str] = None       # 生产厂家
+    specifications: Optional[dict] = None    # 规格参数
+
+
+class MyEquipmentSupply(BaseModel):
+    """我的装备-物资"""
+    id: str
+    name: str
+    category: str = ""
+    quantity: int = 1
+
+
+class MyEquipmentData(BaseModel):
+    """我的车辆装备清单数据"""
+    vehicleId: str
+    vehicleName: str
+    vehicleCode: Optional[str] = None
+    vehicleStatus: str = "preparing"
+    devices: list[MyEquipmentDevice] = Field(default_factory=list)
+    supplies: list[MyEquipmentSupply] = Field(default_factory=list)
+    dispatchedAt: Optional[str] = None
+    dispatchedBy: Optional[str] = None
+
+
+class MyEquipmentToggleRequest(BaseModel):
+    """车辆成员切换装备选中状态请求"""
+    eventId: str
+    userId: str
+    itemId: str
+    itemType: Literal["device", "supply", "module"] = "device"
+    isSelected: bool
+
+
+class MyEquipmentToggleResponse(BaseModel):
+    """车辆成员切换装备响应"""
+    vehicleId: str
+    itemId: str
+    isSelected: bool
+    updatedBy: str

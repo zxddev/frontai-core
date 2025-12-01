@@ -87,8 +87,9 @@ def _parse_route_response(data: Dict[str, Any]) -> Dict[str, Any]:
             step_info = {
                 "instruction": step.get("instruction", ""),
                 "road_name": step.get("road_name", ""),
-                "distance": int(step.get("step_distance", 0)),
+                "step_distance": int(step.get("step_distance", 0)),
                 "orientation": step.get("orientation", ""),
+                "polyline": step.get("polyline", ""),  # 路径坐标点
             }
             path_info["steps"].append(step_info)
         
@@ -152,7 +153,7 @@ def amap_route_planning(
         "origin": _format_coordinate(origin_lon, origin_lat),
         "destination": _format_coordinate(dest_lon, dest_lat),
         "strategy": str(strategy),
-        "show_fields": "cost",
+        "show_fields": "cost,polyline",
     }
     
     if waypoints:
@@ -249,7 +250,7 @@ def amap_route_planning_with_avoidance(
         "origin": _format_coordinate(origin_lon, origin_lat),
         "destination": _format_coordinate(dest_lon, dest_lat),
         "strategy": str(strategy),
-        "show_fields": "cost",
+        "show_fields": "cost,polyline",
     }
     
     # 添加避障区域
@@ -308,7 +309,7 @@ async def amap_route_planning_async(
         "origin": _format_coordinate(origin_lon, origin_lat),
         "destination": _format_coordinate(dest_lon, dest_lat),
         "strategy": str(strategy),
-        "show_fields": "cost",
+        "show_fields": "cost,polyline",
     }
     
     if waypoints:
@@ -358,7 +359,7 @@ async def amap_route_planning_with_avoidance_async(
         "origin": _format_coordinate(origin_lon, origin_lat),
         "destination": _format_coordinate(dest_lon, dest_lat),
         "strategy": str(strategy),
-        "show_fields": "cost",
+        "show_fields": "cost,polyline",
     }
     
     if avoid_polygons:

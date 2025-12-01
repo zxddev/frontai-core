@@ -90,10 +90,14 @@ def search_similar_cases(
     client = _get_qdrant_client()
     embeddings = _get_embeddings()
     
-    # 检查集合是否存在
+    # 检查集合是否存在，集合缺失直接报错
     try:
         collections = client.get_collections()
         collection_names = [c.name for c in collections.collections]
+        logger.info(
+            "Qdrant集合列表获取成功",
+            extra={"available_collections": collection_names}
+        )
         
         # 优先使用emergency_cases，如果不存在则使用rag_案例
         if EMERGENCY_CASES_COLLECTION in collection_names:
@@ -102,11 +106,21 @@ def search_similar_cases(
             collection_name = "rag_案例"
             logger.info("使用已有集合rag_案例进行检索")
         else:
-            logger.warning("案例集合不存在，返回空结果")
-            return []
+            # 集合不存在，直接抛出异常，不允许降级
+            raise RuntimeError(
+                f"案例集合不存在，可用集合: {collection_names}，"
+                f"需要: {EMERGENCY_CASES_COLLECTION} 或 rag_案例"
+            )
+    except RuntimeError:
+        # RuntimeError是业务异常，直接向上抛出
+        raise
     except Exception as e:
-        logger.error("检查Qdrant集合失败", extra={"error": str(e)})
-        return []
+        # 其他异常（网络、连接等）也直接抛出
+        logger.error(
+            "Qdrant连接失败",
+            extra={"error": str(e), "qdrant_url": os.environ.get('QDRANT_URL')}
+        )
+        raise RuntimeError(f"Qdrant连接失败: {e}") from e
     
     # 向量化查询
     try:

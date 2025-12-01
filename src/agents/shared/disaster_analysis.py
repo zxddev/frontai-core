@@ -109,8 +109,15 @@ async def understand_disaster(state: DisasterAnalysisState) -> Dict[str, Any]:
             "parsed_disaster": None,
         }
     
+    # RAG失败时直接报错，不允许降级
     if rag_error:
-        logger.warning(f"RAG检索失败（不阻塞流程）: {rag_error}")
+        logger.error(f"RAG检索失败: {rag_error}")
+        errors.append(f"RAG检索失败: {rag_error}")
+        return {
+            "errors": errors,
+            "parsed_disaster": parsed_disaster,
+            "similar_cases": [],
+        }
     
     # 更新追踪
     trace = state.get("trace", {})
@@ -209,18 +216,24 @@ async def _search_cases_with_rag(
     description: str,
     disaster_type: str,
 ) -> tuple[List[SimilarCase], Optional[str]]:
-    """RAG检索相似案例"""
+    """RAG检索相似案例，失败时返回错误信息"""
     try:
         from src.agents.emergency_ai.tools.rag_tools import search_similar_cases_async
         
+        logger.info(
+            "开始RAG案例检索",
+            extra={"disaster_type": disaster_type, "query_length": len(description)}
+        )
         cases = await search_similar_cases_async(
             query=description,
             disaster_type=disaster_type,
             top_k=5,
         )
+        logger.info(f"RAG案例检索完成，找到{len(cases)}个案例")
         return cases, None
     except Exception as e:
-        logger.warning(f"RAG检索异常: {e}")
+        # 记录错误并返回错误信息，由上层决定是否中断流程
+        logger.error(f"RAG检索异常: {e}")
         return [], str(e)
 
 

@@ -62,7 +62,13 @@ class UnitService:
                 # 4. 创建或更新队伍
                 team = await self._create_or_update_team(vehicle, ai_context)
                 
-                # 5. 同步地图实体
+                # 5. 同步装备关联到队伍
+                await self._sync_team_resources(team.id, assignments)
+                
+                # 6. 同步车辆关联到队伍
+                await self._sync_team_vehicle(team.id, vehicle_id)
+                
+                # 7. 同步地图实体
                 await self._sync_map_entity(team, request.event_id)
                 
                 mobilized_teams.append(MobilizedTeamSummary(
@@ -254,3 +260,50 @@ class UnitService:
             # Repository 的 create 方法通常生成新 ID。我们这里先让它自动生成，后续可以通过 properties 关联回找
             
             await self._entity_service.create(entity_data)
+
+    async def _sync_team_resources(self, team_id: UUID, assignments: List[Dict[str, Any]]) -> None:
+        """同步 car_item_assignment 中选中的装备到队伍关联表"""
+        for item in assignments:
+            if not item.get('is_selected'):
+                continue
+            
+            item_type = item['item_type']
+            item_id = item['item_id']
+            quantity = item.get('quantity', 1)
+            
+            try:
+                if item_type == 'device':
+                    await self._db.execute(text("""
+                        INSERT INTO operational_v2.team_devices_v2 (team_id, device_id, quantity)
+                        VALUES (:team_id, :device_id, :quantity)
+                        ON CONFLICT (team_id, device_id) DO UPDATE SET quantity = :quantity, updated_at = NOW()
+                    """), {"team_id": str(team_id), "device_id": item_id, "quantity": quantity})
+                    
+                elif item_type == 'supply':
+                    await self._db.execute(text("""
+                        INSERT INTO operational_v2.team_supplies_v2 (team_id, supply_id, quantity)
+                        VALUES (:team_id, :supply_id, :quantity)
+                        ON CONFLICT (team_id, supply_id) DO UPDATE SET quantity = :quantity, updated_at = NOW()
+                    """), {"team_id": str(team_id), "supply_id": item_id, "quantity": quantity})
+                    
+                elif item_type == 'module':
+                    parent_device_id = item.get('parent_device_id')
+                    await self._db.execute(text("""
+                        INSERT INTO operational_v2.team_modules_v2 (team_id, module_id, device_id)
+                        VALUES (:team_id, :module_id, :device_id)
+                        ON CONFLICT (team_id, module_id) DO UPDATE SET device_id = :device_id, updated_at = NOW()
+                    """), {"team_id": str(team_id), "module_id": item_id, "device_id": parent_device_id})
+                    
+            except Exception as e:
+                logger.warning(f"同步队伍资源失败: team_id={team_id}, item_id={item_id}, error={e}")
+
+    async def _sync_team_vehicle(self, team_id: UUID, vehicle_id: UUID) -> None:
+        """同步队伍-车辆关联"""
+        try:
+            await self._db.execute(text("""
+                INSERT INTO operational_v2.team_vehicles_v2 (team_id, vehicle_id, is_primary, status)
+                VALUES (:team_id, :vehicle_id, true, 'deployed')
+                ON CONFLICT (team_id, vehicle_id) DO UPDATE SET status = 'deployed', is_primary = true, updated_at = NOW()
+            """), {"team_id": str(team_id), "vehicle_id": str(vehicle_id)})
+        except Exception as e:
+            logger.warning(f"同步队伍车辆失败: team_id={team_id}, vehicle_id={vehicle_id}, error={e}")

@@ -18,9 +18,11 @@ from .schemas import (
     MovementStartRequest, MovementStartResponse,
     BatchMovementStartRequest, BatchMovementStartResponse,
     MovementStatusResponse, ActiveSessionsResponse,
+    TeamDispatchRequest, TeamDispatchResponse,
 )
 from .service import get_movement_manager, MovementSimulationManager
 from .batch_service import get_batch_service, BatchMovementService
+from .team_dispatch_service import TeamDispatchService
 
 
 router = APIRouter(prefix="/movement", tags=["movement-simulation"])
@@ -247,3 +249,36 @@ async def get_batch_status(
         return await batch_svc.get_batch_status(batch_id)
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=e.detail)
+
+
+# =============================================================================
+# 救援队伍调度API
+# =============================================================================
+
+@router.post("/team/{team_id}/dispatch", response_model=TeamDispatchResponse, status_code=status.HTTP_201_CREATED)
+async def dispatch_team(
+    team_id: UUID,
+    request: TeamDispatchRequest,
+    db: AsyncSession = Depends(get_db),
+) -> TeamDispatchResponse:
+    """
+    调度救援队伍
+    
+    根据队伍ID调度救援队伍到目标位置，自动进行路径规划并启动移动仿真。
+    前端会通过 WebSocket 接收实时位置更新（/topic/realtime.location）。
+    
+    - **team_id**: 救援队伍ID
+    - **destination**: 目标位置 [经度, 纬度]
+    - **waypoints**: 任务停靠点列表（可选）
+    - **speed_mps**: 覆盖速度（可选，不指定则使用队伍默认速度）
+    - **scenario_id**: 场景ID（可选，用于关联地图实体）
+    """
+    try:
+        service = TeamDispatchService(db)
+        return await service.dispatch_team(team_id, request)
+    except NotFoundError as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=e.detail)
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
+    except ConflictError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=e.detail)

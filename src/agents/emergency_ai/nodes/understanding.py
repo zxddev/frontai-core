@@ -114,8 +114,14 @@ async def understand_disaster(state: EmergencyAIState) -> Dict[str, Any]:
             "current_phase": "understanding_failed",
         }
     
+    # RAG失败时直接报错，不允许降级
     if rag_error:
-        logger.warning(f"RAG检索失败（不阻塞流程）: {rag_error}")
+        logger.error(f"RAG检索失败: {rag_error}")
+        errors.append(f"RAG检索失败: {rag_error}")
+        return {
+            "errors": errors,
+            "current_phase": "understanding_failed",
+        }
     
     # 更新追踪信息
     trace = state.get("trace", {})
@@ -237,9 +243,6 @@ async def enhance_with_cases(state: EmergencyAIState) -> Dict[str, Any]:
         }
         
     except Exception as e:
-        # RAG检索失败不阻塞流程，记录警告继续
-        logger.warning("案例检索失败，继续后续流程", extra={"error": str(e)})
-        return {
-            "similar_cases": [],
-            "understanding_summary": f"灾害类型: {disaster_type}",
-        }
+        # RAG检索失败直接报错，不允许降级
+        logger.error("案例检索失败", extra={"error": str(e)})
+        raise RuntimeError(f"RAG案例检索失败: {e}") from e

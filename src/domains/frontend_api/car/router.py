@@ -22,7 +22,7 @@ from src.domains.resources.devices.service import DeviceService
 from src.domains.equipment_recommendation.repository import EquipmentRecommendationRepository
 from src.domains.scenarios.repository import ScenarioRepository
 from src.domains.frontend_api.common import ApiResponse
-from .repository import PreparationDispatchRepository, ModuleRepository, CarItemAssignmentRepository
+from .repository import PreparationDispatchRepository, ModuleRepository, CarItemAssignmentRepository, MyEquipmentRepository
 from .schemas import (
     CarListData, CarItem, ItemData, ModuleData, ShortageAlertData,
     ItemDetailResponse, ItemProperty,
@@ -33,8 +33,9 @@ from .schemas import (
     CarItemRemoveRequest, CarItemRemoveResponse,
     CarItemToggleRequest, CarItemToggleResponse, ModuleToggleItem,
     CarModuleUpdateRequest, CarModuleUpdateResponse,
+    MyEquipmentData, MyEquipmentDevice, MyEquipmentSupply, MyEquipmentModule,
+    MyEquipmentToggleRequest, MyEquipmentToggleResponse,
 )
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["前端-车辆装备"])
@@ -352,10 +353,11 @@ async def get_car_list(
                     is_ai_recommended = rec_info is not None
                     is_selected_flag = 1 if (is_assigned_to_current or (not loading_plan and is_ai_recommended)) else 0
 
+                props = device.properties or {}
                 items.append(ItemData(
                     id=device_id_str,
                     name=device.name,
-                    model=device.model or device.properties.get('model', device.code),
+                    model=device.model or props.get('model', device.code),
                     type="device",
                     isSelected=is_selected_flag,
                     aiReason=rec_info["reason"] if rec_info else None,
@@ -366,6 +368,10 @@ async def get_car_list(
                     exclusiveToVehicleName=exclusive_vehicle_name,
                     hasModules=bool(has_modules),
                     modules=module_list,
+                    image=props.get('image'),
+                    description=props.get('description'),
+                    manufacturer=device.manufacturer,
+                    specifications=props.get('specifications'),
                 ))
             return items
         
@@ -719,8 +725,9 @@ async def car_start(
     指挥员指挥车队出发
     
     1. 检查所有车辆是否准备完成
-    2. 广播出发消息
-    3. 更新状态
+    2. 将车辆动员为救援队伍（转换数据结构）
+    3. 广播出发消息
+    4. 更新状态
     """
     logger.info(f"车队出发, eventId={request.eventId}")
     
@@ -737,6 +744,25 @@ async def car_start(
                 f"还有 {summary['total'] - summary['ready_count']} 辆车未准备完成"
             )
         
+        # 获取所有已调度的车辆ID
+        dispatches = await dispatch_repo.get_by_event(event_id)
+        vehicle_ids = [str(d["vehicle_id"]) for d in dispatches]
+        
+        # 将车辆动员为救援队伍
+        if vehicle_ids:
+            from src.domains.frontend_api.unit.service import UnitService
+            from src.domains.frontend_api.unit.schemas import MobilizeRequest
+            
+            unit_service = UnitService(db)
+            mobilize_request = MobilizeRequest(
+                event_id=request.eventId,
+                vehicle_ids=vehicle_ids,
+            )
+            mobilize_result = await unit_service.mobilize_vehicles(mobilize_request)
+            logger.info(
+                f"车辆动员完成: {mobilize_result.mobilized_count} 辆车转换为救援队伍"
+            )
+        
         # 标记已出发到数据库
         await dispatch_repo.mark_departed(event_id)
         
@@ -747,11 +773,15 @@ async def car_start(
                 "eventId": request.eventId,
                 "message": "车队已出发",
                 "departedAt": datetime.now().isoformat(),
+                "mobilizedTeams": mobilize_result.mobilized_count if vehicle_ids else 0,
             },
             scenario_id=None,
         )
         
-        return ApiResponse.success(None, "车队已出发")
+        return ApiResponse.success({
+            "mobilizedTeams": mobilize_result.mobilized_count if vehicle_ids else 0,
+            "teams": [t.model_dump() for t in mobilize_result.teams] if vehicle_ids else [],
+        }, "车队已出发，已转换为救援队伍")
         
     except Exception as e:
         logger.exception(f"出发指令失败: {e}")
@@ -889,8 +919,7 @@ async def remove_item_from_car(
     
     业务逻辑:
     1. 验证任务状态
-    2. 专属装备不可移除（只能toggle）
-    3. 删除分配记录
+    2. 删除分配记录
     """
     logger.info(f"移除装备, carId={request.carId}, itemId={request.itemId}")
     
@@ -910,10 +939,8 @@ async def remove_item_from_car(
         
         assignment_repo = CarItemAssignmentRepository(db)
         
-        removed = await assignment_repo.remove_item(event_id, car_id, item_id)
-        
-        if not removed:
-            return ApiResponse.error(40005, "专属装备不可移除，请使用toggle接口")
+        # 标记装备为未选中（覆盖AI推荐的默认选中状态）
+        await assignment_repo.mark_deselected(event_id, car_id, item_id)
         
         return ApiResponse.success(CarItemRemoveResponse(
             carId=request.carId,
@@ -1052,4 +1079,155 @@ async def update_car_modules(
         return ApiResponse.error(400, f"参数格式错误: {str(e)}")
     except Exception as e:
         logger.exception(f"更新模块状态失败: {e}")
+        return ApiResponse.error(500, f"操作失败: {str(e)}")
+
+
+# ==================== 车辆成员装备接口 ====================
+
+@router.get("/car/my-equipment", response_model=ApiResponse[MyEquipmentData])
+async def get_my_equipment(
+    eventId: str = Query(..., description="事件ID"),
+    userId: str = Query(..., description="用户ID"),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[MyEquipmentData]:
+    """
+    获取我的车辆装备清单（车辆成员专用）
+    
+    - 通过用户ID查询所属车辆
+    - 返回指挥员分配的装备清单（不是AI推荐）
+    - 仅返回 is_selected=true 的装备
+    """
+    logger.info(f"获取我的装备清单: eventId={eventId}, userId={userId}")
+    
+    try:
+        event_id = UUID(eventId)
+        user_id = UUID(userId)
+        
+        repo = MyEquipmentRepository(db)
+        
+        # 1. 获取用户所属车辆
+        vehicle_info = await repo.get_user_vehicle(user_id, event_id)
+        if not vehicle_info:
+            return ApiResponse.error(403, "您不属于任何车辆，无法查看装备")
+        
+        vehicle_id = UUID(vehicle_info["vehicle_id"])
+        
+        # 2. 获取车辆被分配的装备
+        items = await repo.get_vehicle_assigned_items(event_id, vehicle_id)
+        
+        # 3. 组装设备（含模块）
+        devices = []
+        modules_by_device = {}
+        for mod in items["modules"]:
+            parent_id = mod.get("parent_device_id")
+            if parent_id:
+                if parent_id not in modules_by_device:
+                    modules_by_device[parent_id] = []
+                modules_by_device[parent_id].append(MyEquipmentModule(
+                    id=mod["id"],
+                    name=mod["name"],
+                    moduleType=mod["module_type"],
+                    isSelected=mod["is_selected"],
+                ))
+        
+        for dev in items["devices"]:
+            device_modules = modules_by_device.get(dev["id"], [])
+            devices.append(MyEquipmentDevice(
+                id=dev["id"],
+                name=dev["name"],
+                model=dev["model"],
+                deviceType=dev["device_type"],
+                quantity=dev["quantity"],
+                modules=device_modules,
+                image=dev.get("image"),
+                description=dev.get("description"),
+                manufacturer=dev.get("manufacturer"),
+                specifications=dev.get("specifications"),
+            ))
+        
+        # 4. 组装物资
+        supplies = [
+            MyEquipmentSupply(
+                id=s["id"],
+                name=s["name"],
+                category=s["category"],
+                quantity=s["quantity"],
+            )
+            for s in items["supplies"]
+        ]
+        
+        return ApiResponse.success(MyEquipmentData(
+            vehicleId=vehicle_info["vehicle_id"],
+            vehicleName=vehicle_info["vehicle_name"],
+            vehicleCode=vehicle_info["vehicle_code"],
+            vehicleStatus=vehicle_info["dispatch_status"],
+            devices=devices,
+            supplies=supplies,
+            dispatchedAt=vehicle_info["dispatched_at"],
+            dispatchedBy=vehicle_info["dispatched_by_name"],
+        ))
+        
+    except ValueError as e:
+        return ApiResponse.error(400, f"参数格式错误: {str(e)}")
+    except Exception as e:
+        logger.exception(f"获取我的装备清单失败: {e}")
+        return ApiResponse.error(500, f"获取失败: {str(e)}")
+
+
+@router.post("/car/my-equipment/toggle", response_model=ApiResponse[MyEquipmentToggleResponse])
+async def toggle_my_equipment(
+    request: MyEquipmentToggleRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[MyEquipmentToggleResponse]:
+    """
+    车辆成员切换装备选中状态
+    
+    - 验证用户是否属于该车辆
+    - 修改 car_item_assignment 表中的选中状态
+    - 记录修改人
+    """
+    logger.info(f"车辆成员切换装备: eventId={request.eventId}, userId={request.userId}, itemId={request.itemId}")
+    
+    try:
+        event_id = UUID(request.eventId)
+        user_id = UUID(request.userId)
+        item_id = UUID(request.itemId)
+        
+        repo = MyEquipmentRepository(db)
+        
+        # 1. 验证用户所属车辆
+        vehicle_info = await repo.get_user_vehicle(user_id, event_id)
+        if not vehicle_info:
+            return ApiResponse.error(403, "您不属于任何车辆，无权修改装备")
+        
+        vehicle_id = UUID(vehicle_info["vehicle_id"])
+        
+        # 2. 检查状态是否允许修改
+        dispatch_status = vehicle_info.get("dispatch_status", "pending")
+        if dispatch_status in ["ready", "departed"]:
+            return ApiResponse.error(400, "当前状态不允许修改装备")
+        
+        # 3. 更新选中状态
+        success = await repo.toggle_item_selection(
+            event_id=event_id,
+            vehicle_id=vehicle_id,
+            item_id=item_id,
+            is_selected=request.isSelected,
+            updated_by=request.userId,
+        )
+        
+        if not success:
+            return ApiResponse.error(404, "装备不存在或未分配给您的车辆")
+        
+        return ApiResponse.success(MyEquipmentToggleResponse(
+            vehicleId=str(vehicle_id),
+            itemId=request.itemId,
+            isSelected=request.isSelected,
+            updatedBy=request.userId,
+        ), "修改成功")
+        
+    except ValueError as e:
+        return ApiResponse.error(400, f"参数格式错误: {str(e)}")
+    except Exception as e:
+        logger.exception(f"切换装备状态失败: {e}")
         return ApiResponse.error(500, f"操作失败: {str(e)}")

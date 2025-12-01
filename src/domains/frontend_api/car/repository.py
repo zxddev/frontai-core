@@ -275,6 +275,23 @@ class CarItemAssignmentRepository:
     def __init__(self, db: AsyncSession):
         self.db = db
     
+    async def clear_by_event(self, event_id: UUID) -> int:
+        """
+        清理指定事件的所有装备分配记录
+        
+        用于重新调用装备推荐智能体前清理旧数据，确保推荐结果不受历史数据影响。
+        """
+        result = await self.db.execute(
+            text("""
+                DELETE FROM operational_v2.car_item_assignment
+                WHERE event_id = :event_id
+            """),
+            {"event_id": str(event_id)}
+        )
+        await self.db.commit()
+        logger.info(f"已清理事件 {event_id} 的装备分配记录，共 {result.rowcount} 条")
+        return result.rowcount
+    
     async def add_item(
         self,
         event_id: UUID,
@@ -328,7 +345,6 @@ class CarItemAssignmentRepository:
             text("""
                 DELETE FROM operational_v2.car_item_assignment
                 WHERE event_id = :event_id AND car_id = :car_id AND item_id = :item_id
-                  AND is_exclusive = false
             """),
             {
                 "event_id": str(event_id),
@@ -502,6 +518,32 @@ class CarItemAssignmentRepository:
             }
         )
         await self.db.commit()
+    
+    async def mark_deselected(
+        self,
+        event_id: UUID,
+        car_id: UUID,
+        item_id: UUID,
+        item_type: str = "device",
+    ) -> None:
+        """标记装备为未选中（用于移除AI推荐的装备）"""
+        await self.db.execute(
+            text("""
+                INSERT INTO operational_v2.car_item_assignment 
+                (event_id, car_id, item_id, item_type, is_exclusive, is_selected)
+                VALUES (:event_id, :car_id, :item_id, :item_type, false, false)
+                ON CONFLICT (event_id, car_id, item_id) DO UPDATE SET
+                    is_selected = false,
+                    updated_at = NOW()
+            """),
+            {
+                "event_id": str(event_id),
+                "car_id": str(car_id),
+                "item_id": str(item_id),
+                "item_type": item_type,
+            }
+        )
+        await self.db.commit()
 
 
 class ModuleRepository:
@@ -587,3 +629,205 @@ class ModuleRepository:
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
+
+
+class MyEquipmentRepository:
+    """
+    车辆成员装备查询数据访问层
+    
+    用于车辆成员查看和修改自己车辆被分配的装备。
+    数据来源是指挥员分配的结果（car_item_assignment），不是AI推荐。
+    """
+    
+    def __init__(self, db: AsyncSession):
+        self.db = db
+    
+    async def get_user_vehicle(self, user_id: UUID, event_id: UUID) -> Optional[Dict[str, Any]]:
+        """
+        获取用户所属的车辆
+        
+        通过 event_id 找到 scenario_id，再通过 seat_assignments_v2 找到用户所属车辆。
+        """
+        result = await self.db.execute(
+            text("""
+                SELECT 
+                    v.id AS vehicle_id,
+                    v.code AS vehicle_code,
+                    v.name AS vehicle_name,
+                    v.vehicle_type,
+                    sa.seat_role,
+                    COALESCE(d.status, 'pending') AS dispatch_status,
+                    d.dispatched_at,
+                    du.real_name AS dispatched_by_name
+                FROM operational_v2.events_v2 e
+                JOIN operational_v2.seat_assignments_v2 sa ON sa.scenario_id = e.scenario_id
+                JOIN operational_v2.vehicles_v2 v ON sa.vehicle_id = v.id
+                LEFT JOIN operational_v2.equipment_preparation_dispatch_v2 d 
+                    ON d.event_id = e.id AND d.vehicle_id = v.id
+                LEFT JOIN operational_v2.users_v2 du ON d.dispatched_by = du.id
+                WHERE e.id = :event_id 
+                  AND sa.user_id = :user_id
+                  AND sa.status IN ('assigned', 'active')
+                LIMIT 1
+            """),
+            {"event_id": str(event_id), "user_id": str(user_id)}
+        )
+        row = result.fetchone()
+        if not row:
+            return None
+        return {
+            "vehicle_id": str(row.vehicle_id),
+            "vehicle_code": row.vehicle_code,
+            "vehicle_name": row.vehicle_name,
+            "vehicle_type": row.vehicle_type,
+            "seat_role": row.seat_role,
+            "dispatch_status": row.dispatch_status,
+            "dispatched_at": row.dispatched_at.isoformat() if row.dispatched_at else None,
+            "dispatched_by_name": row.dispatched_by_name,
+        }
+    
+    async def get_vehicle_assigned_items(
+        self, 
+        event_id: UUID, 
+        vehicle_id: UUID
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        获取车辆被分配的装备（指挥员分配的，is_selected=true）
+        
+        返回设备、物资、模块三个列表。
+        """
+        # 查询设备
+        devices_result = await self.db.execute(
+            text("""
+                SELECT 
+                    ca.item_id,
+                    ca.quantity,
+                    d.name,
+                    d.code,
+                    d.device_type,
+                    d.model,
+                    d.manufacturer,
+                    d.properties
+                FROM operational_v2.car_item_assignment ca
+                JOIN operational_v2.devices_v2 d ON ca.item_id = d.id
+                WHERE ca.event_id = :event_id 
+                  AND ca.car_id = :vehicle_id
+                  AND ca.item_type = 'device'
+                  AND ca.is_selected = true
+            """),
+            {"event_id": str(event_id), "vehicle_id": str(vehicle_id)}
+        )
+        devices = []
+        for r in devices_result.fetchall():
+            props = r.properties or {}
+            devices.append({
+                "id": str(r.item_id),
+                "name": r.name,
+                "code": r.code,
+                "device_type": r.device_type,
+                "model": r.model or "",
+                "quantity": r.quantity,
+                "manufacturer": r.manufacturer or "",
+                "image": props.get("image"),
+                "description": props.get("description"),
+                "specifications": props.get("specifications"),
+            })
+        
+        # 查询物资
+        supplies_result = await self.db.execute(
+            text("""
+                SELECT 
+                    ca.item_id,
+                    ca.quantity,
+                    s.name,
+                    s.code,
+                    s.category
+                FROM operational_v2.car_item_assignment ca
+                JOIN operational_v2.supplies_v2 s ON ca.item_id = s.id
+                WHERE ca.event_id = :event_id 
+                  AND ca.car_id = :vehicle_id
+                  AND ca.item_type = 'supply'
+                  AND ca.is_selected = true
+            """),
+            {"event_id": str(event_id), "vehicle_id": str(vehicle_id)}
+        )
+        supplies = [
+            {
+                "id": str(r.item_id),
+                "name": r.name,
+                "code": r.code,
+                "category": r.category or "",
+                "quantity": r.quantity,
+            }
+            for r in supplies_result.fetchall()
+        ]
+        
+        # 查询模块（按父设备分组）
+        modules_result = await self.db.execute(
+            text("""
+                SELECT 
+                    ca.item_id,
+                    ca.parent_device_id,
+                    ca.is_selected,
+                    m.name,
+                    m.code,
+                    m.module_type
+                FROM operational_v2.car_item_assignment ca
+                JOIN operational_v2.modules_v2 m ON ca.item_id = m.id
+                WHERE ca.event_id = :event_id 
+                  AND ca.car_id = :vehicle_id
+                  AND ca.item_type = 'module'
+            """),
+            {"event_id": str(event_id), "vehicle_id": str(vehicle_id)}
+        )
+        modules = [
+            {
+                "id": str(r.item_id),
+                "name": r.name,
+                "code": r.code,
+                "module_type": r.module_type or "",
+                "parent_device_id": str(r.parent_device_id) if r.parent_device_id else None,
+                "is_selected": r.is_selected,
+            }
+            for r in modules_result.fetchall()
+        ]
+        
+        return {
+            "devices": devices,
+            "supplies": supplies,
+            "modules": modules,
+        }
+    
+    async def toggle_item_selection(
+        self,
+        event_id: UUID,
+        vehicle_id: UUID,
+        item_id: UUID,
+        is_selected: bool,
+        updated_by: str,
+    ) -> bool:
+        """
+        切换装备选中状态
+        
+        由车辆成员调用，修改指挥员分配的装备。
+        """
+        result = await self.db.execute(
+            text("""
+                UPDATE operational_v2.car_item_assignment
+                SET is_selected = :is_selected, 
+                    assigned_by = :updated_by,
+                    updated_at = NOW()
+                WHERE event_id = :event_id 
+                  AND car_id = :vehicle_id 
+                  AND item_id = :item_id
+            """),
+            {
+                "event_id": str(event_id),
+                "vehicle_id": str(vehicle_id),
+                "item_id": str(item_id),
+                "is_selected": is_selected,
+                "updated_by": updated_by,
+            }
+        )
+        await self.db.commit()
+        return result.rowcount > 0

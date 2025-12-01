@@ -219,3 +219,50 @@ class LocationUpdatePayload(BaseModel):
     location: dict = Field(..., description="位置 {longitude, latitude}")
     speed_kmh: Optional[float] = Field(None, description="速度 km/h")
     heading: Optional[int] = Field(None, description="朝向 0-360")
+
+
+# ============================================================================
+# 救援队伍调度请求/响应
+# ============================================================================
+
+class TeamDispatchRequest(BaseModel):
+    """救援队伍调度请求"""
+    destination: list[float] = Field(
+        ..., 
+        min_length=2, 
+        max_length=2, 
+        description="目标位置 [经度, 纬度]"
+    )
+    waypoints: list[Waypoint] = Field(
+        default_factory=list, 
+        description="任务停靠点列表"
+    )
+    speed_mps: Optional[float] = Field(
+        None, 
+        gt=0, 
+        description="覆盖速度（米/秒），不指定则使用队伍默认速度"
+    )
+    scenario_id: Optional[UUID] = Field(
+        None, 
+        description="场景ID，用于关联地图实体"
+    )
+
+
+class RouteInfo(BaseModel):
+    """路径信息"""
+    distance_m: float = Field(..., description="路径总距离（米）")
+    duration_s: float = Field(..., description="预计时长（秒）")
+    source: str = Field(..., description="路径来源: amap/internal/fallback")
+    point_count: int = Field(..., description="路径点数量")
+
+
+class TeamDispatchResponse(BaseModel):
+    """救援队伍调度响应"""
+    session_id: str = Field(..., description="移动会话ID")
+    team_id: UUID = Field(..., description="队伍ID")
+    team_name: str = Field(..., description="队伍名称")
+    entity_id: UUID = Field(..., description="地图实体ID")
+    route_info: RouteInfo = Field(..., description="路径信息")
+    state: MovementState = Field(..., description="移动状态")
+    estimated_duration_s: float = Field(..., description="预计到达时间（秒）")
+    speed_mps: float = Field(..., description="移动速度（米/秒）")

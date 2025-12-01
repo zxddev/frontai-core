@@ -89,11 +89,15 @@ class EquipmentRecommendationService:
         
         由 EventService.create() 调用，不等待完成。
         会自动取消之前未确认的推荐（pending/ready状态）。
+        同时清理该事件的旧装备分配记录，确保不影响新推荐结果。
         """
         # 取消之前未确认的推荐，确保前端只看到最新结果
         cancelled_count = await self.repo.cancel_previous_unconfirmed()
         if cancelled_count > 0:
             logger.info(f"已取消 {cancelled_count} 条旧推荐记录")
+        
+        # 清理该事件的旧装备分配记录
+        await self._clear_event_assignments(event_id)
         
         logger.info(f"触发装备分析: event_id={event_id}")
         
@@ -167,6 +171,21 @@ class EquipmentRecommendationService:
             
         except Exception as e:
             logger.exception(f"装备分析失败: event_id={event_id}")
+    
+    async def _clear_event_assignments(self, event_id: UUID) -> None:
+        """清理事件的旧装备分配记录"""
+        from sqlalchemy import text
+        
+        result = await self.db.execute(
+            text("""
+                DELETE FROM operational_v2.car_item_assignment
+                WHERE event_id = :event_id
+            """),
+            {"event_id": str(event_id)}
+        )
+        await self.db.commit()
+        if result.rowcount > 0:
+            logger.info(f"已清理事件 {event_id} 的旧装备分配记录，共 {result.rowcount} 条")
     
     async def _get_event_info(self, event_id: UUID) -> Dict[str, Any]:
         """获取事件信息"""

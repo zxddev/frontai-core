@@ -279,6 +279,8 @@ class RoutePlanningService:
         duration = int(path.get("duration", 0))
         
         segments = []
+        polyline_points: List[Point] = []
+        
         for step in path.get("steps", []):
             segments.append(RouteSegment(
                 from_point=origin,
@@ -288,6 +290,19 @@ class RoutePlanningService:
                 instruction=step.get("instruction", ""),
                 road_name=step.get("road_name", ""),
             ))
+            # 解析 step.polyline: "lng,lat;lng,lat;..."
+            step_polyline = step.get("polyline", "")
+            if step_polyline:
+                for coord_str in step_polyline.split(";"):
+                    parts = coord_str.split(",")
+                    if len(parts) >= 2:
+                        try:
+                            lng, lat = float(parts[0]), float(parts[1])
+                            polyline_points.append(Point(lon=lng, lat=lat))
+                        except ValueError:
+                            continue
+        
+        logger.debug(f"高德路径解析: distance={distance}m, points={len(polyline_points)}")
         
         return RouteResult(
             source=source,
@@ -297,6 +312,7 @@ class RoutePlanningService:
             total_distance_m=distance,
             total_duration_s=duration,
             segments=segments,
+            polyline=polyline_points,
         )
 
 

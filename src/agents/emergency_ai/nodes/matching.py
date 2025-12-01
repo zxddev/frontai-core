@@ -35,6 +35,7 @@ from src.domains.resource_scheduling import (
 )
 from src.domains.resource_scheduling.sphere_demand_calculator import SphereDemandCalculator
 from src.domains.supplies.inventory_service import SupplyInventoryService
+from src.infra.config.algorithm_config_service import AlgorithmConfigService
 from src.domains.disaster import (
     ResponsePhase,
     ClimateType,
@@ -392,7 +393,8 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
                         methodology=casualty.methodology,
                     )
                 
-                sphere_calculator = SphereDemandCalculator(db)
+                config_service = AlgorithmConfigService(db)
+                sphere_calculator = SphereDemandCalculator(db, config_service)
                 supply_result = await sphere_calculator.calculate(
                     phase=ResponsePhase.IMMEDIATE,
                     casualty_estimate=casualty,
