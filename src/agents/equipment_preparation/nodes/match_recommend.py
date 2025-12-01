@@ -9,14 +9,15 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
-from src.core.config import settings
 from src.core.database import AsyncSessionLocal
 from src.domains.resource_scheduling.sphere_demand_calculator import SphereDemandCalculator
+from src.infra.config.algorithm_config_service import AlgorithmConfigService
 from src.domains.disaster import (
     ResponsePhase, 
     ClimateType, 
@@ -31,6 +32,22 @@ from ..state import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_llm(max_tokens: int = 2048) -> ChatOpenAI:
+    """获取LLM客户端实例"""
+    llm_model = os.environ.get('LLM_MODEL', '/models/openai/gpt-oss-120b')
+    openai_base_url = os.environ.get('OPENAI_BASE_URL', 'http://192.168.31.50:8000/v1')
+    openai_api_key = os.environ.get('OPENAI_API_KEY', 'dummy_key')
+    request_timeout = int(os.environ.get('REQUEST_TIMEOUT', '120'))
+    return ChatOpenAI(
+        model=llm_model,
+        base_url=openai_base_url,
+        api_key=openai_api_key,
+        timeout=request_timeout,
+        max_tokens=max_tokens,
+        max_retries=0,
+    )
 
 
 # 设备选择理由生成Prompt
@@ -268,10 +285,7 @@ async def _generate_device_reason(
 ) -> str:
     """生成设备选择理由"""
     try:
-        llm = ChatOpenAI(
-            model=settings.openai_model if hasattr(settings, 'openai_model') else "gpt-4o-mini",
-            temperature=0.3,
-        )
+        llm = _get_llm()
         
         # 构建灾情特征描述
         disaster_features = []
@@ -363,7 +377,8 @@ async def _match_supplies(
                 )
             
             async with AsyncSessionLocal() as session:
-                calculator = SphereDemandCalculator(session)
+                config_service = AlgorithmConfigService(session)
+                calculator = SphereDemandCalculator(session, config_service)
                 demand_result = await calculator.calculate(
                     phase=ResponsePhase.IMMEDIATE,
                     casualty_estimate=casualty,
@@ -487,10 +502,7 @@ async def _generate_supply_reason(
 ) -> str:
     """生成物资选择理由"""
     try:
-        llm = ChatOpenAI(
-            model=settings.openai_model if hasattr(settings, 'openai_model') else "gpt-4o-mini",
-            temperature=0.3,
-        )
+        llm = _get_llm()
         
         chain = SUPPLY_REASON_PROMPT | llm
         response = await chain.ainvoke({

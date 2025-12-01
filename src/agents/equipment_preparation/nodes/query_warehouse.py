@@ -10,7 +10,7 @@ import logging
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import AsyncSessionLocal
@@ -135,22 +135,38 @@ async def _query_available_modules(
     capabilities: List[str],
 ) -> List[Dict[str, Any]]:
     """查询可用模块"""
-    try:
-        # 查询模块表（如果存在）
-        # 注：需要根据实际数据模型调整
-        result = await session.execute(
-            select("*").select_from(
-                session.get_bind().dialect.identifier_preparer.format_table(
-                    "operational_v2.modules_v2"
-                )
-            ).limit(100)
-        )
-        
-        # 如果模块表不存在，返回模拟数据
-        return _get_mock_modules(capabilities)
-    except Exception as e:
-        logger.warning(f"查询模块失败，使用模拟数据: {e}")
-        return _get_mock_modules(capabilities)
+    query = """
+        SELECT id, code, name, module_type, weight_kg, slots_required,
+               compatible_device_types, provides_capability,
+               applicable_disasters, status
+        FROM operational_v2.modules_v2
+        WHERE status = 'available'
+    """
+    result = await session.execute(text(query))
+    rows = result.fetchall()
+    
+    modules = []
+    for row in rows:
+        module = {
+            "id": str(row.id),
+            "code": row.code,
+            "name": row.name,
+            "module_type": row.module_type,
+            "capabilities": [row.provides_capability] if row.provides_capability else [],
+            "weight_kg": float(row.weight_kg) if row.weight_kg else 0,
+            "slots_required": row.slots_required or 1,
+            "compatible_devices": list(row.compatible_device_types) if row.compatible_device_types else [],
+            "applicable_disasters": list(row.applicable_disasters) if row.applicable_disasters else [],
+            "status": row.status,
+        }
+        modules.append(module)
+    
+    # 如果指定了能力过滤
+    if capabilities:
+        modules = [m for m in modules if any(cap in m["capabilities"] for cap in capabilities)]
+    
+    logger.info(f"查询到 {len(modules)} 个可用模块")
+    return modules
 
 
 async def _query_supplies(
@@ -217,51 +233,4 @@ async def _query_supplies(
         return []
 
 
-def _get_mock_modules(capabilities: List[str]) -> List[Dict[str, Any]]:
-    """获取模拟模块数据（开发阶段使用）"""
-    mock_modules = [
-        {
-            "id": "mod-thermal-001",
-            "name": "热成像模块",
-            "module_type": "sensor",
-            "capabilities": ["thermal_imaging"],
-            "weight_kg": 0.5,
-            "compatible_devices": ["drone", "dog"],
-            "status": "available",
-        },
-        {
-            "id": "mod-life-001",
-            "name": "生命探测仪",
-            "module_type": "sensor",
-            "capabilities": ["life_detection"],
-            "weight_kg": 0.8,
-            "compatible_devices": ["drone", "dog", "robot"],
-            "status": "available",
-        },
-        {
-            "id": "mod-comm-001",
-            "name": "通信中继模块",
-            "module_type": "communication",
-            "capabilities": ["communication_relay"],
-            "weight_kg": 0.3,
-            "compatible_devices": ["drone"],
-            "status": "available",
-        },
-        {
-            "id": "mod-chem-001",
-            "name": "化学探测模块",
-            "module_type": "sensor",
-            "capabilities": ["chemical_detection"],
-            "weight_kg": 0.6,
-            "compatible_devices": ["drone", "robot"],
-            "status": "available",
-        },
-    ]
-    
-    # 过滤匹配所需能力的模块
-    if capabilities:
-        return [
-            m for m in mock_modules
-            if any(cap in m["capabilities"] for cap in capabilities)
-        ]
-    return mock_modules
+

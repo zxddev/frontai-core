@@ -20,6 +20,7 @@ from .schemas import (
     ScenarioListResponse, ScenarioStatus, ScenarioStatusUpdate, Location,
     ScenarioResourcesConfig, ScenarioResourcesResponse,
     ScenarioEnvironmentConfig, ScenarioEnvironmentResponse,
+    ScenarioResetRequest, ScenarioResetResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -131,9 +132,64 @@ class ScenarioService:
                     f"自动结束旧想定: id={existing_active.id}, "
                     f"因为激活了新想定: id={scenario_id}"
                 )
+            
+            # 为激活的想定创建主事件（如果不存在）
+            await self._ensure_main_event(scenario)
         
         scenario = await self._repo.update_status(scenario, target)
         return self._to_response(scenario)
+    
+    async def _ensure_main_event(self, scenario) -> UUID:
+        """
+        确保想定有主事件，如果没有则创建
+        
+        主事件用于关联装备分配等业务
+        """
+        from src.domains.events.service import EventService
+        from src.domains.events.schemas import EventCreate, EventType, EventSourceType, EventPriority, Location
+        from geoalchemy2.shape import to_shape
+        
+        # 检查是否已有主事件
+        existing_main = await self._repo.get_main_event_id(scenario.id)
+        if existing_main:
+            logger.info(f"想定已有主事件: scenario_id={scenario.id}, main_event_id={existing_main}")
+            return existing_main
+        
+        # 解析想定位置
+        location = Location(longitude=103.85, latitude=31.68)  # 默认位置
+        if scenario.location:
+            try:
+                point = to_shape(scenario.location)
+                location = Location(longitude=point.x, latitude=point.y)
+            except Exception as e:
+                logger.warning(f"解析想定位置失败: {e}")
+        
+        # 映射想定类型到事件类型
+        type_map = {
+            'earthquake': EventType.earthquake,
+            'flood': EventType.flood,
+            'fire': EventType.fire,
+            'hazmat': EventType.hazmat_leak,
+            'landslide': EventType.landslide,
+        }
+        event_type = type_map.get(scenario.scenario_type, EventType.other)
+        
+        # 创建主事件
+        event_service = EventService(self._db)
+        event_data = EventCreate(
+            scenario_id=scenario.id,
+            event_type=event_type,
+            source_type=EventSourceType.system_inference,
+            title=f"{scenario.name} - 主事件",
+            description=f"想定 [{scenario.name}] 激活时自动创建的主事件",
+            location=location,
+            priority=EventPriority.high,
+            is_main_event=True,
+        )
+        
+        event = await event_service.create(event_data)
+        logger.info(f"为想定创建主事件: scenario_id={scenario.id}, event_id={event.id}")
+        return event.id
     
     async def delete(self, scenario_id: UUID) -> None:
         """
@@ -255,6 +311,46 @@ class ScenarioService:
             road_conditions_configured=road_configured,
             communication_configured=comm_configured,
             message="环境参数配置成功",
+        )
+    
+    async def reset(
+        self,
+        scenario_id: UUID,
+        data: ScenarioResetRequest,
+    ) -> ScenarioResetResponse:
+        """
+        重置想定数据
+        
+        删除想定下的所有事件、实体、风险区域等数据，
+        保留想定本身，方便重新开始仿真。
+        """
+        scenario = await self._repo.get_by_id(scenario_id)
+        if not scenario:
+            raise NotFoundError("Scenario", str(scenario_id))
+        
+        result = await self._repo.reset_scenario_data(
+            scenario_id=scenario_id,
+            delete_events=data.delete_events,
+            delete_entities=data.delete_entities,
+            delete_risk_areas=data.delete_risk_areas,
+            delete_schemes=data.delete_schemes,
+            delete_tasks=data.delete_tasks,
+            delete_messages=data.delete_messages,
+            delete_ai_decisions=data.delete_ai_decisions,
+        )
+        
+        total_deleted = sum(result.values())
+        
+        return ScenarioResetResponse(
+            scenario_id=scenario_id,
+            deleted_events=result["deleted_events"],
+            deleted_entities=result["deleted_entities"],
+            deleted_risk_areas=result["deleted_risk_areas"],
+            deleted_schemes=result["deleted_schemes"],
+            deleted_tasks=result["deleted_tasks"],
+            deleted_messages=result["deleted_messages"],
+            deleted_ai_decisions=result["deleted_ai_decisions"],
+            message=f"想定重置成功，共删除 {total_deleted} 条数据",
         )
     
     def _to_response(self, scenario) -> ScenarioResponse:

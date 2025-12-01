@@ -191,10 +191,10 @@ class OfficialScribe:
 """
 
     def _generate_body(self, modules: dict[int, str]) -> str:
-        """Generate document body with all 9 modules."""
+        """Generate document body with all 8 modules (index 0-7)."""
         sections = []
 
-        for i in range(9):
+        for i in range(8):
             title = MODULE_TITLES.get(i, f"模块{i}")
             content = modules.get(i, "暂无内容")
 

@@ -1,7 +1,7 @@
 """
 疏散安置点管理模块
 
-对应SQL表: public.evacuation_shelters_v2
+对应SQL表: operational_v2.evacuation_shelters_v2
 """
 
 from .router import router

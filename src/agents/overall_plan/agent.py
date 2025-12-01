@@ -266,32 +266,35 @@ class OverallPlanAgent:
             return None
 
     def _extract_modules(self, values: dict[str, Any]) -> list[PlanModuleItem]:
-        """提取模块数据，按Word模板7章结构。"""
+        """提取模块数据，按Word模板8章结构。
+        
+        注意：CrewAI返回的是字符串文本，不是dict。
+        """
         modules = []
 
-        # 第0章：总体描述
+        # 第0章：总体描述 - 直接使用module_0_basic_disaster文本
+        basic_disaster = values.get("module_0_basic_disaster", "")
         modules.append(PlanModuleItem(
             index=0,
             title=MODULE_TITLES[0],
-            value=values.get("module_0_overview", ""),
+            value=self._ensure_string(basic_disaster),
         ))
 
-        # 第一章：当前灾情初步评估
-        module_1 = values.get("module_1_disaster_assessment", {})
+        # 第一章：当前灾情初步评估 - 同样使用module_0文本
         modules.append(PlanModuleItem(
             index=1,
             title=MODULE_TITLES[1],
-            value=self._format_structured_data(module_1),
+            value=self._ensure_string(basic_disaster),
         ))
 
-        # 第二章：组织指挥
+        # 第二章：组织指挥 - 目前未生成
         modules.append(PlanModuleItem(
             index=2,
             title=MODULE_TITLES[2],
-            value=values.get("module_2_command", ""),
+            value="（待完善：组织指挥结构）",
         ))
 
-        # 第三章：救援力量部署与任务分工（合并4个子节）
+        # 第三章：救援力量部署与任务分工 - 合并module_1到module_4
         chapter_3_value = self._merge_chapter_3(values)
         modules.append(PlanModuleItem(
             index=3,
@@ -300,71 +303,73 @@ class OverallPlanAgent:
         ))
 
         # 第四章：次生灾害预防与安全措施
-        module_4 = values.get("module_4_secondary_disaster", {})
         modules.append(PlanModuleItem(
             index=4,
             title=MODULE_TITLES[4],
-            value=self._format_secondary_disaster(module_4),
+            value=self._ensure_string(values.get("module_5_secondary_disaster", "")),
         ))
 
         # 第五章：通信与信息保障
         modules.append(PlanModuleItem(
             index=5,
             title=MODULE_TITLES[5],
-            value=values.get("module_5_communication", ""),
+            value=self._ensure_string(values.get("module_6_communication", "")),
         ))
 
         # 第六章：物资调配与运输保障
         modules.append(PlanModuleItem(
             index=6,
             title=MODULE_TITLES[6],
-            value=values.get("module_6_logistics", ""),
+            value=self._ensure_string(values.get("module_7_logistics", "")),
         ))
 
         # 第七章：救援力量自身保障
         modules.append(PlanModuleItem(
             index=7,
             title=MODULE_TITLES[7],
-            value=values.get("module_7_self_support", ""),
+            value=self._ensure_string(values.get("module_8_self_support", "")),
         ))
 
         return modules
 
+    def _ensure_string(self, value: Any) -> str:
+        """确保值是字符串，处理dict和其他类型"""
+        if value is None:
+            return "（待生成）"
+        if isinstance(value, str):
+            return value if value else "（待生成）"
+        if isinstance(value, dict):
+            # 如果是dict，尝试获取常见的文本字段或转为JSON
+            if "narrative" in value:
+                return value["narrative"]
+            if "raw" in value:
+                return str(value["raw"])
+            import json
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        return str(value)
+
     def _merge_chapter_3(self, values: dict[str, Any]) -> str:
-        """合并第三章的4个子节。"""
+        """从旧的9模块key合并生成第三章内容。"""
         sections = []
         
-        force = values.get("module_3_force_deployment", "")
+        # module_1_rescue_force -> 应急力量配置
+        force = values.get("module_1_rescue_force", "")
         if force:
             sections.append(f"（一）应急力量配置\n{force}")
         
-        medical = values.get("module_3_medical_deployment", "")
+        # module_2_medical -> 医疗救护部署
+        medical = values.get("module_2_medical", "")
         if medical:
             sections.append(f"（二）医疗救护部署\n{medical}")
         
-        engineering = values.get("module_3_engineering", "")
+        # module_3_infrastructure -> 工程抢险安排
+        engineering = values.get("module_3_infrastructure", "")
         if engineering:
             sections.append(f"（三）工程抢险安排\n{engineering}")
         
-        resettlement = values.get("module_3_resettlement", "")
+        # module_4_shelter -> 受灾群众安置与生活保障
+        resettlement = values.get("module_4_shelter", "")
         if resettlement:
             sections.append(f"（四）受灾群众安置与生活保障\n{resettlement}")
         
-        return "\n\n".join(sections)
-
-    def _format_structured_data(self, data: dict[str, Any]) -> str:
-        """格式化结构化数据为字符串。"""
-        if not data:
-            return ""
-        import json
-        return json.dumps(data, ensure_ascii=False, indent=2)
-
-    def _format_secondary_disaster(self, data: dict[str, Any]) -> str:
-        """格式化次生灾害数据。"""
-        if not data:
-            return ""
-        # 优先返回narrative，否则返回JSON
-        if data.get("narrative"):
-            return data["narrative"]
-        import json
-        return json.dumps(data, ensure_ascii=False, indent=2)
+        return "\n\n".join(sections) if sections else "（待生成：救援力量部署）"

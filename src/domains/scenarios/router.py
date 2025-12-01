@@ -19,6 +19,7 @@ from .schemas import (
     ScenarioListResponse, ScenarioStatusUpdate,
     ScenarioResourcesConfig, ScenarioResourcesResponse,
     ScenarioEnvironmentConfig, ScenarioEnvironmentResponse,
+    ScenarioResetRequest, ScenarioResetResponse,
 )
 
 
@@ -145,3 +146,24 @@ async def configure_environment(
     用于仿真模块评估资源可达性和任务难度。
     """
     return await service.configure_environment(scenario_id, data)
+
+
+@router.post("/{scenario_id}/reset", response_model=ScenarioResetResponse)
+async def reset_scenario(
+    scenario_id: UUID,
+    data: ScenarioResetRequest = ScenarioResetRequest(),
+    service: ScenarioService = Depends(get_service),
+) -> ScenarioResetResponse:
+    """
+    重置想定数据
+    
+    删除想定下的所有事件、实体、风险区域、方案、任务等数据，
+    保留想定本身，方便重新开始仿真推演。
+    
+    可选择性地保留某些数据类型（通过设置对应字段为false）。
+    
+    示例：
+    - 全部重置：POST /scenarios/{id}/reset （使用默认值，删除所有关联数据）
+    - 只删除事件和实体：POST /scenarios/{id}/reset {"delete_schemes": false, "delete_tasks": false}
+    """
+    return await service.reset(scenario_id, data)

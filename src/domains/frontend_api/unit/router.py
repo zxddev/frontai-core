@@ -18,7 +18,9 @@ from src.domains.frontend_api.common import ApiResponse
 from .schemas import (
     UnitSearchRequest, UnitCategory, Unit, UnitLocation,
     UnitSupportRequest, SupportResource,
+    MobilizeRequest, MobilizeResponse,
 )
+from .service import UnitService
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,10 @@ router = APIRouter(prefix="/unit", tags=["前端-资源单位"])
 
 def get_entity_service(db: AsyncSession = Depends(get_db)) -> EntityService:
     return EntityService(db)
+
+
+def get_unit_service(db: AsyncSession = Depends(get_db)) -> UnitService:
+    return UnitService(db)
 
 
 @router.post("/search-unit", response_model=ApiResponse[list[UnitCategory]])
@@ -166,3 +172,27 @@ async def get_unit_support(request: UnitSupportRequest) -> ApiResponse[list[Supp
     ]
     
     return ApiResponse.success(mock_resources)
+
+
+@router.post("/mobilize", response_model=ApiResponse[MobilizeResponse])
+async def mobilize_vehicles(
+    request: MobilizeRequest,
+    service: UnitService = Depends(get_unit_service),
+) -> ApiResponse[MobilizeResponse]:
+    """
+    车辆动员为救援队伍
+    
+    将选定的车辆及其装备转换为救援队伍：
+    1. 读取车辆及其装备/模块信息
+    2. 构建AI上下文数据
+    3. 创建或更新Team记录
+    4. 同步创建地图实体
+    """
+    logger.info(f"动员车辆, event_id={request.event_id}, vehicle_ids={request.vehicle_ids}")
+    
+    try:
+        result = await service.mobilize_vehicles(request)
+        return ApiResponse.success(result)
+    except Exception as e:
+        logger.exception(f"车辆动员失败: {e}")
+        return ApiResponse.error(500, f"车辆动员失败: {str(e)}")

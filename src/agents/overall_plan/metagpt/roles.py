@@ -90,7 +90,12 @@ class ResourcePlanner:
             self._client = create_instructor_client()
         return self._client
 
-    async def run(self, input_data: ResourceCalculationInput) -> ResourcePlannerOutput:
+    async def run(
+        self,
+        input_data: ResourceCalculationInput,
+        available_teams: list[dict[str, Any]] | None = None,
+        available_supplies: list[dict[str, Any]] | None = None,
+    ) -> ResourcePlannerOutput:
         """
         执行所有模块的资源规划
 
@@ -98,6 +103,8 @@ class ResourcePlanner:
 
         Args:
             input_data: 经过验证的计算输入数据
+            available_teams: 数据库中可用的救援队伍列表
+            available_supplies: 数据库中可用的物资列表
 
         Returns:
             ResourcePlannerOutput，包含所有模块文本和计算详情
@@ -107,25 +114,33 @@ class ResourcePlanner:
             EstimatorValidationError: 输入验证失败时抛出
             InstructorClientError: LLM结构化输出生成失败时抛出
         """
+        available_teams = available_teams or []
+        available_supplies = available_supplies or []
+        
         logger.info(
             "ResourcePlanner starting calculation",
-            extra={"affected_population": input_data.affected_population},
+            extra={
+                "affected_population": input_data.affected_population,
+                "available_teams_count": len(available_teams),
+                "available_supplies_count": len(available_supplies),
+            },
         )
 
         try:
             client = self.client
 
             # 阶段1: 并行执行独立模块（性能提升40-50%）
+            # 传入数据库资源数据，让LLM基于真实数据生成建议
             (
                 (module_1_text, rescue_calc),
                 (module_2_text, medical_calc),
                 (module_3_text, infrastructure_calc),
                 (module_4_text, shelter_calc),
             ) = await asyncio.gather(
-                calculate_rescue_force_module(client, input_data),
-                calculate_medical_module(client, input_data),
-                calculate_infrastructure_module(client, input_data),
-                calculate_shelter_module(client, input_data),
+                calculate_rescue_force_module(client, input_data, available_teams),
+                calculate_medical_module(client, input_data, available_teams),
+                calculate_infrastructure_module(client, input_data, available_teams),
+                calculate_shelter_module(client, input_data, available_supplies),
             )
             logger.debug("阶段1完成: 模块1-4 (并行)")
 

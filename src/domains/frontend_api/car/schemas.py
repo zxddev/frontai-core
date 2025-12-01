@@ -47,6 +47,7 @@ class ShortageAlertData(BaseModel):
 class CarItem(BaseModel):
     """车辆数据（Level 1）"""
     id: str
+    code: Optional[str] = None  # 车辆编号，如 VH-001
     name: str
     status: Literal["available", "preparing", "ready"] = "available"
     isSelected: bool = False  # AI推荐的车辆标记True
@@ -145,3 +146,73 @@ class DispatchStatusResponse(BaseModel):
 class EventIdForm(BaseModel):
     """事件ID表单"""
     eventId: str
+
+
+# ==================== 装备分配相关 Schema ====================
+
+class CarItemAddRequest(BaseModel):
+    """添加装备到车辆请求"""
+    eventId: str
+    carId: str
+    itemId: str
+    itemType: Literal["device", "supply", "module"]
+    quantity: int = 1
+    parentDeviceId: Optional[str] = None
+
+
+class CarItemAddResponse(BaseModel):
+    """添加装备响应"""
+    carId: str
+    itemId: str
+    assignedAt: str
+
+
+class CarItemRemoveRequest(BaseModel):
+    """从车辆移除装备请求"""
+    eventId: str
+    carId: str
+    itemId: str
+    itemType: Literal["device", "supply", "module"]
+
+
+class CarItemRemoveResponse(BaseModel):
+    """移除装备响应"""
+    carId: str
+    itemId: str
+    returnedToWarehouse: bool = True
+
+
+class CarItemToggleRequest(BaseModel):
+    """切换专属装备选中状态请求"""
+    eventId: str
+    carId: str
+    itemId: str
+    isSelected: bool
+
+
+class ModuleToggleItem(BaseModel):
+    """模块选中状态项"""
+    id: str
+    isSelected: bool
+
+
+class CarItemToggleResponse(BaseModel):
+    """切换装备响应"""
+    carId: str
+    itemId: str
+    isSelected: bool
+    modules: list[ModuleToggleItem] = Field(default_factory=list)
+
+
+class CarModuleUpdateRequest(BaseModel):
+    """批量更新模块选中状态请求"""
+    eventId: str
+    carId: str
+    deviceId: str
+    moduleIds: list[str]
+
+
+class CarModuleUpdateResponse(BaseModel):
+    """模块更新响应"""
+    deviceId: str
+    modules: list[ModuleToggleItem]

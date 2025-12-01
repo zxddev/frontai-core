@@ -1,7 +1,7 @@
 """
 指挥消息管理模块
 
-对应SQL表: public.command_messages_v2, public.message_receipts_v2
+对应SQL表: operational_v2.command_messages_v2, operational_v2.message_receipts_v2
 """
 
 from .router import router

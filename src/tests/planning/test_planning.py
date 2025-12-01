@@ -6,18 +6,34 @@
 3. 任务 -> 能力 (S1-M1...)
 4. 能力 -> 资源 (J-20...)
 5. 评分
+
+注意：本测试依赖外部 `planning` 库（AFSIM 风格规划引擎），
+在当前工程未集成该库时会整体跳过，仅作为集成示例保留。
 """
 import json
 import logging
 import os
-# import pytest
+import importlib.util
 from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+try:
+    _planning_spec = importlib.util.find_spec("planning.agent")
+except ModuleNotFoundError:
+    _planning_spec = None
+
+if _planning_spec is None:
+    pytest.skip(
+        "external 'planning.agent' package not available; skipping planning integration test",
+        allow_module_level=True,
+    )
+
 from planning.agent import build_agent
-from planning.graph import run_planning
+from planning.graph import PlanningGraphBuilder, run_planning
 from planning.config_loader import ConfigLoader
-from planning.graph import PlanningGraphBuilder
 from planning.state import PlanningState
 from infra.db.postgres_dao import PostgresDao
 from planning.afsim_types import validate_afsim_payload

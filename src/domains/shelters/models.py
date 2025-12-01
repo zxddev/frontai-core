@@ -1,7 +1,7 @@
 """
 疏散安置点ORM模型
 
-对应SQL表: public.evacuation_shelters_v2
+对应SQL表: operational_v2.evacuation_shelters_v2
 参考: sql/v2_environment_model.sql
 """
 
@@ -21,7 +21,7 @@ from geoalchemy2 import Geometry
 from src.core.database import Base
 
 
-# 安置点类型枚举 - 对应 public.shelter_type_v2
+# 安置点类型枚举 - 对应 operational_v2.shelter_type_v2
 ShelterTypeEnum = ENUM(
     'temporary',       # 临时安置点
     'permanent',       # 固定安置点
@@ -35,7 +35,7 @@ ShelterTypeEnum = ENUM(
 )
 
 
-# 安置点状态枚举 - 对应 public.shelter_status_v2
+# 安置点状态枚举 - 对应 operational_v2.shelter_status_v2
 ShelterStatusEnum = ENUM(
     'preparing',       # 准备中
     'open',            # 开放

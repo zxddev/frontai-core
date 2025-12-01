@@ -36,6 +36,7 @@ EntityTypeEnum = ENUM(
     'event_point', 'event_range', 'situation_point', 'command_post_candidate',
     'earthquake_epicenter',
     name='entity_type_v2',
+    schema='operational_v2',
     create_type=False,
 )
 
@@ -43,6 +44,7 @@ EntityTypeEnum = ENUM(
 EntitySourceEnum = ENUM(
     'system', 'manual',
     name='entity_source_v2',
+    schema='operational_v2',
     create_type=False,
 )
 
@@ -50,6 +52,7 @@ EntitySourceEnum = ENUM(
 LayerCategoryEnum = ENUM(
     'system', 'manual', 'hybrid',
     name='layer_category_v2',
+    schema='operational_v2',
     create_type=False,
 )
 
@@ -57,6 +60,7 @@ LayerCategoryEnum = ENUM(
 LayerAccessScopeEnum = ENUM(
     'full', 'read_only', 'hidden',
     name='layer_access_scope_v2',
+    schema='operational_v2',
     create_type=False,
 )
 
@@ -64,6 +68,7 @@ LayerAccessScopeEnum = ENUM(
 GeometryKindEnum = ENUM(
     'point', 'line', 'polygon', 'circle',
     name='geometry_kind_v2',
+    schema='operational_v2',
     create_type=False,
 )
 
@@ -77,6 +82,7 @@ class Layer(Base):
     - 图层决定实体的显示样式和访问权限
     """
     __tablename__ = "layers_v2"
+    __table_args__ = {"schema": "operational_v2"}
     
     # ==================== 主键 ====================
     id: UUID = Column(
@@ -165,6 +171,7 @@ class Entity(Base):
     - 支持动态实体（实时位置更新）
     """
     __tablename__ = "entities_v2"
+    __table_args__ = {"schema": "operational_v2"}
     
     # ==================== 主键 ====================
     id: UUID = Column(
@@ -183,7 +190,7 @@ class Entity(Base):
     # ==================== 图层关联 ====================
     layer_code: str = Column(
         String(100), 
-        ForeignKey("layers_v2.code"), 
+        ForeignKey("operational_v2.layers_v2.code"), 
         nullable=False,
         comment="所属图层编码"
     )
@@ -289,6 +296,7 @@ class LayerTypeDefault(Base):
     - 包含图标、默认样式等元数据
     """
     __tablename__ = "layer_type_defaults_v2"
+    __table_args__ = {"schema": "operational_v2"}
     
     id: int = Column(
         Integer, 
@@ -298,7 +306,7 @@ class LayerTypeDefault(Base):
     
     layer_code: str = Column(
         String(100), 
-        ForeignKey("layers_v2.code", ondelete="CASCADE"), 
+        ForeignKey("operational_v2.layers_v2.code", ondelete="CASCADE"), 
         nullable=False,
         comment="图层编码"
     )
@@ -337,6 +345,7 @@ class RoleLayerBinding(Base):
     - 控制不同角色对图层的访问权限
     """
     __tablename__ = "role_layer_bindings_v2"
+    __table_args__ = {"schema": "operational_v2"}
     
     id: int = Column(
         Integer, 
@@ -351,7 +360,7 @@ class RoleLayerBinding(Base):
     )
     layer_code: str = Column(
         String(100), 
-        ForeignKey("layers_v2.code", ondelete="CASCADE"), 
+        ForeignKey("operational_v2.layers_v2.code", ondelete="CASCADE"), 
         nullable=False,
         comment="图层编码"
     )
@@ -385,6 +394,7 @@ class EntityTrack(Base):
     参考: sql/v2_entity_tracks.sql
     """
     __tablename__ = "entity_tracks_v2"
+    __table_args__ = {"schema": "operational_v2"}
     
     # 主键：BIGSERIAL提高插入性能
     id: int = Column(
@@ -397,7 +407,7 @@ class EntityTrack(Base):
     # 关联实体
     entity_id: UUID = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("entities_v2.id", ondelete="CASCADE"),
+        ForeignKey("operational_v2.entities_v2.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
         comment="关联实体ID"

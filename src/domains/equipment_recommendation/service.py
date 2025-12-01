@@ -88,7 +88,13 @@ class EquipmentRecommendationService:
         触发装备分析（异步执行）
         
         由 EventService.create() 调用，不等待完成。
+        会自动取消之前未确认的推荐（pending/ready状态）。
         """
+        # 取消之前未确认的推荐，确保前端只看到最新结果
+        cancelled_count = await self.repo.cancel_previous_unconfirmed()
+        if cancelled_count > 0:
+            logger.info(f"已取消 {cancelled_count} 条旧推荐记录")
+        
         logger.info(f"触发装备分析: event_id={event_id}")
         
         # 创建异步任务

@@ -67,6 +67,7 @@ class EventCreate(BaseModel):
     golden_hour_deadline: Optional[datetime] = None
     media_attachments: Optional[list[dict[str, Any]]] = None
     confirmation_score: Optional[float] = Field(None, ge=0, le=1)
+    is_main_event: bool = Field(False, description="是否为想定主事件")
 
 
 class EventUpdate(BaseModel):
@@ -122,6 +123,7 @@ class EventResponse(BaseModel):
     pre_confirm_expires_at: Optional[datetime]
     pre_allocated_resources: Optional[list[dict[str, Any]]]
     media_attachments: Optional[list[dict[str, Any]]]
+    is_main_event: bool = False
     reported_at: datetime
     confirmed_at: Optional[datetime]
     pre_confirmed_at: Optional[datetime]

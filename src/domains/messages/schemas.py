@@ -1,7 +1,7 @@
 """
 指挥消息数据模型（Pydantic Schemas）
 
-对应SQL表: public.command_messages_v2, public.message_receipts_v2
+对应SQL表: operational_v2.command_messages_v2, operational_v2.message_receipts_v2
 强类型注解，完整字段匹配
 """
 

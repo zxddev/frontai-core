@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     
     # Redis
     redis_url: str = "redis://localhost:6379/0"
-    
+
     # API
     api_prefix: str = "/api/v2"
     debug: bool = False

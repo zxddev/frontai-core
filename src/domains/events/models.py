@@ -275,6 +275,13 @@ class Event(Base):
         comment="匹配的自动确认规则"
     )
     
+    # ==================== 主事件标识 ====================
+    is_main_event: bool = Column(
+        Boolean,
+        default=False,
+        comment="是否为想定主事件（每个想定只有一个，想定激活时自动创建）"
+    )
+    
     # ==================== 时间戳 ====================
     reported_at: datetime = Column(
         DateTime(timezone=True), 

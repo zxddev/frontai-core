@@ -1,7 +1,7 @@
 """
 疏散安置点数据模型（Pydantic Schemas）
 
-对应SQL表: public.evacuation_shelters_v2
+对应SQL表: operational_v2.evacuation_shelters_v2
 强类型注解，完整字段匹配
 """
 

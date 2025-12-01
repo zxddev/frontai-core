@@ -1,173 +1,287 @@
-"""CrewAI Task definitions for situational awareness.
+"""CrewAI Task definitions for overall rescue plan generation.
 
-Defines tasks for generating Module 0 (Basic Disaster Situation)
-and Module 5 (Secondary Disaster Prevention).
+业务场景：向省级指挥大厅/省委书记汇报态势并申请资源
+
+使用async_execution=True实现并行执行，加速生成。
 """
-
-from typing import Literal
 
 from crewai import Agent, Task
-from pydantic import BaseModel, Field
 
-
-class BasicDisasterOutput(BaseModel):
-    """Structured output for Module 0."""
-
-    disaster_name: str = Field(default="未知灾害", description="灾害名称，如：四川泸定6.8级地震")
-    disaster_type: str = Field(default="未知", description="灾害类型，如：地震、洪涝、台风")
-    occurrence_time: str | None = Field(default=None, description="发生时间，ISO格式")
-    magnitude: float | None = Field(default=None, description="震级或强度（如适用）")
-    epicenter_depth_km: float | None = Field(default=None, description="震源深度（如适用）")
-    affected_area: str = Field(default="未知区域", description="受灾区域描述")
-    affected_scope_km2: float | None = Field(default=None, description="受灾面积（平方公里）")
-    deaths: int = Field(default=0, description="死亡人数")
-    injuries: int = Field(default=0, description="受伤人数")
-    missing: int = Field(default=0, description="失踪人数")
-    trapped: int = Field(default=0, description="被困人数")
-    buildings_collapsed: int = Field(default=0, description="倒塌建筑数量")
-    buildings_damaged: int = Field(default=0, description="受损建筑数量")
-    infrastructure_damage: str = Field(default="", description="基础设施受损情况描述")
-
-
-class SecondaryDisasterRiskItem(BaseModel):
-    """Single risk item in Module 5."""
-
-    risk_type: str = Field(description="风险类型，如：余震、滑坡、火灾")
-    risk_level: Literal["high", "medium", "low"] = Field(description="风险等级")
-    prevention_measures: list[str] = Field(description="防范措施列表")
-    monitoring_recommendations: list[str] = Field(description="监测建议列表")
-
-
-class SecondaryDisasterOutput(BaseModel):
-    """Structured output for Module 5."""
-
-    risks: list[SecondaryDisasterRiskItem] = Field(description="识别的风险列表")
-    narrative: str = Field(description="综合性的次生灾害防范方案文本描述")
-
-
-MODULE_0_OUTPUT_SCHEMA = """
-{
-    "disaster_name": "灾害名称，如：四川泸定6.8级地震",
-    "disaster_type": "灾害类型，如：地震、洪涝、台风",
-    "occurrence_time": "发生时间，ISO格式",
-    "magnitude": "震级或强度（如适用）",
-    "epicenter_depth_km": "震源深度（如适用）",
-    "affected_area": "受灾区域描述",
-    "affected_scope_km2": "受灾面积（平方公里）",
-    "deaths": "死亡人数",
-    "injuries": "受伤人数",
-    "missing": "失踪人数",
-    "trapped": "被困人数",
-    "buildings_collapsed": "倒塌建筑数量",
-    "buildings_damaged": "受损建筑数量",
-    "infrastructure_damage": "基础设施受损情况描述"
-}
-"""
-
-MODULE_5_OUTPUT_SCHEMA = """
-{
-    "risks": [
-        {
-            "risk_type": "风险类型，如：余震、滑坡、火灾、危化品泄漏",
-            "risk_level": "high | medium | low",
-            "prevention_measures": ["防范措施1", "防范措施2"],
-            "monitoring_recommendations": ["监测建议1", "监测建议2"]
-        }
-    ],
-    "narrative": "综合性的次生灾害防范方案文本描述"
-}
+# 所有Task共用的禁止编造数据说明
+NO_FABRICATION_RULE = """
+## 严禁编造数据
+- 不要编造人名、电话、地址等具体信息
+- 不要编造不在系统数据中的队伍名称
+- 不要编造具体的损毁数量（如果数据为0，标注"待核实"）
+- 签名处只写职务（如"省应急指挥中心 XX协调官"），不要写具体人名
+- 联系方式写"详见指挥部通讯录"，不要编造电话号码
 """
 
 
-def create_basic_disaster_task(agent: Agent) -> Task:
-    """Create task for generating Module 0 - Basic Disaster Situation.
-
-    Args:
-        agent: The Intel Chief agent
-
-    Returns:
-        Configured Task
-    """
+# ============================================================================
+# 模块0: 灾情态势汇报 (并行)
+# ============================================================================
+def create_disaster_briefing_task(agent: Agent, async_exec: bool = True) -> Task:
+    """模块0 - 灾情态势汇报"""
     return Task(
-        description="""基于以下灾情数据，生成"灾情基本情况"模块内容。
+        description="""基于系统数据，生成灾情态势汇报。
 
-## 输入数据
+## 系统数据
 事件数据：
 {event_data}
 
-AI分析结果：
-{ai_analysis}
+想定数据：
+{scenario_data}
 
 ## 输出要求
-请严格按照以下JSON Schema输出，确保所有字段都有值（未知的用null）：
-"""
-        + MODULE_0_OUTPUT_SCHEMA
-        + """
+生成简洁的灾情态势汇报，包含：
+1. 灾害基本情况（类型、时间、地点、强度）
+2. 人员伤亡情况（已确认的标注"已确认"，为0的标注"待核实"）
+3. 建筑损毁情况
+4. 当前紧急程度评估
 
-## 注意事项
-1. 数值字段必须是数字类型，不要加单位
-2. 时间必须是ISO格式字符串
-3. 如果某项数据未知，使用null而不是0
-4. infrastructure_damage字段应该是综合描述文本
-5. 输出必须是合法的JSON，不要有多余内容""",
-        expected_output="符合Schema的JSON对象，包含完整的灾情基本情况",
+## 格式
+使用markdown格式，简洁专业。
+""" + NO_FABRICATION_RULE,
+        expected_output="灾情态势汇报文本",
         agent=agent,
-        output_pydantic=BasicDisasterOutput,
+        async_execution=async_exec,
     )
 
 
-def create_secondary_disaster_task(agent: Agent, context_task: Task | None = None) -> Task:
-    """Create task for generating Module 5 - Secondary Disaster Prevention.
-
-    Args:
-        agent: The Disaster Analyst agent
-        context_task: Optional context task (basic disaster task) for sequential execution
-
-    Returns:
-        Configured Task
-    """
+# ============================================================================
+# 模块1: 救援力量态势 (并行)
+# ============================================================================
+def create_rescue_force_task(agent: Agent, async_exec: bool = True) -> Task:
+    """模块1 - 救援力量态势汇报"""
     return Task(
-        description="""基于灾情分析结果，识别次生灾害风险并提出防范措施。
+        description="""基于系统数据，生成救援力量态势汇报。
 
-## 输入数据
-AI分析结果：
-{ai_analysis}
+## 系统数据
+- 被困人员：{trapped_count}人
 
-灾情基本情况：将从上一个任务的输出中获取
+可用救援队伍（来自数据库）：
+{available_teams}
 
 ## 输出要求
-请严格按照以下JSON Schema输出：
-"""
-        + MODULE_5_OUTPUT_SCHEMA
-        + """
+生成救援力量态势汇报，包含：
 
-## 风险识别指南
-根据灾害类型和具体情况，考虑以下风险类型：
+### 一、当前态势
+- 已确认被困人员数量
+- 已派出救援力量（从可用队伍中选择，标注"建议调派"）
 
-### 地震场景
-- 余震：主震6级以上通常有余震风险
-- 滑坡/泥石流：山区地形需重点关注
-- 堰塞湖：河流地区需关注堵塞风险
-- 火灾：燃气泄漏、电气故障
-- 危化品泄漏：工业区需排查
+### 二、资源需求测算
+基于SPHERE标准（每50名被困人员配1支救援队）测算
 
-### 洪涝场景
-- 滑坡/泥石流
-- 水源污染
-- 疫病传播
+### 三、请求事项
+向上级明确申请的资源
 
-### 通用风险
-- 建筑次生坍塌
-- 交通事故（救援车辆密集）
-
-## 注意事项
-1. 每种风险必须评估等级（high/medium/low）
-2. 防范措施要具体可执行
-3. 监测建议要包含监测对象和方法
-4. narrative字段应该是一段完整的方案描述文本
-5. 输出必须是合法的JSON""",
-        expected_output="符合Schema的JSON对象，包含风险列表和综合描述",
+## 重要
+- 只能从"可用救援队伍"中选择队伍名称
+- 不要编造不存在的队伍""",
+        expected_output="救援力量态势汇报文本",
         agent=agent,
-        output_pydantic=SecondaryDisasterOutput,
-        context=[context_task] if context_task else None,
+        async_execution=async_exec,
     )
+
+
+# ============================================================================
+# 模块2: 医疗救护态势 (并行)
+# ============================================================================
+def create_medical_task(agent: Agent, async_exec: bool = True) -> Task:
+    """模块2 - 医疗救护态势汇报"""
+    return Task(
+        description="""基于系统数据，生成医疗救护态势汇报。
+
+## 系统数据
+- 受伤人员：{injured_count}人
+- 重伤人员：{serious_injury_count}人
+
+可用医疗队伍（来自数据库）：
+{available_medical_teams}
+
+## 输出要求
+生成医疗救护态势汇报，包含：
+
+### 一、当前态势
+- 伤员情况（为0显示"待核实"）
+
+### 二、资源需求测算
+基于SPHERE标准测算
+
+### 三、请求事项
+向卫健委申请的医疗资源
+
+## 重要
+- 伤员数据为0时，标注"待核实"
+- 只从数据库队伍中选择""",
+        expected_output="医疗救护态势汇报文本",
+        agent=agent,
+        async_execution=async_exec,
+    )
+
+
+# ============================================================================
+# 模块3: 工程抢险态势 (并行)
+# ============================================================================
+def create_infrastructure_task(agent: Agent, async_exec: bool = True) -> Task:
+    """模块3 - 工程抢险态势汇报"""
+    return Task(
+        description="""基于系统数据，生成基础设施损毁和抢修态势汇报。
+
+## 系统数据
+损毁情况：
+- 倒塌建筑：{buildings_collapsed}栋
+- 受损建筑：{buildings_damaged}栋
+- 损毁道路：{roads_damaged_km}公里
+
+可用工程队伍：
+{available_engineering_teams}
+
+## 输出要求
+生成工程抢险态势汇报，为0的标注"待核实"
+
+## 重要
+- 不要编造损毁数据""",
+        expected_output="工程抢险态势汇报文本",
+        agent=agent,
+        async_execution=async_exec,
+    )
+
+
+# ============================================================================
+# 模块4: 群众安置态势 (并行)
+# ============================================================================
+def create_shelter_task(agent: Agent, async_exec: bool = True) -> Task:
+    """模块4 - 群众安置态势汇报"""
+    return Task(
+        description="""基于系统数据，生成群众安置态势汇报。
+
+## 系统数据
+- 受灾人口：{affected_population}人
+- 安置期限：{days}天
+
+可用物资（来自数据库）：
+{available_supplies}
+
+## 输出要求
+基于SPHERE标准测算物资需求，列出缺口
+
+## 重要
+- 受灾人口为0时，写"待确认"
+- 参考数据库物资库存""",
+        expected_output="群众安置态势汇报文本",
+        agent=agent,
+        async_execution=async_exec,
+    )
+
+
+# ============================================================================
+# 模块5: 次生灾害分析 (并行)
+# ============================================================================
+def create_secondary_disaster_task(agent: Agent, async_exec: bool = True) -> Task:
+    """模块5 - 次生灾害风险分析"""
+    return Task(
+        description="""基于灾情数据，分析次生灾害风险。
+
+## 系统数据
+灾害类型：{disaster_type}
+受灾区域：{affected_area}
+震级：{magnitude}
+
+## 输出要求
+识别风险、评估等级、提出防范措施""",
+        expected_output="次生灾害风险分析文本",
+        agent=agent,
+        async_execution=async_exec,
+    )
+
+
+# ============================================================================
+# 模块6: 通信保障态势 (并行)
+# ============================================================================
+def create_communication_task(agent: Agent, async_exec: bool = True) -> Task:
+    """模块6 - 通信保障态势汇报"""
+    return Task(
+        description="""基于系统数据，生成通信保障态势汇报。
+
+## 系统数据
+- 救援队伍数量：{rescue_teams_count}支
+
+## 输出要求
+测算通信设备需求，向通信管理局申请资源
+""" + NO_FABRICATION_RULE,
+        expected_output="通信保障态势汇报文本",
+        agent=agent,
+        async_execution=async_exec,
+    )
+
+
+# ============================================================================
+# 模块7: 物资调配态势 (并行)
+# ============================================================================
+def create_logistics_task(agent: Agent, async_exec: bool = True) -> Task:
+    """模块7 - 物资调配态势汇报"""
+    return Task(
+        description="""基于系统数据，生成物资调配态势汇报。
+
+## 系统数据
+- 受灾人口：{affected_population}人
+
+可用物资来源：
+{available_supplies}
+
+## 输出要求
+测算运输需求，向交通厅申请运输资源
+""" + NO_FABRICATION_RULE,
+        expected_output="物资调配态势汇报文本",
+        agent=agent,
+        async_execution=async_exec,
+    )
+
+
+# ============================================================================
+# 模块8: 自身保障态势 (并行)
+# ============================================================================
+def create_self_support_task(agent: Agent, async_exec: bool = True) -> Task:
+    """模块8 - 救援力量自身保障态势汇报"""
+    return Task(
+        description="""基于系统数据，生成救援力量自身保障态势汇报。
+
+## 系统数据
+- 救援人员：{rescue_personnel}人
+- 医护人员：{medical_staff}人
+- 总计：{total_responders}人
+- 保障期限：{days}天
+
+## 输出要求
+基于SPHERE标准测算后勤保障需求
+""" + NO_FABRICATION_RULE,
+        expected_output="自身保障态势汇报文本",
+        agent=agent,
+        async_execution=async_exec,
+    )
+
+
+# ============================================================================
+# 汇总任务 - 等待所有并行任务完成
+# ============================================================================
+def create_summary_task(agent: Agent, context_tasks: list[Task]) -> Task:
+    """汇总任务 - 等待所有并行任务完成后生成摘要"""
+    return Task(
+        description="""汇总所有模块内容，生成简要摘要。
+
+请整理各模块汇报要点，形成向省级领导的一页纸汇报摘要。""",
+        expected_output="汇报摘要",
+        agent=agent,
+        context=context_tasks,  # 等待所有并行任务完成
+        async_execution=False,  # 同步执行
+    )
+
+
+# ============================================================================
+# 兼容旧代码
+# ============================================================================
+def create_basic_disaster_task(agent: Agent) -> Task:
+    """兼容旧代码"""
+    return create_disaster_briefing_task(agent, async_exec=False)

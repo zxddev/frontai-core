@@ -1,7 +1,7 @@
 """
 指挥消息ORM模型
 
-对应SQL表: public.command_messages_v2, public.message_receipts_v2
+对应SQL表: operational_v2.command_messages_v2, operational_v2.message_receipts_v2
 参考: sql/v2_conversation_message_model.sql
 """
 
@@ -21,7 +21,7 @@ from sqlalchemy.orm import relationship, Mapped, mapped_column
 from src.core.database import Base
 
 
-# 消息类型枚举 - 对应 public.command_message_type_v2
+# 消息类型枚举 - 对应 operational_v2.command_message_type_v2
 CommandMessageTypeEnum = ENUM(
     'order',           # 命令
     'report',          # 报告
@@ -32,22 +32,24 @@ CommandMessageTypeEnum = ENUM(
     'inquiry',         # 询问
     'response',        # 回复
     name='command_message_type_v2',
+    schema='operational_v2',
     create_type=False,
 )
 
 
-# 消息优先级枚举 - 对应 public.message_priority_v2
+# 消息优先级枚举 - 对应 operational_v2.message_priority_v2
 MessagePriorityEnum = ENUM(
     'urgent',      # 紧急
     'high',        # 高
     'normal',      # 普通
     'low',         # 低
     name='message_priority_v2',
+    schema='operational_v2',
     create_type=False,
 )
 
 
-# 接收者类型枚举 - 对应 public.recipient_type_v2
+# 接收者类型枚举 - 对应 operational_v2.recipient_type_v2
 RecipientTypeEnum = ENUM(
     'broadcast',   # 广播(所有人)
     'role',        # 按角色
@@ -55,6 +57,7 @@ RecipientTypeEnum = ENUM(
     'team',        # 指定队伍
     'group',       # 指定群组
     name='recipient_type_v2',
+    schema='operational_v2',
     create_type=False,
 )
 
@@ -69,6 +72,7 @@ class CommandMessage(Base):
     - 可设置确认要求和截止时间
     """
     __tablename__ = "command_messages_v2"
+    __table_args__ = {"schema": "operational_v2"}
     
     # ==================== 主键 ====================
     id: UUID = Column(
@@ -169,7 +173,7 @@ class CommandMessage(Base):
     # ==================== 回复 ====================
     reply_to_message_id: Optional[UUID] = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("command_messages_v2.id"),
+        ForeignKey("operational_v2.command_messages_v2.id"),
         comment="回复的消息ID"
     )
     
@@ -205,6 +209,7 @@ class MessageReceipt(Base):
     - 每个接收者对应一条记录
     """
     __tablename__ = "message_receipts_v2"
+    __table_args__ = {"schema": "operational_v2"}
     
     # ==================== 主键 ====================
     id: UUID = Column(
@@ -216,7 +221,7 @@ class MessageReceipt(Base):
     # ==================== 关联消息 ====================
     message_id: UUID = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("command_messages_v2.id", ondelete="CASCADE"),
+        ForeignKey("operational_v2.command_messages_v2.id", ondelete="CASCADE"),
         nullable=False,
         comment="消息ID"
     )

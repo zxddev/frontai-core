@@ -60,6 +60,19 @@ class EquipmentTask(BaseModel):
     searchRoute: str
 
 
+class TaskType(BaseModel):
+    """任务类型分组"""
+    type: str
+    taskList: list[EquipmentTask]
+
+
+class TaskSendRequest(BaseModel):
+    """任务下发请求"""
+    id: str
+    eventId: str
+    task: list[TaskType]
+
+
 class RescueTask(BaseModel):
     """救援任务"""
     units: list[UnitTask] = Field(default_factory=list)
@@ -86,8 +99,10 @@ class RescuePoint(BaseModel):
     locationName: str
     location: Location
     image: str = ""
-    schema_: str = Field("", alias="schema", description="救援方案文本")
+    schema_: str = Field("", alias="schema", serialization_alias="schema", description="救援方案文本")
     description: str = ""
+    
+    model_config = {"populate_by_name": True}
 
 
 class MultiRescueTaskDetail(BaseModel):

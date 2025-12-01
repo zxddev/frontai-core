@@ -7,22 +7,22 @@
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Form
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
 from src.domains.tasks.service import TaskService
 from src.domains.frontend_api.common import ApiResponse
-from src.domains.frontend_api.scheme.schemas import TaskSendRequest
+from src.agents import get_frontline_rescue_agent
 from .schemas import (
     FrontendTask, TaskLogData, TaskLogCommitRequest,
     RescueTask, RescueDetailResponse, Location,
     RescuePoint, MultiRescueTaskDetail,
-    UnitTask, EquipmentTask,
+    UnitTask, EquipmentTask, TaskSendRequest,
 )
 
 
@@ -210,101 +210,225 @@ class EventIdRequest(BaseModel):
     eventId: str
 
 
+# 优先级到level的映射
+PRIORITY_LEVEL_MAP = {
+    "critical": 1,
+    "high": 2,
+    "medium": 3,
+    "low": 4,
+}
+
+# 事件来源映射
+SOURCE_TYPE_MAP = {
+    "manual_report": "人工上报",
+    "ai_detection": "AI识别",
+    "sensor_alert": "传感器告警",
+    "system_inference": "系统推演",
+    "external_system": "外部系统",
+}
+
+
 @router.post("/multi-rescue-scheme", response_model=ApiResponse[list[RescuePoint]])
 async def multi_rescue_scheme(
-    request: EventIdRequest,
+    scenarioId: str = Form(None),
+    db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[list[RescuePoint]]:
     """
     一线救援行动方案
     
-    获取多个救援点的汇总救援方案
+    查询当前想定下所有未处理的事件（confirmed状态、无任务分配），并生成救援方案。
+    
+    业务逻辑：
+    1. 查询所有confirmed状态且没有任务分配的事件
+    2. 排除earthquake类型（地震主震信息）
+    3. 对每个事件查询已有方案或生成默认方案描述
+    4. 返回救援点列表供前端展示
     """
-    logger.info(f"获取一线救援行动方案, eventId={request.eventId}")
-    
-    mock_points = [
-        RescuePoint(
-            level=1,
-            title="居民楼倒塌救援点",
-            origin="无人机侦察",
-            time=datetime.now().isoformat(),
-            locationName="新华路123号居民楼",
-            location=Location(longitude=104.0657, latitude=30.6595),
+    logger.info(f"获取一线救援行动方案, scenarioId={scenarioId}")
+
+    if not scenarioId:
+        return ApiResponse.error(400, "scenarioId is required")
+
+    try:
+        agent = get_frontline_rescue_agent()
+        result = await agent.plan(scenarioId)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("获取一线救援行动方案失败")
+        return ApiResponse.error(500, f"获取方案失败: {e}")
+
+    if result.get("status") == "failed":
+        errors = ", ".join(result.get("errors") or [])
+        logger.error("FrontlineRescueAgent failed: %s", errors)
+        return ApiResponse.error(500, f"前线救援调度失败: {errors or '未知错误'}")
+
+    events = result.get("prioritized_events") or []
+    if not events:
+        logger.info("未找到待处理事件")
+        return ApiResponse.success([])
+
+    rescue_points: list[RescuePoint] = []
+
+    for ev in events:
+        lon = ev.get("longitude")
+        lat = ev.get("latitude")
+        if lon is None or lat is None:
+            continue
+
+        location = Location(longitude=float(lon), latitude=float(lat))
+
+        bucket = str(ev.get("priority_bucket") or ev.get("priority") or "medium")
+        level = PRIORITY_LEVEL_MAP.get(
+            bucket,
+            PRIORITY_LEVEL_MAP.get(str(ev.get("priority", "medium")), 3),
+        )
+
+        origin = SOURCE_TYPE_MAP.get(str(ev.get("source_type")), "系统")
+        time_str = str(ev.get("reported_at") or datetime.now().isoformat())
+
+        base_schema = _generate_default_scheme(
+            event_type=str(ev.get("event_type", "other")),
+            title=str(ev.get("title", "")),
+            estimated_victims=int(ev.get("estimated_victims") or 0),
+        )
+
+        score = float(ev.get("score", 0.0) or 0.0)
+        reasons = ev.get("reasons") or []
+        header_lines = [f"[priority={bucket}, score={score:.2f}]"]
+        if reasons:
+            header_lines.append("原因:")
+            header_lines.extend([f"- {r}" for r in reasons])
+        schema_text = "\n".join(header_lines) + "\n\n" + base_schema
+
+        rescue_point = RescuePoint(
+            level=level,
+            title=str(ev.get("title", "")),
+            origin=origin,
+            time=time_str,
+            locationName=str(ev.get("address") or f"坐标({lon:.4f}, {lat:.4f})"),
+            location=location,
             image="",
-            schema_="立即调派消防救援队，携带生命探测仪、破拆工具进行搜救。预计被困人员5-10人。",
-            description="6层居民楼部分倒塌，多人被困"
-        ),
-        RescuePoint(
-            level=2,
-            title="学校疏散救援点",
-            origin="群众报告",
-            time=datetime.now().isoformat(),
-            locationName="阳光小学",
-            location=Location(longitude=104.0667, latitude=30.6605),
-            image="",
-            schema_="调派救护车和医疗队，协助学校师生有序疏散。预计需疏散人员300人。",
-            description="学校建筑受损，需协助疏散"
-        ),
-    ]
-    
-    return ApiResponse.success(mock_points)
+            schema_=schema_text,
+            description=str(ev.get("description", "")),
+        )
+        rescue_points.append(rescue_point)
+
+    logger.info(f"返回救援点数量: {len(rescue_points)}")
+    return ApiResponse.success(rescue_points)
+
+
+def _generate_default_scheme(event_type: str, title: str, estimated_victims: int) -> str:
+    """根据事件类型生成默认救援方案描述"""
+    schemes = {
+        "trapped_person": f"立即调派搜救队携带生命探测仪进行搜救。预计被困{estimated_victims}人，需破拆工具和医疗支援。",
+        "fire": "调派消防救援队进行灭火作业，同时组织人员疏散。注意防护装备和水源保障。",
+        "flood": "调派水上救援队携带冲锋舟、救生设备进行救援。注意水流情况，确保救援人员安全。",
+        "landslide": "调派搜救队和工程抢险队，使用生命探测仪搜索被埋人员。注意二次滑坡风险。",
+        "building_collapse": f"调派消防救援队携带破拆工具、生命探测仪进行搜救。预计被困{estimated_victims}人。",
+        "road_damage": "调派工程抢险队进行道路抢修，设置警示标志，引导车辆绕行。",
+        "power_outage": "调派电力抢修队恢复供电，优先保障医院、指挥中心等重要设施。",
+        "communication_lost": "调派通信保障队架设应急通信设备，恢复通信网络。",
+        "hazmat_leak": "调派危化品处置队进行泄漏处置，划定警戒区域，组织群众疏散。",
+        "epidemic": "调派医疗防疫队进行消杀处置，设置隔离区，做好人员防护。",
+        "earthquake_secondary": f"调派综合救援力量处置次生灾害。预计受影响{estimated_victims}人。",
+    }
+    return schemes.get(event_type, f"针对{title}制定专项救援方案，调派相应救援力量。")
 
 
 @router.post("/multi-rescue-task", response_model=ApiResponse[list[MultiRescueTaskDetail]])
 async def multi_rescue_task(
-    request: EventIdRequest,
+    scenarioId: str = Form(None),
 ) -> ApiResponse[list[MultiRescueTaskDetail]]:
     """
     一线救援行动任务
     
-    根据多个救援点的方案生成具体的执行任务
+    根据所有待处理事件的方案生成具体的执行任务
     """
-    logger.info(f"生成一线救援行动任务, eventId={request.eventId}")
-    
-    mock_tasks = [
-        MultiRescueTaskDetail(
-            level=1,
-            title="居民楼倒塌救援",
+    logger.info(f"生成一线救援行动任务, scenarioId={scenarioId}")
+
+    if not scenarioId:
+        return ApiResponse.error(400, "scenarioId is required")
+
+    try:
+        agent = get_frontline_rescue_agent()
+        result = await agent.plan(scenarioId)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("生成一线救援行动任务失败")
+        return ApiResponse.error(500, f"生成任务失败: {e}")
+
+    if result.get("status") == "failed":
+        errors = ", ".join(result.get("errors") or [])
+        logger.error("FrontlineRescueAgent failed: %s", errors)
+        return ApiResponse.error(500, f"前线救援调度失败: {errors or '未知错误'}")
+
+    events = result.get("prioritized_events") or []
+    allocations = result.get("event_allocations") or []
+
+    # 建立 event_id -> allocation 的索引，便于快速查找
+    alloc_by_event: dict[str, Any] = {a.get("event_id"): a for a in allocations}
+
+    details: list[MultiRescueTaskDetail] = []
+
+    for ev in events:
+        ev_id = str(ev.get("id") or "")
+        if not ev_id:
+            continue
+
+        lon = ev.get("longitude")
+        lat = ev.get("latitude")
+        if lon is None or lat is None:
+            continue
+
+        location = Location(longitude=float(lon), latitude=float(lat))
+
+        bucket = str(ev.get("priority_bucket") or ev.get("priority") or "medium")
+        level = PRIORITY_LEVEL_MAP.get(
+            bucket,
+            PRIORITY_LEVEL_MAP.get(str(ev.get("priority", "medium")), 3),
+        )
+
+        alloc = alloc_by_event.get(ev_id) or {}
+        teams = alloc.get("allocations") or []
+
+        unit_tasks: list[UnitTask] = []
+        for team in teams:
+            eta = float(team.get("eta_minutes", 0.0) or 0.0)
+            caps = ",".join(team.get("assigned_capabilities") or [])
+            desc = f"执行针对“{ev.get('title', '')}”的救援任务，预计到达时间约{eta:.1f}分钟。能力: {caps or '未标明'}。"
+            unit_tasks.append(
+                UnitTask(
+                    id=str(team.get("team_id", "")),
+                    name=str(team.get("team_name", "")),
+                    description=desc,
+                    location=location,
+                    supplieList=[],
+                )
+            )
+
+        if not unit_tasks:
+            # 没有分配到队伍时仍返回占位任务，供前端提示资源缺口
+            unit_tasks.append(
+                UnitTask(
+                    id="",
+                    name="暂无可用队伍",
+                    description="当前未能为该事件找到满足约束条件的救援队伍，请指挥员人工调度或调整约束。",
+                    location=location,
+                    supplieList=[],
+                )
+            )
+
+        detail = MultiRescueTaskDetail(
+            level=level,
+            title=str(ev.get("title", "")),
             rescueTask=[
                 RescueTask(
-                    units=[
-                        UnitTask(
-                            id="unit-1",
-                            name="消防救援一中队",
-                            description="负责搜救被困人员",
-                            location=Location(longitude=104.0657, latitude=30.6595),
-                            supplieList=["生命探测仪", "破拆工具", "担架"]
-                        )
-                    ],
-                    equipmentList=[
-                        EquipmentTask(
-                            deviceName="搜救机器狗A",
-                            deviceType="四足机器人",
-                            carryingModule="生命探测+通信",
-                            timeConsuming="60分钟",
-                            searchRoute="倒塌区域逐层搜索"
-                        )
-                    ]
+                    units=unit_tasks,
+                    equipmentList=[],
                 )
-            ]
-        ),
-        MultiRescueTaskDetail(
-            level=2,
-            title="学校疏散救援",
-            rescueTask=[
-                RescueTask(
-                    units=[
-                        UnitTask(
-                            id="unit-2",
-                            name="医疗救护队",
-                            description="负责伤员救治和疏散",
-                            location=Location(longitude=104.0667, latitude=30.6605),
-                            supplieList=["急救包", "担架", "药品"]
-                        )
-                    ],
-                    equipmentList=[]
-                )
-            ]
-        ),
-    ]
-    
-    return ApiResponse.success(mock_tasks)
+            ],
+        )
+        details.append(detail)
+
+    return ApiResponse.success(
+        details,
+        "多事件救援任务草案已生成，请指挥员在线下达指令前仔细审核，并通过 /tasks/rescueTask 接口明确下发执行任务。",
+    )

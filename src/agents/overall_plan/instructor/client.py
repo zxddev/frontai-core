@@ -29,7 +29,7 @@ class InstructorClientError(Exception):
 def create_instructor_client(
     base_url: str | None = None,
     api_key: str | None = None,
-    mode: instructor.Mode = instructor.Mode.JSON,
+    mode: instructor.Mode = instructor.Mode.MD_JSON,
 ) -> instructor.AsyncInstructor:
     """
     创建异步Instructor客户端
@@ -37,7 +37,8 @@ def create_instructor_client(
     Args:
         base_url: OpenAI兼容API地址，默认从环境变量OPENAI_BASE_URL读取
         api_key: API密钥，默认从环境变量OPENAI_API_KEY读取
-        mode: Instructor模式，默认JSON模式（兼容vLLM）
+        mode: Instructor模式，默认MD_JSON模式，
+            仅在客户端侧解析JSON，避免与vLLM的guided_json双重约束冲突。
 
     Returns:
         配置好的异步Instructor客户端
@@ -68,6 +69,8 @@ def create_instructor_client(
             timeout=timeout,
         )
 
+        # 这里默认使用MD_JSON模式，只在客户端侧做JSON解析，
+        # 服务端只保留vLLM的guided_json约束，确保不会出现多种structured outputs约束叠加。
         instructor_client = instructor.from_openai(client, mode=mode)
         logger.debug(
             "Created async Instructor client",
@@ -92,8 +95,8 @@ async def generate_structured_output(
     """
     使用Instructor生成结构化输出
 
-    对于vLLM，使用guided_json参数启用服务端JSON约束，
-    确保输出严格符合schema，而不是依赖模型自身的JSON生成能力。
+    完全依赖Instructor的MD_JSON模式在客户端侧解析JSON，
+    不使用vLLM的guided_json服务端约束，避免xgrammar FSM错误。
 
     Args:
         client: 异步Instructor客户端实例
@@ -109,15 +112,16 @@ async def generate_structured_output(
     Raises:
         InstructorClientError: 重试后仍失败时抛出
     """
-    # 获取JSON Schema用于vLLM的guided_json
-    json_schema = response_model.model_json_schema()
     field_names = list(response_model.model_fields.keys())
 
     system_prompt = f"""你是一名专业的应急管理专家。
 请根据用户提供的灾情数据，生成专业的应急方案建议。
-输出必须是JSON格式，包含以下字段：{field_names}"""
+输出必须是JSON格式，包含以下字段：{field_names}
+请确保输出是有效的JSON格式。"""
 
     try:
+        # 不使用 extra_body guided_json，避免vLLM xgrammar后端FSM错误
+        # Instructor的MD_JSON模式会在客户端侧解析和验证JSON
         result = await client.chat.completions.create(
             model=model,
             response_model=response_model,
@@ -133,11 +137,6 @@ async def generate_structured_output(
             ],
             max_retries=max_retries,
             temperature=temperature,
-            # vLLM guided decoding - 服务端JSON约束
-            extra_body={
-                "guided_json": json_schema,
-                "guided_decoding_backend": "outlines",
-            },
         )
         return result
 

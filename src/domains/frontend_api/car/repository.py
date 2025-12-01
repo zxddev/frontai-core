@@ -176,6 +176,49 @@ class PreparationDispatchRepository:
         row = result.fetchone()
         return row.all_ready if row else False
     
+    async def get_quest_status(self, event_id: UUID) -> str:
+        """
+        从数据库推断任务状态
+        
+        状态逻辑:
+        - pending: 没有调度记录
+        - dispatched: 有调度记录但未全部准备完成
+        - ready: 所有车辆准备完成
+        - departed: 有车辆已出发
+        """
+        result = await self.db.execute(
+            text("""
+                SELECT 
+                    CASE 
+                        WHEN COUNT(*) = 0 THEN 'pending'
+                        WHEN COUNT(CASE WHEN status = 'departed' THEN 1 END) > 0 THEN 'departed'
+                        WHEN COUNT(CASE WHEN status = 'ready' THEN 1 END) = COUNT(*) THEN 'ready'
+                        WHEN COUNT(CASE WHEN status IN ('dispatched', 'confirmed', 'preparing', 'ready') THEN 1 END) > 0 THEN 'dispatched'
+                        ELSE 'pending'
+                    END as quest_status
+                FROM operational_v2.equipment_preparation_dispatch_v2
+                WHERE event_id = :event_id
+            """),
+            {"event_id": str(event_id)}
+        )
+        row = result.fetchone()
+        return row.quest_status if row else "pending"
+    
+    async def mark_departed(self, event_id: UUID) -> bool:
+        """标记已出发（更新所有车辆状态为departed）"""
+        # 注意: 当前表没有departed状态，这里将所有ready状态标记为departed
+        # 实际实现可能需要添加新的状态或字段
+        result = await self.db.execute(
+            text("""
+                UPDATE operational_v2.equipment_preparation_dispatch_v2
+                SET status = 'departed', updated_at = NOW()
+                WHERE event_id = :event_id AND status = 'ready'
+            """),
+            {"event_id": str(event_id)}
+        )
+        await self.db.commit()
+        return result.rowcount > 0
+    
     async def get_vehicle_users(self, vehicle_id: UUID) -> List[Dict[str, Any]]:
         """获取车辆关联的用户（从seat_assignments_v2）"""
         result = await self.db.execute(
@@ -224,6 +267,241 @@ class PreparationDispatchRepository:
             "vehicle_name": getattr(row, 'vehicle_name', None),
             "assignee_name": getattr(row, 'assignee_name', None),
         }
+
+
+class CarItemAssignmentRepository:
+    """车辆装备分配数据访问层"""
+    
+    def __init__(self, db: AsyncSession):
+        self.db = db
+    
+    async def add_item(
+        self,
+        event_id: UUID,
+        car_id: UUID,
+        item_id: UUID,
+        item_type: str,
+        quantity: int = 1,
+        parent_device_id: Optional[UUID] = None,
+        is_exclusive: bool = False,
+        assigned_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """添加装备到车辆"""
+        result = await self.db.execute(
+            text("""
+                INSERT INTO operational_v2.car_item_assignment 
+                (event_id, car_id, item_id, item_type, quantity, parent_device_id, 
+                 is_exclusive, is_selected, assigned_by, assigned_at)
+                VALUES (:event_id, :car_id, :item_id, :item_type, :quantity, :parent_device_id,
+                        :is_exclusive, true, :assigned_by, NOW())
+                ON CONFLICT (event_id, car_id, item_id) DO UPDATE SET
+                    is_selected = true,
+                    quantity = :quantity,
+                    assigned_by = :assigned_by,
+                    assigned_at = NOW(),
+                    updated_at = NOW()
+                RETURNING id, assigned_at
+            """),
+            {
+                "event_id": str(event_id),
+                "car_id": str(car_id),
+                "item_id": str(item_id),
+                "item_type": item_type,
+                "quantity": quantity,
+                "parent_device_id": str(parent_device_id) if parent_device_id else None,
+                "is_exclusive": is_exclusive,
+                "assigned_by": assigned_by,
+            }
+        )
+        row = result.fetchone()
+        await self.db.commit()
+        return {"id": row.id, "assigned_at": row.assigned_at}
+    
+    async def remove_item(
+        self,
+        event_id: UUID,
+        car_id: UUID,
+        item_id: UUID,
+    ) -> bool:
+        """从车辆移除装备"""
+        result = await self.db.execute(
+            text("""
+                DELETE FROM operational_v2.car_item_assignment
+                WHERE event_id = :event_id AND car_id = :car_id AND item_id = :item_id
+                  AND is_exclusive = false
+            """),
+            {
+                "event_id": str(event_id),
+                "car_id": str(car_id),
+                "item_id": str(item_id),
+            }
+        )
+        await self.db.commit()
+        return result.rowcount > 0
+    
+    async def toggle_item(
+        self,
+        event_id: UUID,
+        car_id: UUID,
+        item_id: UUID,
+        is_selected: bool,
+    ) -> bool:
+        """切换装备选中状态"""
+        result = await self.db.execute(
+            text("""
+                UPDATE operational_v2.car_item_assignment
+                SET is_selected = :is_selected, updated_at = NOW()
+                WHERE event_id = :event_id AND car_id = :car_id AND item_id = :item_id
+            """),
+            {
+                "event_id": str(event_id),
+                "car_id": str(car_id),
+                "item_id": str(item_id),
+                "is_selected": is_selected,
+            }
+        )
+        await self.db.commit()
+        return result.rowcount > 0
+    
+    async def update_modules_selection(
+        self,
+        event_id: UUID,
+        car_id: UUID,
+        device_id: UUID,
+        selected_module_ids: List[str],
+    ) -> List[Dict[str, Any]]:
+        """批量更新模块选中状态"""
+        # 获取该设备下的所有模块分配
+        result = await self.db.execute(
+            text("""
+                SELECT id, item_id FROM operational_v2.car_item_assignment
+                WHERE event_id = :event_id AND car_id = :car_id 
+                  AND parent_device_id = :device_id AND item_type = 'module'
+            """),
+            {
+                "event_id": str(event_id),
+                "car_id": str(car_id),
+                "device_id": str(device_id),
+            }
+        )
+        modules = result.fetchall()
+        
+        # 更新选中状态
+        updated_modules = []
+        for mod in modules:
+            is_selected = str(mod.item_id) in selected_module_ids
+            await self.db.execute(
+                text("""
+                    UPDATE operational_v2.car_item_assignment
+                    SET is_selected = :is_selected, updated_at = NOW()
+                    WHERE id = :id
+                """),
+                {"id": mod.id, "is_selected": is_selected}
+            )
+            updated_modules.append({
+                "id": str(mod.item_id),
+                "isSelected": is_selected,
+            })
+        
+        await self.db.commit()
+        return updated_modules
+    
+    async def get_by_event_car(
+        self,
+        event_id: UUID,
+        car_id: UUID,
+    ) -> List[Dict[str, Any]]:
+        """获取车辆的装备分配列表"""
+        result = await self.db.execute(
+            text("""
+                SELECT id, event_id, car_id, item_id, item_type, parent_device_id,
+                       is_selected, is_exclusive, quantity, assigned_by, assigned_at
+                FROM operational_v2.car_item_assignment
+                WHERE event_id = :event_id AND car_id = :car_id
+                ORDER BY assigned_at
+            """),
+            {"event_id": str(event_id), "car_id": str(car_id)}
+        )
+        rows = result.fetchall()
+        return [
+            {
+                "id": str(row.id),
+                "event_id": str(row.event_id),
+                "car_id": str(row.car_id),
+                "item_id": str(row.item_id),
+                "item_type": row.item_type,
+                "parent_device_id": str(row.parent_device_id) if row.parent_device_id else None,
+                "is_selected": row.is_selected,
+                "is_exclusive": row.is_exclusive,
+                "quantity": row.quantity,
+                "assigned_by": row.assigned_by,
+                "assigned_at": row.assigned_at,
+            }
+            for row in rows
+        ]
+    
+    async def get_all_by_event(self, event_id: UUID) -> List[Dict[str, Any]]:
+        """获取事件的所有用户装备分配记录（用于 get_car_list 读取用户手动分配）"""
+        result = await self.db.execute(
+            text("""
+                SELECT car_id, item_id, is_selected
+                FROM operational_v2.car_item_assignment
+                WHERE event_id = :event_id
+            """),
+            {"event_id": str(event_id)}
+        )
+        rows = result.fetchall()
+        return [
+            {"car_id": str(r.car_id), "item_id": str(r.item_id), "is_selected": r.is_selected}
+            for r in rows
+        ]
+    
+    async def check_item_assigned(
+        self,
+        event_id: UUID,
+        item_id: UUID,
+        exclude_car_id: Optional[UUID] = None,
+    ) -> Optional[str]:
+        """检查装备是否已分配给其他车辆，返回车辆ID"""
+        params = {
+            "event_id": str(event_id),
+            "item_id": str(item_id),
+        }
+        sql = """
+            SELECT car_id FROM operational_v2.car_item_assignment
+            WHERE event_id = :event_id AND item_id = :item_id AND is_selected = true
+        """
+        if exclude_car_id:
+            sql += " AND car_id != :exclude_car_id"
+            params["exclude_car_id"] = str(exclude_car_id)
+        
+        result = await self.db.execute(text(sql), params)
+        row = result.fetchone()
+        return str(row.car_id) if row else None
+    
+    async def ensure_exclusive_item(
+        self,
+        event_id: UUID,
+        car_id: UUID,
+        item_id: UUID,
+        item_type: str = "device",
+    ) -> None:
+        """确保专属装备存在分配记录（用于toggle操作）"""
+        await self.db.execute(
+            text("""
+                INSERT INTO operational_v2.car_item_assignment 
+                (event_id, car_id, item_id, item_type, is_exclusive, is_selected)
+                VALUES (:event_id, :car_id, :item_id, :item_type, true, false)
+                ON CONFLICT (event_id, car_id, item_id) DO NOTHING
+            """),
+            {
+                "event_id": str(event_id),
+                "car_id": str(car_id),
+                "item_id": str(item_id),
+                "item_type": item_type,
+            }
+        )
+        await self.db.commit()
 
 
 class ModuleRepository:

@@ -52,3 +52,23 @@ class SupportResource(BaseModel):
     quantity: int = 0
     status: str = "available"
     description: str = ""
+
+
+class MobilizeRequest(BaseModel):
+    """车辆动员请求"""
+    event_id: str = Field(..., description="关联事件ID")
+    vehicle_ids: list[str] = Field(..., description="要动员的车辆ID列表")
+
+
+class MobilizedTeamSummary(BaseModel):
+    """已动员队伍摘要"""
+    team_id: str
+    name: str
+    source_vehicle_id: str
+    status: str
+
+
+class MobilizeResponse(BaseModel):
+    """车辆动员响应"""
+    mobilized_count: int
+    teams: list[MobilizedTeamSummary]

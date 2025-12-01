@@ -59,7 +59,7 @@ class SimulationScenario(Base):
     - 支持时间倍率调整
     """
     __tablename__ = "simulation_scenarios_v2"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = {"schema": "operational_v2"}
     
     # ==================== 主键 ====================
     id: UUID = Column(
@@ -82,7 +82,7 @@ class SimulationScenario(Base):
     # ==================== 关联想定 ====================
     scenario_id: UUID = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("public.scenarios_v2.id"),
+        ForeignKey("operational_v2.scenarios_v2.id"),
         nullable=False,
         comment="关联想定ID"
     )
@@ -173,7 +173,7 @@ class InjectedEvent(Base):
     - 支持定时注入和立即注入
     """
     __tablename__ = "injected_events_v2"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = {"schema": "operational_v2"}
     
     id: UUID = Column(
         PG_UUID(as_uuid=True),
@@ -182,7 +182,7 @@ class InjectedEvent(Base):
     )
     simulation_id: UUID = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("public.simulation_scenarios_v2.id", ondelete="CASCADE"),
+        ForeignKey("operational_v2.simulation_scenarios_v2.id", ondelete="CASCADE"),
         nullable=False
     )
     event_type: str = Column(String(50), nullable=False)
@@ -202,7 +202,7 @@ class DrillAssessment(Base):
     - 包含各维度得分和改进建议
     """
     __tablename__ = "drill_assessments_v2"
-    __table_args__ = {"schema": "public"}
+    __table_args__ = {"schema": "operational_v2"}
     
     # ==================== 主键 ====================
     id: UUID = Column(
@@ -214,7 +214,7 @@ class DrillAssessment(Base):
     # ==================== 关联仿真场景 ====================
     simulation_id: UUID = Column(
         PG_UUID(as_uuid=True),
-        ForeignKey("public.simulation_scenarios_v2.id", ondelete="CASCADE"),
+        ForeignKey("operational_v2.simulation_scenarios_v2.id", ondelete="CASCADE"),
         nullable=False,
         unique=True,
         comment="仿真场景ID（一对一）"

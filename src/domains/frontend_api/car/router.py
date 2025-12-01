@@ -20,14 +20,19 @@ from src.core.stomp.broker import stomp_broker
 from src.domains.resources.vehicles.service import VehicleService
 from src.domains.resources.devices.service import DeviceService
 from src.domains.equipment_recommendation.repository import EquipmentRecommendationRepository
+from src.domains.scenarios.repository import ScenarioRepository
 from src.domains.frontend_api.common import ApiResponse
-from .repository import PreparationDispatchRepository, ModuleRepository
+from .repository import PreparationDispatchRepository, ModuleRepository, CarItemAssignmentRepository
 from .schemas import (
     CarListData, CarItem, ItemData, ModuleData, ShortageAlertData,
     ItemDetailResponse, ItemProperty,
     CarItemSelect, EventIdForm,
     EquipmentDispatchRequest, UserPreparingRequest, CarReadyRequest,
     DispatchStatusItem, DispatchStatusResponse,
+    CarItemAddRequest, CarItemAddResponse,
+    CarItemRemoveRequest, CarItemRemoveResponse,
+    CarItemToggleRequest, CarItemToggleResponse, ModuleToggleItem,
+    CarModuleUpdateRequest, CarModuleUpdateResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,20 +48,40 @@ def get_device_service(db: AsyncSession = Depends(get_db)) -> DeviceService:
     return DeviceService(db)
 
 
-# 状态存储（简化实现，生产环境应使用Redis或数据库）
-_car_data = {
-    "carQuestStatus": "pending",
-}
+async def _resolve_event_id(db: AsyncSession, event_id: Optional[str] = None) -> Optional[UUID]:
+    """
+    解析事件ID：
+    1. 如果前端传了 eventId，使用前端的
+    2. 如果没传，自动获取活动想定的主事件ID
+    """
+    if event_id:
+        return UUID(event_id)
+    
+    scenario_repo = ScenarioRepository(db)
+    main_event_id = await scenario_repo.get_active_main_event_id()
+    return main_event_id
 
 
-def _get_mock_cars(user_id: str) -> CarListData:
+async def _get_quest_status(db: AsyncSession, event_id: Optional[UUID] = None) -> str:
+    """
+    获取任务状态：
+    1. 如果有事件ID，从数据库查询状态
+    2. 如果没有事件ID，返回pending
+    """
+    if not event_id:
+        return "pending"
+    
+    dispatch_repo = PreparationDispatchRepository(db)
+    return await dispatch_repo.get_quest_status(event_id)
+
+
+def _get_mock_cars(user_id: str, quest_status: str = "pending") -> CarListData:
     """获取模拟车辆数据（数据库表结构待迁移）"""
-    # 根据全局状态映射车辆状态，以便联调测试
-    current_status = _car_data.get("carQuestStatus", "pending")
+    # 根据任务状态映射车辆状态，以便联调测试
     item_status = "available"
-    if current_status == "dispatched":
+    if quest_status == "dispatched":
         item_status = "preparing"
-    elif current_status in ["ready", "departed"]:
+    elif quest_status in ["ready", "departed"]:
         item_status = "ready"
         
     cars = [
@@ -85,7 +110,7 @@ def _get_mock_cars(user_id: str) -> CarListData:
     ]
     return CarListData(
         carItemDataList=cars,
-        carQuestStatus=current_status
+        carQuestStatus=quest_status
     )
 
 
@@ -139,7 +164,6 @@ def _build_shortage_alerts(
 @router.get("/car/car-item-select-list", response_model=ApiResponse[CarListData])
 async def get_car_list(
     userId: str = Query(..., description="用户ID"),
-    eventId: Optional[str] = Query(None, description="事件ID，用于获取AI装备推荐"),
     db: AsyncSession = Depends(get_db),
     vehicle_service: VehicleService = Depends(get_vehicle_service),
     device_service: DeviceService = Depends(get_device_service),
@@ -148,35 +172,62 @@ async def get_car_list(
     获取车辆和装备载荷列表（三级结构：车辆→设备→模块）
     
     - 对接v2真实数据
-    - 若传入eventId，集成AI装备推荐结果
+    - 自动集成最近一次就绪(ready)的AI装备推荐结果
     - AI推荐的车辆/设备/模块自动标记为选中
     """
-    logger.info(f"获取车辆列表, userId={userId}, eventId={eventId}")
+    logger.info(f"获取车辆列表, userId={userId}")
     
-    # 获取AI推荐（如果有eventId）
+    # 获取活动想定的主事件ID和任务状态
+    main_event_id = await _resolve_event_id(db)
+    logger.info(f"解析到 main_event_id={main_event_id}")
+    quest_status = await _get_quest_status(db, main_event_id)
+    
+    # 获取最近一次就绪(ready)的AI推荐（无需前端传eventId）
     ai_recommendation: Optional[Dict[str, Any]] = None
     loading_plan: Dict[str, Any] = {}
-    if eventId:
-        try:
-            rec_repo = EquipmentRecommendationRepository(db)
-            ai_recommendation = await rec_repo.get_by_event_id(UUID(eventId))
-            if ai_recommendation:
-                loading_plan = ai_recommendation.get("loading_plan") or {}
-                logger.info(
-                    f"获取到AI推荐: status={ai_recommendation.get('status')}, "
-                    f"devices={len(ai_recommendation.get('recommended_devices', []))}, "
-                    f"vehicles_in_plan={len(loading_plan)}"
-                )
-        except Exception as e:
-            logger.warning(f"获取AI推荐失败: {e}")
+    try:
+        rec_repo = EquipmentRecommendationRepository(db)
+        ready_list = await rec_repo.list_by_status("ready", limit=1)
+        if ready_list:
+            ai_recommendation = ready_list[0]
+            loading_plan = ai_recommendation.get("loading_plan") or {}
+            logger.info(
+                f"获取到AI推荐: status={ai_recommendation.get('status')}, "
+                f"devices={len(ai_recommendation.get('recommended_devices', []))}, "
+                f"vehicles_in_plan={len(loading_plan)}"
+            )
+    except Exception as e:
+        logger.warning(f"获取AI推荐失败: {e}")
     
     # 构建推荐设备映射 {device_id -> {reason, priority, modules}}
     rec_device_map = _build_recommended_device_map(ai_recommendation)
     
-    # 构建loading_plan中的车辆-设备分配映射
-    vehicle_device_map: Dict[str, set] = {}
-    for vid, plan in loading_plan.items():
-        vehicle_device_map[vid] = set(plan.get("devices", []))
+    # 获取指挥员手动分配数据（优先级高于AI推荐）
+    user_assignment_map: Dict[tuple, bool] = {}
+    if main_event_id:
+        try:
+            assignment_repo = CarItemAssignmentRepository(db)
+            user_assignments = await assignment_repo.get_all_by_event(main_event_id)
+            user_assignment_map = {
+                (a['car_id'], a['item_id']): a['is_selected']
+                for a in user_assignments
+            }
+            if user_assignment_map:
+                logger.info(f"获取到用户分配数据: {len(user_assignment_map)} 条")
+        except Exception as e:
+            logger.warning(f"获取用户分配数据失败: {e}")
+    
+    # 仅保留车辆ID为有效UUID的装载方案（兼容旧数据）
+    if loading_plan:
+        normalized_loading_plan: Dict[str, Any] = {}
+        for vid, plan in loading_plan.items():
+            try:
+                UUID(vid)
+            except Exception:
+                logger.warning("忽略loading_plan中的非UUID车辆ID: %s", vid)
+                continue
+            normalized_loading_plan[vid] = plan
+        loading_plan = normalized_loading_plan
     
     try:
         # 获取所有车辆
@@ -198,34 +249,32 @@ async def get_car_list(
                     modules_by_device_type[dtype] = []
                 modules_by_device_type[dtype].append(mod)
         
-        # 构建设备→分配车辆的映射 {device_id -> (vehicle_id, vehicle_name)}
-        device_to_vehicle_map: Dict[str, tuple] = {}
-        for vid, plan in loading_plan.items():
-            vname = plan.get("vehicle_name", "")
-            for dev_id in plan.get("devices", []):
-                device_to_vehicle_map[dev_id] = (vid, vname)
-        
         # 构建车辆ID→名称映射（用于专属车辆名称查找）
         vehicle_id_to_name: Dict[str, str] = {
             str(v.id): v.name for v in vehicle_result.items
         }
+
+        # 构建设备→分配车辆的映射 {device_id -> (vehicle_id, vehicle_name)}，直接使用loading_plan中的真实车辆ID
+        device_to_vehicle_map: Dict[str, tuple] = {}
+        vehicle_device_map: Dict[str, set] = {}
+        for vid, plan in (loading_plan or {}).items():
+            vname = plan.get("vehicle_name", vehicle_id_to_name.get(vid, ""))
+            devices_in_plan = plan.get("devices", []) or []
+            if not devices_in_plan:
+                continue
+            vehicle_device_map.setdefault(vid, set()).update(devices_in_plan)
+            for dev_id in devices_in_plan:
+                device_to_vehicle_map[dev_id] = (vid, vname)
         
         def build_item_list(
             devices, 
             current_vehicle_id: str,
+            user_assignment_map: Dict[tuple, bool],
         ) -> List[ItemData]:
-            """构建设备列表（含模块）"""
+            """构建设备列表（含模块），用户分配优先于AI推荐"""
             items = []
             for device in devices:
                 device_id_str = str(device.id)
-                
-                # 查找该设备被AI分配到哪辆车
-                assigned_vehicle = device_to_vehicle_map.get(device_id_str)
-                assigned_to_vid = assigned_vehicle[0] if assigned_vehicle else None
-                assigned_to_vname = assigned_vehicle[1] if assigned_vehicle else None
-                
-                # 判断设备是否被AI分配到当前车辆
-                is_assigned_to_current = assigned_to_vid == current_vehicle_id
                 
                 # 获取设备的AI推荐信息（含推荐模块）
                 rec_info = rec_device_map.get(device_id_str)
@@ -264,11 +313,18 @@ async def get_car_list(
                         if exclusive_device_id and exclusive_device_id != device_id_str:
                             continue
                         
+                        # 模块 isSelected：用户分配 > AI推荐
+                        module_user_selected = user_assignment_map.get((current_vehicle_id, mod_id))
+                        if module_user_selected is not None:
+                            module_is_selected = 1 if module_user_selected else 0
+                        else:
+                            module_is_selected = 1 if mod_id in ai_module_ids else 0
+                        
                         module_list.append(ModuleData(
                             id=mod_id,
                             name=mod["name"],
                             moduleType=mod.get("module_type", ""),
-                            isSelected=1 if mod_id in ai_module_ids else 0,
+                            isSelected=module_is_selected,
                             aiReason=ai_module_reasons.get(mod_id),
                             exclusiveToDeviceId=exclusive_device_id,
                         ))
@@ -277,12 +333,31 @@ async def get_car_list(
                 exclusive_vehicle_id = str(device.exclusive_to_vehicle_id) if device.exclusive_to_vehicle_id else None
                 exclusive_vehicle_name = vehicle_id_to_name.get(exclusive_vehicle_id) if exclusive_vehicle_id else None
                 
+                # 查找该设备被AI分配到哪辆车（如果有装载方案）
+                assigned_vehicle = device_to_vehicle_map.get(device_id_str)
+                assigned_to_vid = assigned_vehicle[0] if assigned_vehicle else None
+                assigned_to_vname = assigned_vehicle[1] if assigned_vehicle else None
+
+                # 设备 isSelected：用户分配 > 专属装备 > AI推荐
+                user_selected = user_assignment_map.get((current_vehicle_id, device_id_str))
+                if user_selected is not None:
+                    # 指挥员已手动设置，以指挥员选择为准
+                    is_selected_flag = 1 if user_selected else 0
+                elif exclusive_vehicle_id == current_vehicle_id:
+                    # 专属装备在其专属车辆上默认选中
+                    is_selected_flag = 1
+                else:
+                    # 无用户操作，使用AI推荐作为初始值
+                    is_assigned_to_current = assigned_to_vid == current_vehicle_id
+                    is_ai_recommended = rec_info is not None
+                    is_selected_flag = 1 if (is_assigned_to_current or (not loading_plan and is_ai_recommended)) else 0
+
                 items.append(ItemData(
                     id=device_id_str,
                     name=device.name,
                     model=device.model or device.properties.get('model', device.code),
                     type="device",
-                    isSelected=1 if is_assigned_to_current else 0,
+                    isSelected=is_selected_flag,
                     aiReason=rec_info["reason"] if rec_info else None,
                     priority=rec_info["priority"] if rec_info else None,
                     assignedToVehicle=assigned_to_vid,
@@ -309,11 +384,12 @@ async def get_car_list(
             
             cars.append(CarItem(
                 id=vehicle_id_str,
+                code=vehicle.code,
                 name=vehicle.name,
                 status=status_map.get(vehicle.status.value, 'available'),
                 isSelected=is_vehicle_selected,
                 isBelongsToThisCar=0,
-                itemDataList=build_item_list(all_devices, vehicle_id_str),
+                itemDataList=build_item_list(all_devices, vehicle_id_str, user_assignment_map),
             ))
         
         # 如果没有车辆数据，创建一个虚拟车辆来展示设备
@@ -324,12 +400,12 @@ async def get_car_list(
                 status="available",
                 isSelected=False,
                 isBelongsToThisCar=0,
-                itemDataList=build_item_list(all_devices, "default-vehicle"),
+                itemDataList=build_item_list(all_devices, "default-vehicle", user_assignment_map),
             ))
         
         return ApiResponse.success(CarListData(
             carItemDataList=cars,
-            carQuestStatus=_car_data["carQuestStatus"],
+            carQuestStatus=quest_status,
             recommendationId=str(ai_recommendation["id"]) if ai_recommendation else None,
             recommendationStatus=ai_recommendation.get("status") if ai_recommendation else None,
             shortageAlerts=_build_shortage_alerts(ai_recommendation),
@@ -509,7 +585,7 @@ async def car_equipment_check(
                 except Exception as e:
                     logger.warning(f"通知用户失败: {e}")
         
-        _car_data["carQuestStatus"] = "dispatched"
+        # 状态现在从数据库dispatch记录推断，无需设置内存变量
         
         return ApiResponse.success(None, f"装备清单已下发给 {len(request.assignments)} 辆车")
         
@@ -555,7 +631,7 @@ async def equipment_ready(
         all_ready = await dispatch_repo.check_all_ready(event_id)
         
         if all_ready:
-            _car_data["carQuestStatus"] = "ready"
+            # 状态现在从数据库dispatch记录推断，无需设置内存变量
             # 广播所有车辆已准备完成
             await stomp_broker.broadcast_event(
                 "equipment_all_ready",
@@ -661,7 +737,8 @@ async def car_start(
                 f"还有 {summary['total'] - summary['ready_count']} 辆车未准备完成"
             )
         
-        _car_data["carQuestStatus"] = "departed"
+        # 标记已出发到数据库
+        await dispatch_repo.mark_departed(event_id)
         
         # 广播出发消息
         await stomp_broker.broadcast_event(
@@ -721,3 +798,258 @@ async def get_dispatch_status(
     except Exception as e:
         logger.exception(f"获取调度状态失败: {e}")
         return ApiResponse.error(500, f"查询失败: {str(e)}")
+
+
+# ==================== 装备实时分配接口 ====================
+
+@router.post("/car/car-item-add", response_model=ApiResponse[CarItemAddResponse])
+async def add_item_to_car(
+    request: CarItemAddRequest,
+    db: AsyncSession = Depends(get_db),
+    device_service: DeviceService = Depends(get_device_service),
+) -> ApiResponse[CarItemAddResponse]:
+    """
+    添加装备到车辆
+    
+    业务逻辑:
+    1. 验证任务状态（pending/preparing 可修改）
+    2. 检查装备是否已被其他车辆占用
+    3. 创建分配记录
+    """
+    logger.info(f"添加装备到车辆, carId={request.carId}, itemId={request.itemId}")
+    
+    try:
+        # 统一使用活动想定的主事件ID
+        event_id = await _resolve_event_id(db)
+        if not event_id:
+            return ApiResponse.error(40001, "没有活动想定或主事件")
+        
+        # 状态校验
+        current_status = await _get_quest_status(db, event_id)
+        if current_status in ["ready", "departed"]:
+            return ApiResponse.error(40002, "当前状态不允许修改装备")
+        car_id = UUID(request.carId)
+        item_id = UUID(request.itemId)
+        
+        assignment_repo = CarItemAssignmentRepository(db)
+        
+        # 检查是否为专属装备
+        is_exclusive = False
+        if request.itemType == "device":
+            try:
+                device = await device_service.get_by_id(item_id)
+                if device.exclusive_to_vehicle_id:
+                    if str(device.exclusive_to_vehicle_id) != request.carId:
+                        return ApiResponse.error(40003, "该装备为其他车辆的专属装备")
+                    is_exclusive = True
+            except Exception:
+                pass  # 设备不存在时继续
+        
+        # 检查是否已被其他车辆占用（非专属装备）
+        if not is_exclusive:
+            occupied_car = await assignment_repo.check_item_assigned(
+                event_id, item_id, exclude_car_id=car_id
+            )
+            if occupied_car:
+                return ApiResponse.error(40003, f"装备已被其他车辆占用")
+        
+        # 创建分配记录
+        parent_device_id = UUID(request.parentDeviceId) if request.parentDeviceId else None
+        result = await assignment_repo.add_item(
+            event_id=event_id,
+            car_id=car_id,
+            item_id=item_id,
+            item_type=request.itemType,
+            quantity=request.quantity,
+            parent_device_id=parent_device_id,
+            is_exclusive=is_exclusive,
+            assigned_by=None,  # TODO: 从认证获取
+        )
+        
+        return ApiResponse.success(CarItemAddResponse(
+            carId=request.carId,
+            itemId=request.itemId,
+            assignedAt=result["assigned_at"].isoformat(),
+        ), "添加成功")
+        
+    except ValueError as e:
+        return ApiResponse.error(400, f"参数格式错误: {str(e)}")
+    except Exception as e:
+        logger.exception(f"添加装备失败: {e}")
+        return ApiResponse.error(500, f"添加失败: {str(e)}")
+
+
+@router.post("/car/car-item-remove", response_model=ApiResponse[CarItemRemoveResponse])
+async def remove_item_from_car(
+    request: CarItemRemoveRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[CarItemRemoveResponse]:
+    """
+    从车辆移除装备
+    
+    业务逻辑:
+    1. 验证任务状态
+    2. 专属装备不可移除（只能toggle）
+    3. 删除分配记录
+    """
+    logger.info(f"移除装备, carId={request.carId}, itemId={request.itemId}")
+    
+    try:
+        # 统一使用活动想定的主事件ID
+        event_id = await _resolve_event_id(db)
+        if not event_id:
+            return ApiResponse.error(40001, "没有活动想定或主事件")
+        
+        # 状态校验
+        current_status = await _get_quest_status(db, event_id)
+        if current_status in ["ready", "departed"]:
+            return ApiResponse.error(40002, "当前状态不允许修改装备")
+        
+        car_id = UUID(request.carId)
+        item_id = UUID(request.itemId)
+        
+        assignment_repo = CarItemAssignmentRepository(db)
+        
+        removed = await assignment_repo.remove_item(event_id, car_id, item_id)
+        
+        if not removed:
+            return ApiResponse.error(40005, "专属装备不可移除，请使用toggle接口")
+        
+        return ApiResponse.success(CarItemRemoveResponse(
+            carId=request.carId,
+            itemId=request.itemId,
+            returnedToWarehouse=True,
+        ), "移除成功")
+        
+    except ValueError as e:
+        return ApiResponse.error(400, f"参数格式错误: {str(e)}")
+    except Exception as e:
+        logger.exception(f"移除装备失败: {e}")
+        return ApiResponse.error(500, f"移除失败: {str(e)}")
+
+
+@router.post("/car/car-item-toggle", response_model=ApiResponse[CarItemToggleResponse])
+async def toggle_car_item(
+    request: CarItemToggleRequest,
+    db: AsyncSession = Depends(get_db),
+    device_service: DeviceService = Depends(get_device_service),
+) -> ApiResponse[CarItemToggleResponse]:
+    """
+    切换专属装备选中状态
+    
+    业务逻辑:
+    1. 验证任务状态
+    2. 验证装备是否为该车辆的专属装备
+    3. 更新选中状态
+    4. 同步更新关联模块状态
+    """
+    logger.info(f"切换装备选中, carId={request.carId}, itemId={request.itemId}, isSelected={request.isSelected}")
+    
+    try:
+        # 统一使用活动想定的主事件ID
+        event_id = await _resolve_event_id(db)
+        if not event_id:
+            return ApiResponse.error(40001, "没有活动想定或主事件")
+        
+        # 状态校验
+        current_status = await _get_quest_status(db, event_id)
+        if current_status in ["ready", "departed"]:
+            return ApiResponse.error(40002, "当前状态不允许修改装备")
+        
+        car_id = UUID(request.carId)
+        item_id = UUID(request.itemId)
+        
+        # 验证专属装备
+        try:
+            device = await device_service.get_by_id(item_id)
+            if not device.exclusive_to_vehicle_id:
+                return ApiResponse.error(400, "该装备非专属装备，请使用add/remove接口")
+            if str(device.exclusive_to_vehicle_id) != request.carId:
+                return ApiResponse.error(40001, "无权限操作此装备")
+        except Exception:
+            return ApiResponse.error(40006, "装备不存在")
+        
+        assignment_repo = CarItemAssignmentRepository(db)
+        
+        # 确保专属装备存在分配记录
+        await assignment_repo.ensure_exclusive_item(event_id, car_id, item_id)
+        
+        # 更新选中状态
+        await assignment_repo.toggle_item(event_id, car_id, item_id, request.isSelected)
+        
+        # 获取并同步更新模块状态
+        modules_result: List[ModuleToggleItem] = []
+        assignments = await assignment_repo.get_by_event_car(event_id, car_id)
+        for a in assignments:
+            if a["parent_device_id"] == str(item_id) and a["item_type"] == "module":
+                # 设备取消选中时，其模块也取消
+                new_selected = request.isSelected and a["is_selected"]
+                if not request.isSelected:
+                    await assignment_repo.toggle_item(
+                        event_id, car_id, UUID(a["item_id"]), False
+                    )
+                    new_selected = False
+                modules_result.append(ModuleToggleItem(
+                    id=a["item_id"],
+                    isSelected=new_selected,
+                ))
+        
+        return ApiResponse.success(CarItemToggleResponse(
+            carId=request.carId,
+            itemId=request.itemId,
+            isSelected=request.isSelected,
+            modules=modules_result,
+        ), "更新成功")
+        
+    except ValueError as e:
+        return ApiResponse.error(400, f"参数格式错误: {str(e)}")
+    except Exception as e:
+        logger.exception(f"切换装备状态失败: {e}")
+        return ApiResponse.error(500, f"操作失败: {str(e)}")
+
+
+@router.post("/car/car-module-update", response_model=ApiResponse[CarModuleUpdateResponse])
+async def update_car_modules(
+    request: CarModuleUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[CarModuleUpdateResponse]:
+    """
+    批量更新设备模块选中状态
+    
+    业务逻辑:
+    1. 验证任务状态
+    2. 获取设备下所有模块
+    3. 将moduleIds中的模块设为选中，其他设为未选中
+    """
+    logger.info(f"更新模块选中, carId={request.carId}, deviceId={request.deviceId}")
+    
+    try:
+        # 统一使用活动想定的主事件ID
+        event_id = await _resolve_event_id(db)
+        if not event_id:
+            return ApiResponse.error(40001, "没有活动想定或主事件")
+        
+        # 状态校验
+        current_status = await _get_quest_status(db, event_id)
+        if current_status in ["ready", "departed"]:
+            return ApiResponse.error(40002, "当前状态不允许修改装备")
+        
+        car_id = UUID(request.carId)
+        device_id = UUID(request.deviceId)
+        
+        assignment_repo = CarItemAssignmentRepository(db)
+        
+        updated_modules = await assignment_repo.update_modules_selection(
+            event_id, car_id, device_id, request.moduleIds
+        )
+        
+        return ApiResponse.success(CarModuleUpdateResponse(
+            deviceId=request.deviceId,
+            modules=[ModuleToggleItem(id=m["id"], isSelected=m["isSelected"]) for m in updated_modules],
+        ), "更新成功")
+        
+    except ValueError as e:
+        return ApiResponse.error(400, f"参数格式错误: {str(e)}")
+    except Exception as e:
+        logger.exception(f"更新模块状态失败: {e}")
+        return ApiResponse.error(500, f"操作失败: {str(e)}")

@@ -5,6 +5,7 @@
 - 风险区域 CRUD 操作
 - 风险区域变更实时通知（WebSocket 广播）
 - 受影响路线空间查询
+- 集成 early_warning 智能体生成精准预警
 """
 
 from __future__ import annotations
@@ -25,6 +26,20 @@ from .schemas import (
     RiskAreaResponse,
     RiskAreaListResponse,
 )
+
+
+# 风险区域类型到灾害类型的映射
+AREA_TYPE_TO_DISASTER_TYPE = {
+    "fire": "fire",
+    "flooded": "flood",
+    "flood": "flood",
+    "contaminated": "chemical",
+    "landslide": "landslide",
+    "seismic_red": "earthquake",
+    "seismic_orange": "earthquake",
+    "seismic_yellow": "earthquake",
+    # 其他类型默认不触发 early_warning（仅广播）
+}
 
 
 logger = logging.getLogger(__name__)
@@ -157,19 +172,18 @@ class RiskAreaService:
         """
         触发风险区域变更通知
         
-        通过 WebSocket alerts 频道广播，前端根据 requires_decision 字段
-        决定是否弹出指挥决策对话框。
+        两层通知机制：
+        1. WebSocket 广播：通知所有前端客户端（地图刷新、状态更新）
+        2. early_warning 预警：精准通知受影响的指挥员/队长（需要决策响应）
         
         Args:
             risk_area: 风险区域响应对象
             change_type: 变更类型 ("created" | "updated")
             old_risk_level: 旧的风险等级（仅 updated 时传入）
         """
-        # Guard: scenario_id 为 None 时不广播（无法确定目标客户端）
         if risk_area.scenario_id is None:
             logger.warning(
-                f"[风险区域通知] scenario_id 为空，跳过广播: "
-                f"risk_area_id={risk_area.id}"
+                f"[风险区域通知] scenario_id 为空，跳过: risk_area_id={risk_area.id}"
             )
             return
         
@@ -183,7 +197,7 @@ class RiskAreaService:
             # 2. 查询受影响的活动路线
             affected_routes = await self._find_affected_routes(risk_area)
             
-            # 3. 生成可用决策选项（复用现有 ResponseAction: continue/detour/standby）
+            # 3. 生成可用决策选项
             available_actions = self._get_available_actions(risk_area.passage_status)
             
             # 4. 构建通知 payload
@@ -201,7 +215,7 @@ class RiskAreaService:
                 "description": risk_area.description,
             }
             
-            # 5. 通过现有 alerts 频道广播
+            # 5. WebSocket 广播（通知所有前端）
             await broadcast_alert(
                 scenario_id=risk_area.scenario_id,
                 alert_type="risk_area_change",
@@ -209,18 +223,204 @@ class RiskAreaService:
             )
             
             logger.info(
-                f"[风险区域通知] 已广播: change_type={change_type}, "
-                f"risk_level={risk_area.risk_level}, "
-                f"requires_decision={requires_decision}, "
-                f"affected_routes={len(affected_routes)}"
+                f"[风险区域通知] WebSocket广播完成: {change_type}, "
+                f"risk_level={risk_area.risk_level}, affected_routes={len(affected_routes)}"
             )
             
+            # 6. 调用 early_warning 生成精准预警（高风险时）
+            if risk_area.risk_level >= 5:
+                warnings_count = await self._trigger_early_warning(
+                    risk_area=risk_area,
+                    change_type=change_type,
+                )
+                if warnings_count > 0:
+                    logger.info(
+                        f"[风险区域通知] early_warning预警生成: {warnings_count}条"
+                    )
+            
         except Exception as e:
-            # 通知失败不阻塞主流程，仅记录错误
-            logger.error(
-                f"[风险区域通知] 广播失败: {e}",
-                exc_info=True,
+            logger.error(f"[风险区域通知] 失败: {e}", exc_info=True)
+
+    async def _trigger_early_warning(
+        self,
+        risk_area: RiskAreaResponse,
+        change_type: str,
+    ) -> int:
+        """
+        调用 early_warning 智能体核心逻辑，生成精准预警
+        
+        复用 early_warning 的队伍/车辆查询和预警生成逻辑，
+        将预警记录保存到 early_warning_records 表，
+        并通过 WebSocket 精准推送给相关指挥员。
+        
+        Args:
+            risk_area: 风险区域响应对象
+            change_type: 变更类型
+            
+        Returns:
+            生成的预警记录数量
+        """
+        try:
+            from src.agents.early_warning.repository import WarningRepository
+            
+            # 1. 计算风险区域中心点
+            center = self._get_geometry_center(risk_area.geometry_geojson)
+            if not center:
+                logger.warning("[early_warning] 无法计算风险区域中心点")
+                return 0
+            
+            center_lon, center_lat = center
+            
+            # 2. 根据风险等级确定缓冲距离
+            # risk_level 1-4: 1km, 5-6: 2km, 7-8: 3km, 9-10: 5km
+            if risk_area.risk_level >= 9:
+                buffer_m = 5000
+            elif risk_area.risk_level >= 7:
+                buffer_m = 3000
+            elif risk_area.risk_level >= 5:
+                buffer_m = 2000
+            else:
+                buffer_m = 1000
+            
+            # 3. 查询缓冲区内的队伍（基于驻地或当前位置）
+            result = await self.db.execute(text('''
+                SELECT 
+                    t.id::text,
+                    t.name,
+                    t.contact_person,
+                    ST_Distance(
+                        COALESCE(t.current_location, t.base_location)::geography,
+                        ST_SetSRID(ST_MakePoint(:center_lon, :center_lat), 4326)::geography
+                    ) as distance_m
+                FROM operational_v2.rescue_teams_v2 t
+                WHERE COALESCE(t.current_location, t.base_location) IS NOT NULL
+                  AND t.status IN ('standby', 'deployed')
+                  AND ST_DWithin(
+                      COALESCE(t.current_location, t.base_location)::geography,
+                      ST_SetSRID(ST_MakePoint(:center_lon, :center_lat), 4326)::geography,
+                      :buffer_m
+                  )
+                ORDER BY distance_m
+            '''), {
+                "center_lon": center_lon,
+                "center_lat": center_lat,
+                "buffer_m": buffer_m,
+            })
+            affected_teams = result.fetchall()
+            
+            if not affected_teams:
+                logger.info("[early_warning] 未找到受影响的队伍")
+                return 0
+            
+            # 4. 为每个受影响队伍创建预警记录
+            warning_repo = WarningRepository(self.db)
+            warnings_created = 0
+            
+            # 映射风险区域类型到灾害类型
+            disaster_type = AREA_TYPE_TO_DISASTER_TYPE.get(
+                risk_area.area_type, "landslide"
             )
+            
+            for team in affected_teams:
+                team_id, team_name, contact_person, distance_m = team
+                
+                # 确定预警级别
+                if distance_m < 1000:
+                    level = "red"
+                elif distance_m < 2000:
+                    level = "orange"
+                elif distance_m < 3000:
+                    level = "yellow"
+                else:
+                    level = "blue"
+                
+                # 计算预计接触时间（假设30km/h行进速度）
+                estimated_minutes = int(distance_m / (30 * 1000 / 60)) if distance_m > 0 else 0
+                
+                # 生成预警标题和消息
+                level_name = {"red": "红色", "orange": "橙色", "yellow": "黄色", "blue": "蓝色"}.get(level, "黄色")
+                warning_title = f"【风险区域预警-{level_name}】{risk_area.name or '未命名区域'}"
+                warning_message = (
+                    f"队伍「{team_name}」距风险区域{distance_m:.0f}米，"
+                    f"预计{estimated_minutes}分钟后可能接触。"
+                    f"风险等级: {risk_area.risk_level}/10，"
+                    f"通行状态: {self.PASSAGE_STATUS_LABELS.get(risk_area.passage_status, '未知')}"
+                )
+                
+                await warning_repo.create(
+                    disaster_id=risk_area.id,  # 复用 risk_area.id 作为关联
+                    scenario_id=risk_area.scenario_id,
+                    affected_type="team",
+                    affected_id=UUID(team_id),
+                    affected_name=team_name,
+                    notify_target_type="team_leader",
+                    notify_target_name=contact_person,
+                    warning_level=level,
+                    distance_m=distance_m,
+                    estimated_contact_minutes=estimated_minutes,
+                    warning_title=warning_title,
+                    warning_message=warning_message,
+                )
+                warnings_created += 1
+            
+            # 5. 提交事务（预警记录）
+            await self.db.commit()
+            
+            # 6. 推送预警通知到前端
+            if warnings_created > 0:
+                try:
+                    from src.domains.frontend_api.websocket.router import ws_manager
+                    await ws_manager.broadcast_disaster({
+                        "source": "risk_area",
+                        "risk_area_id": str(risk_area.id),
+                        "risk_area_name": risk_area.name,
+                        "disaster_type": disaster_type,
+                        "scenario_id": str(risk_area.scenario_id),
+                        "risk_level": risk_area.risk_level,
+                        "center": {"lon": center_lon, "lat": center_lat},
+                        "warnings_count": warnings_created,
+                        "change_type": change_type,
+                    })
+                except Exception as e:
+                    logger.warning(f"[early_warning] WebSocket推送失败: {e}")
+            
+            return warnings_created
+            
+        except ImportError as e:
+            logger.warning(f"[early_warning] 模块导入失败，跳过预警生成: {e}")
+            return 0
+        except Exception as e:
+            logger.error(f"[early_warning] 预警生成失败: {e}", exc_info=True)
+            return 0
+
+    def _get_geometry_center(self, geometry: Optional[dict]) -> Optional[tuple[float, float]]:
+        """
+        计算 GeoJSON 多边形的中心点
+        
+        Returns:
+            (lon, lat) 元组，或 None
+        """
+        if not geometry:
+            return None
+        
+        try:
+            coords = geometry.get("coordinates", [])
+            if not coords or not coords[0]:
+                return None
+            
+            # 取外环坐标
+            ring = coords[0]
+            if len(ring) < 3:
+                return None
+            
+            # 计算质心（简单平均）
+            lon_sum = sum(p[0] for p in ring)
+            lat_sum = sum(p[1] for p in ring)
+            count = len(ring)
+            
+            return (lon_sum / count, lat_sum / count)
+        except Exception:
+            return None
 
     def _requires_commander_decision(
         self,

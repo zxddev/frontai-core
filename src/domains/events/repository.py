@@ -35,6 +35,7 @@ class EventRepository:
             confirmation_score=data.confirmation_score,
             reported_by=reported_by,
             status="pending",
+            is_main_event=data.is_main_event,
         )
         self.db.add(event)
         await self.db.flush()

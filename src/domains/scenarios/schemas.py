@@ -167,3 +167,29 @@ class ScenarioEnvironmentResponse(BaseModel):
     road_conditions_configured: bool
     communication_configured: bool
     message: str
+
+
+# ==================== 重置想定 ====================
+
+class ScenarioResetRequest(BaseModel):
+    """重置想定请求"""
+    delete_events: bool = Field(True, description="删除事件")
+    delete_entities: bool = Field(True, description="删除地图实体")
+    delete_risk_areas: bool = Field(True, description="删除风险区域")
+    delete_schemes: bool = Field(True, description="删除方案")
+    delete_tasks: bool = Field(True, description="删除任务")
+    delete_messages: bool = Field(True, description="删除消息")
+    delete_ai_decisions: bool = Field(True, description="删除AI决策记录")
+
+
+class ScenarioResetResponse(BaseModel):
+    """重置想定响应"""
+    scenario_id: UUID
+    deleted_events: int
+    deleted_entities: int
+    deleted_risk_areas: int
+    deleted_schemes: int
+    deleted_tasks: int
+    deleted_messages: int
+    deleted_ai_decisions: int
+    message: str

@@ -110,6 +110,28 @@ class EquipmentRecommendationRepository:
         )
         await self.db.commit()
     
+    async def cancel_previous_unconfirmed(self) -> int:
+        """
+        取消所有未确认的推荐（pending/ready状态）
+        
+        在触发新推荐前调用，确保前端只看到最新的推荐结果。
+        
+        Returns:
+            取消的记录数量
+        """
+        result = await self.db.execute(
+            text("""
+                UPDATE operational_v2.equipment_recommendations_v2 SET
+                    status = 'cancelled',
+                    updated_at = NOW()
+                WHERE status IN ('pending', 'ready')
+                RETURNING id
+            """)
+        )
+        cancelled_ids = result.fetchall()
+        await self.db.commit()
+        return len(cancelled_ids)
+    
     async def create_pending(self, event_id: UUID) -> UUID:
         """创建待处理推荐记录"""
         result = await self.db.execute(

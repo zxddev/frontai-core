@@ -10,7 +10,7 @@ import logging
 from typing import Optional, Sequence
 from uuid import UUID
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from geoalchemy2.functions import ST_SetSRID, ST_MakePoint
 
@@ -164,3 +164,171 @@ class ScenarioRepository:
         result = await self._db.execute(query)
         count = result.scalar() or 0
         return count > 0
+    
+    async def reset_scenario_data(
+        self,
+        scenario_id: UUID,
+        delete_events: bool = True,
+        delete_entities: bool = True,
+        delete_risk_areas: bool = True,
+        delete_schemes: bool = True,
+        delete_tasks: bool = True,
+        delete_messages: bool = True,
+        delete_ai_decisions: bool = True,
+    ) -> dict[str, int]:
+        """
+        重置想定关联数据
+        
+        删除想定下的所有事件、实体、风险区域等数据，
+        保留想定本身，方便重新开始仿真。
+        
+        Returns:
+            各类数据删除数量
+        """
+        from sqlalchemy import text
+        
+        result = {
+            "deleted_events": 0,
+            "deleted_entities": 0,
+            "deleted_risk_areas": 0,
+            "deleted_schemes": 0,
+            "deleted_tasks": 0,
+            "deleted_messages": 0,
+            "deleted_ai_decisions": 0,
+        }
+        
+        scenario_id_str = str(scenario_id)
+        
+        # 删除事件（包括event_updates级联删除）
+        if delete_events:
+            sql = text("""
+                WITH deleted AS (
+                    DELETE FROM operational_v2.events_v2 
+                    WHERE scenario_id = :scenario_id
+                    RETURNING id
+                )
+                SELECT COUNT(*) FROM deleted
+            """)
+            res = await self._db.execute(sql, {"scenario_id": scenario_id_str})
+            result["deleted_events"] = res.scalar() or 0
+        
+        # 删除地图实体
+        if delete_entities:
+            sql = text("""
+                WITH deleted AS (
+                    DELETE FROM operational_v2.entities_v2 
+                    WHERE scenario_id = :scenario_id
+                    RETURNING id
+                )
+                SELECT COUNT(*) FROM deleted
+            """)
+            res = await self._db.execute(sql, {"scenario_id": scenario_id_str})
+            result["deleted_entities"] = res.scalar() or 0
+        
+        # 删除风险区域
+        if delete_risk_areas:
+            sql = text("""
+                WITH deleted AS (
+                    DELETE FROM operational_v2.disaster_affected_areas_v2 
+                    WHERE scenario_id = :scenario_id
+                    RETURNING id
+                )
+                SELECT COUNT(*) FROM deleted
+            """)
+            res = await self._db.execute(sql, {"scenario_id": scenario_id_str})
+            result["deleted_risk_areas"] = res.scalar() or 0
+        
+        # 删除方案（包括scheme_versions级联删除）
+        if delete_schemes:
+            sql = text("""
+                WITH deleted AS (
+                    DELETE FROM operational_v2.schemes_v2 
+                    WHERE scenario_id = :scenario_id
+                    RETURNING id
+                )
+                SELECT COUNT(*) FROM deleted
+            """)
+            res = await self._db.execute(sql, {"scenario_id": scenario_id_str})
+            result["deleted_schemes"] = res.scalar() or 0
+        
+        # 删除任务（包括task_assignments级联删除）
+        if delete_tasks:
+            sql = text("""
+                WITH deleted AS (
+                    DELETE FROM operational_v2.tasks_v2 
+                    WHERE scenario_id = :scenario_id
+                    RETURNING id
+                )
+                SELECT COUNT(*) FROM deleted
+            """)
+            res = await self._db.execute(sql, {"scenario_id": scenario_id_str})
+            result["deleted_tasks"] = res.scalar() or 0
+        
+        # 删除消息
+        if delete_messages:
+            sql = text("""
+                WITH deleted AS (
+                    DELETE FROM operational_v2.command_messages_v2 
+                    WHERE scenario_id = :scenario_id
+                    RETURNING id
+                )
+                SELECT COUNT(*) FROM deleted
+            """)
+            res = await self._db.execute(sql, {"scenario_id": scenario_id_str})
+            result["deleted_messages"] = res.scalar() or 0
+        
+        # 删除AI决策记录
+        if delete_ai_decisions:
+            sql = text("""
+                WITH deleted AS (
+                    DELETE FROM operational_v2.ai_decision_logs_v2 
+                    WHERE scenario_id = :scenario_id
+                    RETURNING id
+                )
+                SELECT COUNT(*) FROM deleted
+            """)
+            res = await self._db.execute(sql, {"scenario_id": scenario_id_str})
+            result["deleted_ai_decisions"] = res.scalar() or 0
+        
+        await self._db.commit()
+        
+        logger.info(
+            f"重置想定数据完成: scenario_id={scenario_id}, "
+            f"events={result['deleted_events']}, entities={result['deleted_entities']}, "
+            f"risk_areas={result['deleted_risk_areas']}, schemes={result['deleted_schemes']}, "
+            f"tasks={result['deleted_tasks']}, messages={result['deleted_messages']}, "
+            f"ai_decisions={result['deleted_ai_decisions']}"
+        )
+        
+        return result
+    
+    async def get_main_event_id(self, scenario_id: UUID) -> Optional[UUID]:
+        """获取想定的主事件ID"""
+        result = await self._db.execute(text("""
+            SELECT id FROM operational_v2.events_v2
+            WHERE scenario_id = :scenario_id AND is_main_event = TRUE
+            LIMIT 1
+        """), {"scenario_id": str(scenario_id)})
+        row = result.fetchone()
+        return row.id if row else None
+    
+    async def get_active_main_event_id(self) -> Optional[UUID]:
+        """获取当前活动想定的主事件ID"""
+        result = await self._db.execute(text("""
+            SELECT e.id FROM operational_v2.events_v2 e
+            JOIN operational_v2.scenarios_v2 s ON e.scenario_id = s.id
+            WHERE s.status = 'active' AND e.is_main_event = TRUE
+            LIMIT 1
+        """))
+        row = result.fetchone()
+        return row.id if row else None
+    
+    async def get_active_scenario_id(self) -> Optional[UUID]:
+        """获取当前活动想定的ID"""
+        result = await self._db.execute(text("""
+            SELECT id FROM operational_v2.scenarios_v2
+            WHERE status = 'active'
+            LIMIT 1
+        """))
+        row = result.fetchone()
+        return row.id if row else None

@@ -20,6 +20,7 @@ from .task_dispatch import TaskDispatchAgent, get_task_dispatch_agent
 from .scheme_parsing import SchemeParsingAgent, parse_scheme_text
 from .early_warning import EarlyWarningAgent, get_early_warning_agent
 from .staging_area import StagingAreaAgent, staging_area_graph
+from .frontline_rescue import FrontlineRescueAgent, get_frontline_rescue_agent
 try:
     from .overall_plan import OverallPlanAgent
 except ImportError:
@@ -36,6 +37,8 @@ __all__ = [
     "parse_scheme_text",
     "EarlyWarningAgent",
     "get_early_warning_agent",
+    "FrontlineRescueAgent",
+    "get_frontline_rescue_agent",
     "StagingAreaAgent",
     "staging_area_graph",
     "route_planning_invoke",

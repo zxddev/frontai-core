@@ -91,6 +91,7 @@ class ResourceCalculationInput(BaseModel):
     """Input for MetaGPT resource calculation.
 
     Derived from event data and situational awareness output.
+    支持标记哪些字段是估算值（用于汇报时区分"已确认"和"初步估算"）。
     """
 
     affected_population: int = Field(..., ge=0, description="Total affected population")
@@ -112,6 +113,13 @@ class ResourceCalculationInput(BaseModel):
     )
     disaster_type: str = Field(..., description="Type of disaster (earthquake, flood, etc.)")
     affected_area: str = Field(..., description="Description of affected area")
+    
+    # 估算标记字段（用于汇报时区分已确认/估算）
+    magnitude: float | None = Field(default=None, description="Earthquake magnitude")
+    affected_population_estimated: bool = Field(default=False, description="Is affected_population estimated")
+    buildings_collapsed_estimated: bool = Field(default=False, description="Is buildings_collapsed estimated")
+    buildings_damaged_estimated: bool = Field(default=False, description="Is buildings_damaged estimated")
+    injuries_estimated: bool = Field(default=False, description="Is injured_count estimated")
 
 
 # 模块标题映射 - 按Word模板7章结构（共8个模块，index 0-7）

@@ -114,9 +114,8 @@ class EquipmentDispatchE2ETest:
         console.print("\n[bold cyan]Step 1: GET /api/v1/car/car-item-select-list[/]")
         
         url = f"{self.base_url}/api/v1/car/car-item-select-list"
+        # 前端API不再使用eventId，只需要提供userId
         params = {"userId": self.user_id or "test-user"}
-        if self.event_id:
-            params["eventId"] = self.event_id
         
         try:
             resp = await self.client.get(url, params=params)

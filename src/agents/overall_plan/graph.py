@@ -69,15 +69,19 @@ async def _safe_resource_calculation(state: OverallPlanState) -> dict[str, Any]:
 
 def _safe_human_review(state: OverallPlanState):
     """Wrapper for human_review_node with error handling."""
+    from langgraph.errors import GraphInterrupt
+    from langgraph.types import Command
+    
     if state.get("status") == "failed":
-        from langgraph.types import Command
         return Command(goto="__end__", update={})
     try:
         return human_review_node(state)
+    except GraphInterrupt:
+        # GraphInterrupt是正常的HITL中断，不是错误，直接重新抛出
+        raise
     except Exception as e:
         logger.exception("human_review failed")
         update = _handle_error(state, e, "human_review")
-        from langgraph.types import Command
         return Command(goto="__end__", update=update)
 
 
