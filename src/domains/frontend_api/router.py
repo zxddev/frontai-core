@@ -21,6 +21,7 @@ from .risk_area import router as risk_area_router
 from .overall_plan import router as overall_plan_router
 from .pending_action import pending_action_router
 from .recon_plan.router import router as recon_plan_router
+from .staging_area import router as staging_area_router
 from .websocket import frontend_ws_router
 
 
@@ -56,6 +57,9 @@ frontend_router.include_router(overall_plan_router)
 
 # 无人侦察规划
 frontend_router.include_router(recon_plan_router)
+
+# 驻扎点选址
+frontend_router.include_router(staging_area_router)
 
 # 待处理事件
 frontend_router.include_router(pending_action_router)

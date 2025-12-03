@@ -15,10 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_db
 from src.domains.map_entities.service import EntityService
 from src.domains.frontend_api.common import ApiResponse
+from sqlalchemy import text
+
 from .schemas import (
     UnitSearchRequest, UnitCategory, Unit, UnitLocation,
     UnitSupportRequest, SupportResource,
     MobilizeRequest, MobilizeResponse,
+    BatchTaskStatusRequest, BatchTaskStatusResponse, TeamTaskStatus, CurrentTaskInfo,
 )
 from .service import UnitService
 
@@ -196,3 +199,90 @@ async def mobilize_vehicles(
     except Exception as e:
         logger.exception(f"车辆动员失败: {e}")
         return ApiResponse.error(500, f"车辆动员失败: {str(e)}")
+
+
+@router.post("/batch-task-status", response_model=ApiResponse[BatchTaskStatusResponse])
+async def get_batch_task_status(
+    request: BatchTaskStatusRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse[BatchTaskStatusResponse]:
+    """
+    批量查询队伍任务执行状态
+    
+    根据队伍ID列表，查询每个队伍当前是否有执行中的任务，
+    返回任务ID、任务名称、执行状态和进度。
+    """
+    logger.info(f"批量查询队伍任务状态, teamIds={request.teamIds}")
+    
+    if not request.teamIds:
+        return ApiResponse.success(BatchTaskStatusResponse(items=[]))
+    
+    try:
+        # 转换为 UUID 列表
+        team_uuids = []
+        for tid in request.teamIds:
+            try:
+                team_uuids.append(UUID(tid))
+            except ValueError:
+                logger.warning(f"无效的队伍ID格式: {tid}")
+                continue
+        
+        if not team_uuids:
+            return ApiResponse.success(BatchTaskStatusResponse(items=[]))
+        
+        # 查询队伍基本信息
+        team_info_sql = text("""
+            SELECT id, name FROM operational_v2.rescue_teams_v2
+            WHERE id = ANY(:team_ids)
+        """)
+        team_result = await db.execute(team_info_sql, {"team_ids": team_uuids})
+        team_map = {str(row[0]): row[1] for row in team_result.fetchall()}
+        
+        # 查询队伍当前执行的任务（pending/accepted/in_progress 状态）
+        task_sql = text("""
+            SELECT 
+                ta.assignee_id as team_id,
+                t.id as task_id,
+                t.title as task_name,
+                ta.status as assignment_status,
+                ta.progress_percent,
+                ta.assigned_at
+            FROM operational_v2.task_assignments_v2 ta
+            JOIN operational_v2.tasks_v2 t ON ta.task_id = t.id
+            WHERE ta.assignee_type = 'team'
+              AND ta.assignee_id = ANY(:team_ids)
+              AND ta.status IN ('pending', 'accepted', 'in_progress')
+            ORDER BY ta.assigned_at DESC
+        """)
+        task_result = await db.execute(task_sql, {"team_ids": team_uuids})
+        
+        # 构建队伍任务映射（每个队伍只取最新的一个任务）
+        team_task_map: dict[str, CurrentTaskInfo] = {}
+        for row in task_result.fetchall():
+            team_id_str = str(row[0])
+            if team_id_str not in team_task_map:
+                team_task_map[team_id_str] = CurrentTaskInfo(
+                    taskId=str(row[1]),
+                    taskName=row[2] or "",
+                    taskStatus=row[3] or "pending",
+                    progressPercent=row[4] or 0,
+                    assignedAt=row[5].isoformat() if row[5] else None,
+                )
+        
+        # 构建响应
+        items = []
+        for tid in request.teamIds:
+            team_name = team_map.get(tid, "")
+            current_task = team_task_map.get(tid)
+            items.append(TeamTaskStatus(
+                teamId=tid,
+                teamName=team_name,
+                hasTask=current_task is not None,
+                currentTask=current_task,
+            ))
+        
+        return ApiResponse.success(BatchTaskStatusResponse(items=items))
+        
+    except Exception as e:
+        logger.exception(f"批量查询队伍任务状态失败: {e}")
+        return ApiResponse.error(500, f"查询失败: {str(e)}")

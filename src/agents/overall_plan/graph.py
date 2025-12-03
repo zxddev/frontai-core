@@ -67,24 +67,6 @@ async def _safe_resource_calculation(state: OverallPlanState) -> dict[str, Any]:
         return _handle_error(state, e, "resource_calculation")
 
 
-def _safe_human_review(state: OverallPlanState):
-    """Wrapper for human_review_node with error handling."""
-    from langgraph.errors import GraphInterrupt
-    from langgraph.types import Command
-    
-    if state.get("status") == "failed":
-        return Command(goto="__end__", update={})
-    try:
-        return human_review_node(state)
-    except GraphInterrupt:
-        # GraphInterrupt是正常的HITL中断，不是错误，直接重新抛出
-        raise
-    except Exception as e:
-        logger.exception("human_review failed")
-        update = _handle_error(state, e, "human_review")
-        return Command(goto="__end__", update=update)
-
-
 async def _safe_document_generation(state: OverallPlanState) -> dict[str, Any]:
     """Wrapper for document_generation_node with error handling."""
     if state.get("status") == "failed":
@@ -123,7 +105,8 @@ def build_overall_plan_graph(
     graph.add_node("load_context", _safe_load_context)
     graph.add_node("situational_awareness", _safe_situational_awareness)
     graph.add_node("resource_calculation", _safe_resource_calculation)
-    graph.add_node("human_review", _safe_human_review)
+    # human_review 直接注册，不使用包装器，避免破坏 LangGraph interrupt 上下文
+    graph.add_node("human_review", human_review_node)
     graph.add_node("document_generation", _safe_document_generation)
 
     # Define edges

@@ -28,6 +28,13 @@ def human_review_node(
     Returns:
         Command指向document_generation或__end__
     """
+    import sys
+    
+    # 前置节点失败时直接结束，不触发interrupt
+    if state.get("status") == "failed":
+        logger.warning("Skipping human_review due to previous failure")
+        return Command(goto="__end__", update={})
+
     event_id = state.get("event_id", "unknown")
     task_id = state.get("task_id", "unknown")
     logger.info(f"Entering human review for event {event_id}, task {task_id}")
@@ -35,7 +42,21 @@ def human_review_node(
     # 准备审核数据
     review_data = _prepare_review_data(state)
 
-    # 中断等待人工输入
+    # Python < 3.11 在异步上下文中 interrupt 不可用（contextvar 传播问题）
+    # 直接标记为 awaiting_approval 状态，让 router 轮询获取 modules
+    if sys.version_info < (3, 11):
+        logger.info(f"Python {sys.version_info.major}.{sys.version_info.minor} < 3.11, "
+                    "skipping interrupt, returning modules directly")
+        return Command(
+            goto="__end__",
+            update={
+                "status": "awaiting_approval",
+                "current_phase": "human_review_ready",
+                "review_data": review_data,
+            }
+        )
+
+    # Python >= 3.11 使用正常的 interrupt 流程
     review_result = interrupt(review_data)
 
     # 处理审核结果

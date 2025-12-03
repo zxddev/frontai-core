@@ -72,3 +72,30 @@ class MobilizeResponse(BaseModel):
     """车辆动员响应"""
     mobilized_count: int
     teams: list[MobilizedTeamSummary]
+
+
+class BatchTaskStatusRequest(BaseModel):
+    """批量查询队伍任务状态请求"""
+    teamIds: list[str] = Field(..., description="队伍ID列表")
+
+
+class CurrentTaskInfo(BaseModel):
+    """当前执行任务信息"""
+    taskId: str = Field(..., description="任务ID")
+    taskName: str = Field(..., description="任务名称")
+    taskStatus: str = Field(..., description="任务状态")
+    progressPercent: int = Field(0, description="执行进度(0-100)")
+    assignedAt: Optional[str] = Field(None, description="分配时间")
+
+
+class TeamTaskStatus(BaseModel):
+    """队伍任务状态"""
+    teamId: str = Field(..., description="队伍ID")
+    teamName: str = Field("", description="队伍名称")
+    hasTask: bool = Field(False, description="是否有执行中的任务")
+    currentTask: Optional[CurrentTaskInfo] = Field(None, description="当前任务信息")
+
+
+class BatchTaskStatusResponse(BaseModel):
+    """批量查询队伍任务状态响应"""
+    items: list[TeamTaskStatus] = Field(default_factory=list)
