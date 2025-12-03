@@ -124,6 +124,13 @@ def parse_disaster_description(
 2. 被困人数如果不确定，给出保守估计
 3. 严重程度根据灾害规模、伤亡情况、影响范围综合判断
 
+关键词识别规则（非常重要）：
+- "被困"、"困住"、"失联"、"失踪"、"需要救援" → has_trapped_persons=true
+- "被埋"、"掩埋"、"压埋" → has_trapped_persons=true 且推断有建筑倒塌或山体滑坡
+- "X人被困/被埋/失联" → estimated_trapped=X
+- 山区、山体、滑坡、泥石流相关 → disaster_type="landslide"
+- 任何提到有人需要救援的情况 → has_trapped_persons=true
+
 {format_instructions}"""
 
     human_prompt = """请分析以下灾情描述：
@@ -386,6 +393,11 @@ async def explain_scheme_async(
 - 必须详细、准确、可操作，不能遗漏关键信息
 - 每个字段都要尽量详细，给指挥员足够的信息
 
+【任务表达要求】
+- 必须使用任务的中文名称，禁止使用任务编码（如EM06、EM01等）
+- 例如：使用"埋压人员生命探测"而不是"EM06"
+- 例如：使用"无人机广域侦察"而不是"EM01"
+
 【输出要求】
 1. summary: 100-200字，概述整体救援策略，包括主要目标和关键行动
 2. situation_assessment: 详细分析当前态势，包括灾情严重程度、时间紧迫性、主要威胁
@@ -433,7 +445,13 @@ async def explain_scheme_async(
     if task_sequence:
         task_summaries = []
         for t in task_sequence[:10]:
-            task_summaries.append(f"- {t.get('task_id')}: {t.get('task_name')} (依赖:{t.get('depends_on', [])})")
+            task_name = t.get('task_name', '未知任务')
+            depends = t.get('depends_on', [])
+            depends_str = '、'.join(depends) if depends else '无'
+            priority = t.get('priority', 'medium')
+            priority_map = {'critical': '紧急', 'high': '高', 'medium': '中', 'low': '低'}
+            priority_cn = priority_map.get(priority, '中')
+            task_summaries.append(f"- {task_name}（优先级: {priority_cn}，前置任务: {depends_str}）")
         task_sequence_info = "\n".join(task_summaries)
     
     chain = prompt | llm | parser

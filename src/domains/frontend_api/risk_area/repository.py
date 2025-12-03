@@ -97,14 +97,18 @@ class RiskAreaRepository:
 
     async def list_by_scenario(
         self,
-        scenario_id: UUID,
+        scenario_id: Optional[UUID] = None,
         area_type: Optional[str] = None,
         min_risk_level: Optional[int] = None,
         passage_status: Optional[str] = None,
     ) -> list[dict]:
-        """获取想定下的风险区域列表"""
-        conditions = ["scenario_id = :scenario_id"]
-        params: dict = {"scenario_id": str(scenario_id)}
+        """获取风险区域列表，scenario_id 为 None 时返回所有数据"""
+        conditions: list[str] = []
+        params: dict = {}
+
+        if scenario_id is not None:
+            conditions.append("scenario_id = :scenario_id")
+            params["scenario_id"] = str(scenario_id)
 
         if area_type:
             conditions.append("area_type = :area_type")
@@ -118,7 +122,7 @@ class RiskAreaRepository:
             conditions.append("passage_status = :passage_status")
             params["passage_status"] = passage_status
 
-        where_clause = " AND ".join(conditions)
+        where_clause = " AND ".join(conditions) if conditions else "1=1"
 
         sql = text(f"""
             SELECT

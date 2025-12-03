@@ -240,14 +240,14 @@ async def multi_rescue_scheme(
     
     业务逻辑：
     1. 查询所有confirmed状态且没有任务分配的事件
-    2. 排除earthquake类型（地震主震信息）
+    2. 排除earthquake、rainstorm、flood等自然灾害类型（只关注具体救援点）
     3. 对每个事件查询已有方案或生成默认方案描述
     4. 返回救援点列表供前端展示
     """
     logger.info(f"获取一线救援行动方案, scenarioId={scenarioId}")
 
-    if not scenarioId:
-        return ApiResponse.error(400, "scenarioId is required")
+    # if not scenarioId:
+    #     return ApiResponse.error(400, "scenarioId is required")
 
     try:
         agent = get_frontline_rescue_agent()
@@ -285,11 +285,13 @@ async def multi_rescue_scheme(
         origin = SOURCE_TYPE_MAP.get(str(ev.get("source_type")), "系统")
         time_str = str(ev.get("reported_at") or datetime.now().isoformat())
 
-        base_schema = _generate_default_scheme(
-            event_type=str(ev.get("event_type", "other")),
-            title=str(ev.get("title", "")),
-            estimated_victims=int(ev.get("estimated_victims") or 0),
-        )
+        # base_schema = _generate_default_scheme(
+        #     event_type=str(ev.get("event_type", "other")),
+        #     title=str(ev.get("title", "")),
+        #     estimated_victims=int(ev.get("estimated_victims") or 0),
+        # )
+        # 不返回默认方案，由前端通过AI接口查询
+        base_schema = ""
 
         score = float(ev.get("score", 0.0) or 0.0)
         reasons = ev.get("reasons") or []
@@ -297,7 +299,10 @@ async def multi_rescue_scheme(
         if reasons:
             header_lines.append("原因:")
             header_lines.extend([f"- {r}" for r in reasons])
-        schema_text = "\n".join(header_lines) + "\n\n" + base_schema
+        
+        # 如果没有base_schema，schema_text也留空，让前端去轮询
+        # schema_text = "\n".join(header_lines) + "\n\n" + base_schema
+        schema_text = ""
 
         rescue_point = RescuePoint(
             level=level,
@@ -309,6 +314,8 @@ async def multi_rescue_scheme(
             image="",
             schema_=schema_text,
             description=str(ev.get("description", "")),
+            # 返回事件ID供前端查询AI状态
+            id=str(ev.get("id", "")), 
         )
         rescue_points.append(rescue_point)
 
@@ -345,8 +352,8 @@ async def multi_rescue_task(
     """
     logger.info(f"生成一线救援行动任务, scenarioId={scenarioId}")
 
-    if not scenarioId:
-        return ApiResponse.error(400, "scenarioId is required")
+    # if not scenarioId:
+    #     return ApiResponse.error(400, "scenarioId is required")
 
     try:
         agent = get_frontline_rescue_agent()

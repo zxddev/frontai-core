@@ -148,6 +148,19 @@ async def configure_environment(
     return await service.configure_environment(scenario_id, data)
 
 
+@router.post("/reset", response_model=ScenarioResetResponse)
+async def reset_active_scenario(
+    service: ScenarioService = Depends(get_service),
+) -> ScenarioResetResponse:
+    """
+    重置当前活动想定数据
+    
+    自动获取当前 active 状态的想定，删除其所有关联数据。
+    不需要传参，默认删除所有事件、实体、风险区域、方案、任务等。
+    """
+    return await service.reset_active()
+
+
 @router.post("/{scenario_id}/reset", response_model=ScenarioResetResponse)
 async def reset_scenario(
     scenario_id: UUID,
@@ -155,7 +168,7 @@ async def reset_scenario(
     service: ScenarioService = Depends(get_service),
 ) -> ScenarioResetResponse:
     """
-    重置想定数据
+    重置指定想定数据
     
     删除想定下的所有事件、实体、风险区域、方案、任务等数据，
     保留想定本身，方便重新开始仿真推演。

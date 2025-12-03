@@ -35,11 +35,11 @@ class FrontlineRescueAgent:
         self.graph = build_frontline_rescue_graph(self.checkpointer)
         logger.info("FrontlineRescueAgent initialized")
 
-    async def plan(self, scenario_id: str) -> dict[str, Any]:
+    async def plan(self, scenario_id: str | None = None) -> dict[str, Any]:
         """Run the frontline workflow once for a given scenario.
 
         Args:
-            scenario_id: 想定 ID
+            scenario_id: 想定 ID (Optional)
 
         Returns:
             包含 prioritized_events 等字段的状态字典。

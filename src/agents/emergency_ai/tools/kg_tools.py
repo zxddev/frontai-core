@@ -152,7 +152,11 @@ def query_trr_rules(
         }
         rules.append(rule)
     
-    logger.info("TRR规则查询完成", extra={"rules_count": len(rules)})
+    logger.info(f"【Neo4j-TRR规则】查询{disaster_type}类型，返回{len(rules)}条规则:")
+    for rule in rules:
+        logger.info(f"  - {rule['rule_id']}: {rule['rule_name']} (优先级={rule['priority']}, 权重={rule['weight']})")
+        logger.info(f"    触发任务: {[t['task_code'] for t in rule['triggered_tasks']]}")
+        logger.info(f"    需要能力: {[c['capability_code'] for c in rule['required_capabilities']]}")
     return rules
 
 
@@ -317,3 +321,462 @@ async def query_task_dependencies_async(
     return query_task_dependencies.invoke({
         "task_codes": task_codes,
     })
+
+
+# ============================================================================
+# HTN分解专用查询函数（基于Scene/TaskChain/MetaTask节点）
+# ============================================================================
+
+@tool
+def query_scene_by_disaster(
+    disaster_type: str,
+    conditions: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """
+    根据灾情条件查询匹配的场景。
+    
+    从Neo4j的Scene节点中查询与灾情匹配的场景代码，
+    基于Scene.triggers数组进行条件匹配。
+    
+    Args:
+        disaster_type: 灾害类型 (earthquake/flood/fire/hazmat等)
+        conditions: 灾情条件字典，包含:
+            - has_secondary_fire: 是否有次生火灾
+            - has_hazmat_leak: 是否有危化品泄漏
+            - has_building_collapse: 是否有建筑倒塌
+            
+    Returns:
+        匹配的场景列表，每个包含:
+        - scene_code: 场景代码 (S1/S2/S3/S4/S5)
+        - scene_name: 场景名称
+        - description: 场景描述
+        - priority_objectives: 优先目标列表
+    """
+    logger.info(
+        "[KG] 查询场景",
+        extra={"disaster_type": disaster_type, "conditions": conditions}
+    )
+    
+    driver = _get_neo4j_driver()
+    
+    # 场景匹配逻辑：根据灾害类型和条件确定场景
+    # S1: 地震主灾, S2: 次生火灾, S3: 危化品泄漏, S4: 山洪泥石流, S5: 暴雨内涝
+    cypher = """
+    MATCH (s:Scene)
+    WHERE 
+        // S1: 地震主灾
+        (s.code = 'S1' AND $disaster_type IN ['earthquake', '地震'])
+        // S2: 次生火灾或独立火灾
+        OR (s.code = 'S2' AND ($has_secondary_fire = true OR $disaster_type IN ['fire', '火灾']))
+        // S3: 危化品泄漏
+        OR (s.code = 'S3' AND ($has_hazmat_leak = true OR $disaster_type IN ['hazmat', '危化品']))
+        // S4: 山洪泥石流
+        OR (s.code = 'S4' AND $disaster_type IN ['flood', 'landslide', 'debris_flow', '洪水', '泥石流', '滑坡'])
+        // S5: 暴雨内涝
+        OR (s.code = 'S5' AND $disaster_type IN ['waterlogging', '内涝', '暴雨'])
+    RETURN 
+        s.code AS scene_code,
+        s.name AS scene_name,
+        s.description AS description,
+        s.priority_objectives AS priority_objectives,
+        s.typical_tasks AS typical_tasks
+    ORDER BY s.code
+    """
+    
+    params = {
+        "disaster_type": disaster_type.lower() if disaster_type else "earthquake",
+        "has_secondary_fire": conditions.get("has_secondary_fire", False),
+        "has_hazmat_leak": conditions.get("has_hazmat_leak", False),
+    }
+    
+    try:
+        with driver.session() as session:
+            result = session.run(cypher, params)
+            records = list(result)
+    except Exception as e:
+        logger.error("[KG] 场景查询失败", extra={"error": str(e)})
+        raise RuntimeError(f"Neo4j场景查询失败: {e}") from e
+    
+    scenes: List[Dict[str, Any]] = []
+    for record in records:
+        scene = {
+            "scene_code": record["scene_code"],
+            "scene_name": record["scene_name"],
+            "description": record["description"],
+            "priority_objectives": record["priority_objectives"] or [],
+            "typical_tasks": record["typical_tasks"] or [],
+        }
+        scenes.append(scene)
+    
+    logger.info(f"【Neo4j-场景识别】查询{disaster_type}类型，条件={conditions}，匹配{len(scenes)}个场景:")
+    for scene in scenes:
+        logger.info(f"  - {scene['scene_code']}: {scene['scene_name']}")
+        logger.info(f"    典型任务: {scene.get('typical_tasks', [])}")
+    return scenes
+
+
+@tool
+def query_task_chain(
+    scene_code: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    根据场景代码查询任务链配置。
+    
+    从Neo4j查询Scene→ACTIVATES→TaskChain→INCLUDES→MetaTask链路，
+    返回完整的任务链配置包括任务序列和依赖关系。
+    
+    Args:
+        scene_code: 场景代码 (S1/S2/S3/S4/S5)
+        
+    Returns:
+        任务链配置字典，包含:
+        - chain_id: 任务链ID
+        - chain_name: 任务链名称
+        - description: 任务链描述
+        - tasks: 任务列表（按sequence排序）
+        - parallel_groups: 并行任务组（从MetaTask的typical_scenes推断）
+    """
+    logger.info("[KG] 查询任务链", extra={"scene_code": scene_code})
+    
+    driver = _get_neo4j_driver()
+    
+    cypher = """
+    MATCH (s:Scene {code: $scene_code})-[:ACTIVATES]->(tc:TaskChain)
+    MATCH (tc)-[inc:INCLUDES]->(m:MetaTask)
+    WITH tc, m, inc.sequence AS seq
+    ORDER BY seq
+    WITH tc, collect({
+        task_id: m.id,
+        task_name: m.name,
+        category: m.category,
+        phase: m.phase,
+        duration_min: m.duration_min,
+        duration_max: m.duration_max,
+        required_capabilities: m.required_capabilities,
+        risk_level: m.risk_level,
+        sequence: seq
+    }) AS tasks
+    RETURN 
+        tc.id AS chain_id,
+        tc.name AS chain_name,
+        tc.description AS description,
+        tc.task_sequence AS task_sequence,
+        tasks
+    """
+    
+    try:
+        with driver.session() as session:
+            result = session.run(cypher, {"scene_code": scene_code})
+            record = result.single()
+    except Exception as e:
+        logger.error("[KG] 任务链查询失败", extra={"error": str(e), "scene_code": scene_code})
+        raise RuntimeError(f"Neo4j任务链查询失败: {e}") from e
+    
+    if record is None:
+        logger.warning("[KG] 未找到场景对应的任务链", extra={"scene_code": scene_code})
+        return None
+    
+    chain = {
+        "chain_id": record["chain_id"],
+        "chain_name": record["chain_name"],
+        "description": record["description"],
+        "task_sequence": record["task_sequence"] or [],
+        "tasks": record["tasks"],
+    }
+    
+    logger.info(f"【Neo4j-任务链】场景{scene_code}的任务链:")
+    logger.info(f"  - 链ID: {chain['chain_id']}, 名称: {chain['chain_name']}")
+    logger.info(f"  - 任务序列: {chain.get('task_sequence', [])}")
+    logger.info(f"  - 包含{len(chain['tasks'])}个任务: {[t.get('task_id') for t in chain['tasks']]}")
+    return chain
+
+
+@tool
+def query_metatask_dependencies(
+    task_ids: List[str],
+) -> Dict[str, List[str]]:
+    """
+    查询MetaTask之间的依赖关系。
+    
+    从Neo4j查询指定MetaTask节点之间的DEPENDS_ON关系，
+    返回依赖关系字典用于拓扑排序。
+    
+    Args:
+        task_ids: MetaTask的ID列表 (如 ["EM01", "EM06", "EM10"])
+        
+    Returns:
+        依赖关系字典: {task_id: [depends_on_task_ids]}
+        示例: {"EM10": ["EM11"], "EM11": ["EM06"], "EM06": ["EM03"]}
+    """
+    logger.info("[KG] 查询MetaTask依赖", extra={"task_ids": task_ids})
+    
+    driver = _get_neo4j_driver()
+    
+    cypher = """
+    MATCH (m1:MetaTask)-[:DEPENDS_ON]->(m2:MetaTask)
+    WHERE m1.id IN $task_ids AND m2.id IN $task_ids
+    RETURN m1.id AS task_id, collect(DISTINCT m2.id) AS depends_on
+    """
+    
+    try:
+        with driver.session() as session:
+            result = session.run(cypher, {"task_ids": task_ids})
+            records = list(result)
+    except Exception as e:
+        logger.error("[KG] MetaTask依赖查询失败", extra={"error": str(e)})
+        raise RuntimeError(f"Neo4j MetaTask依赖查询失败: {e}") from e
+    
+    dependencies: Dict[str, List[str]] = {}
+    for record in records:
+        task_id = record["task_id"]
+        deps = record["depends_on"]
+        if deps:
+            dependencies[task_id] = deps
+    
+    logger.info(f"【Neo4j-任务依赖】查询{len(task_ids)}个任务的依赖关系:")
+    for task_id, deps in dependencies.items():
+        logger.info(f"  - {task_id} 依赖于: {deps}")
+    logger.info(f"  共{len(dependencies)}个任务有前置依赖")
+    return dependencies
+
+
+@tool
+def query_metatask_details(
+    task_ids: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """
+    查询MetaTask的详细信息。
+    
+    Args:
+        task_ids: MetaTask的ID列表
+        
+    Returns:
+        任务详情字典: {task_id: {name, category, phase, ...}}
+    """
+    logger.info("[KG] 查询MetaTask详情", extra={"task_ids": task_ids})
+    
+    driver = _get_neo4j_driver()
+    
+    cypher = """
+    MATCH (m:MetaTask)
+    WHERE m.id IN $task_ids
+    RETURN 
+        m.id AS task_id,
+        m.name AS name,
+        m.category AS category,
+        m.phase AS phase,
+        m.precondition AS precondition,
+        m.effect AS effect,
+        m.duration_min AS duration_min,
+        m.duration_max AS duration_max,
+        m.required_capabilities AS required_capabilities,
+        m.risk_level AS risk_level,
+        m.outputs AS outputs
+    """
+    
+    try:
+        with driver.session() as session:
+            result = session.run(cypher, {"task_ids": task_ids})
+            records = list(result)
+    except Exception as e:
+        logger.error("[KG] MetaTask详情查询失败", extra={"error": str(e)})
+        raise RuntimeError(f"Neo4j MetaTask详情查询失败: {e}") from e
+    
+    details: Dict[str, Dict[str, Any]] = {}
+    for record in records:
+        task_id = record["task_id"]
+        details[task_id] = {
+            "name": record["name"],
+            "category": record["category"],
+            "phase": record["phase"],
+            "precondition": record["precondition"],
+            "effect": record["effect"],
+            "duration_min": record["duration_min"],
+            "duration_max": record["duration_max"],
+            "required_capabilities": record["required_capabilities"] or [],
+            "risk_level": record["risk_level"],
+            "outputs": record["outputs"] or [],
+        }
+    
+    logger.info(f"【Neo4j-MetaTask详情】查询完成，共{len(details)}个任务:")
+    for task_id, detail in details.items():
+        caps = detail.get("required_capabilities", [])
+        logger.info(f"  - {task_id}: 名称={detail.get('name', '未知')}, 能力需求={caps}")
+    return details
+
+
+# ============================================================================
+# HTN分解专用异步版本
+# ============================================================================
+
+async def query_scene_by_disaster_async(
+    disaster_type: str,
+    conditions: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """异步版本的场景查询"""
+    return query_scene_by_disaster.invoke({
+        "disaster_type": disaster_type,
+        "conditions": conditions,
+    })
+
+
+async def query_task_chain_async(
+    scene_code: str,
+) -> Optional[Dict[str, Any]]:
+    """异步版本的任务链查询"""
+    return query_task_chain.invoke({
+        "scene_code": scene_code,
+    })
+
+
+async def query_metatask_dependencies_async(
+    task_ids: List[str],
+) -> Dict[str, List[str]]:
+    """异步版本的MetaTask依赖查询"""
+    return query_metatask_dependencies.invoke({
+        "task_ids": task_ids,
+    })
+
+
+async def query_metatask_details_async(
+    task_ids: List[str],
+) -> Dict[str, Dict[str, Any]]:
+    """异步版本的MetaTask详情查询"""
+    return query_metatask_details.invoke({
+        "task_ids": task_ids,
+    })
+
+
+# ============================================================================
+# 战略层查询函数
+# ============================================================================
+
+def query_rule_domains(rule_ids: List[str]) -> List[Dict[str, Any]]:
+    """
+    查询规则的任务域属性
+    
+    Args:
+        rule_ids: 规则ID列表
+        
+    Returns:
+        规则域信息列表
+    """
+    driver = _get_neo4j_driver()
+    
+    query = """
+        MATCH (r:TRRRule)
+        WHERE r.rule_id IN $rule_ids
+        RETURN r.rule_id AS rule_id, r.domain AS domain
+    """
+    
+    with driver.session() as session:
+        result = session.run(query, {"rule_ids": rule_ids})
+        return [dict(record) for record in result]
+
+
+async def query_rule_domains_async(rule_ids: List[str]) -> List[Dict[str, Any]]:
+    """异步版本的规则域查询"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, query_rule_domains, rule_ids)
+
+
+def query_phase_priorities(phase_id: str) -> List[Dict[str, Any]]:
+    """
+    查询阶段的任务域优先级
+    
+    Args:
+        phase_id: 阶段ID (initial/golden/intensive/recovery)
+        
+    Returns:
+        优先级列表
+    """
+    driver = _get_neo4j_driver()
+    
+    query = """
+        MATCH (p:DisasterPhase {phase_id: $phase_id})-[r:PRIORITY_ORDER]->(d:TaskDomain)
+        RETURN d.domain_id AS domain_id, d.name AS name, d.description AS description, r.rank AS rank
+        ORDER BY r.rank
+    """
+    
+    with driver.session() as session:
+        result = session.run(query, {"phase_id": phase_id})
+        return [dict(record) for record in result]
+
+
+def query_phase_info(phase_id: str) -> Optional[Dict[str, Any]]:
+    """查询阶段信息"""
+    driver = _get_neo4j_driver()
+    
+    query = """
+        MATCH (p:DisasterPhase {phase_id: $phase_id})
+        RETURN p.phase_id AS phase_id, p.name AS name, p.hours_start AS hours_start, p.hours_end AS hours_end
+    """
+    
+    with driver.session() as session:
+        result = session.run(query, {"phase_id": phase_id})
+        record = result.single()
+        return dict(record) if record else None
+
+
+async def query_phase_priorities_async(phase_id: str) -> List[Dict[str, Any]]:
+    """异步版本的阶段优先级查询"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, query_phase_priorities, phase_id)
+
+
+async def query_phase_info_async(phase_id: str) -> Optional[Dict[str, Any]]:
+    """异步版本的阶段信息查询"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, query_phase_info, phase_id)
+
+
+def query_modules_by_capabilities(capability_codes: List[str]) -> List[Dict[str, Any]]:
+    """
+    根据能力需求查询推荐模块
+    
+    Args:
+        capability_codes: 能力编码列表
+        
+    Returns:
+        模块信息列表（按能力匹配度排序）
+    """
+    driver = _get_neo4j_driver()
+    
+    query = """
+        MATCH (m:RescueModule)-[p:PROVIDES]->(c:Capability)
+        WHERE c.code IN $capability_codes
+        WITH m, COLLECT({
+            capability_code: c.code,
+            capability_name: c.name,
+            level: p.level,
+            quantity: p.quantity
+        }) AS provided_caps, COUNT(DISTINCT c.code) AS match_count
+        RETURN 
+            m.module_id AS module_id,
+            m.name AS module_name,
+            m.personnel AS personnel,
+            m.dogs AS dogs,
+            m.vehicles AS vehicles,
+            m.description AS description,
+            provided_caps,
+            match_count,
+            toFloat(match_count) / toFloat($total_required) AS match_score
+        ORDER BY match_score DESC, match_count DESC
+    """
+    
+    with driver.session() as session:
+        result = session.run(query, {
+            "capability_codes": capability_codes,
+            "total_required": len(capability_codes) if capability_codes else 1,
+        })
+        return [dict(record) for record in result]
+
+
+async def query_modules_by_capabilities_async(capability_codes: List[str]) -> List[Dict[str, Any]]:
+    """异步版本的模块能力查询"""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, query_modules_by_capabilities, capability_codes)

@@ -151,6 +151,13 @@ async def apply_rules(state: EmergencyAIState) -> Dict[str, Any]:
                 if cap_code and cap_code not in all_capabilities:
                     all_capabilities.append(cap_code)
     
+    # 打印规则匹配结果
+    logger.info(f"【规则匹配】从{len(kg_rules)}条规则中匹配到{len(matched_rules)}条:")
+    for rule in matched_rules:
+        logger.info(f"  - {rule['rule_id']}: {rule['rule_name']} (原因: {rule['match_reason']})")
+        logger.info(f"    触发任务: {rule['triggered_tasks']}")
+        logger.info(f"    需要能力: {rule['required_capabilities']}")
+    
     # 去重并排序任务
     seen_tasks = set()
     unique_tasks = []

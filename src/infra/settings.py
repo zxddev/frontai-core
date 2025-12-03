@@ -32,6 +32,10 @@ class Settings:
     neo4j_password: str  # Neo4j 密码
     postgres_dsn: str  # Postgres 连接串
     amap_api_key: str  # 高德地图Web服务API Key
+    # 语音指挥Agent配置
+    semantic_router_embedding_model: str  # 语义路由embedding模型（中文优化）
+    semantic_router_embedding_base_url: str  # 语义路由embedding服务地址
+    robot_command_enabled: bool  # 机器人控制功能开关
 
 
 def _require_env(name: str, default: Optional[str] = None) -> str:
@@ -87,6 +91,16 @@ def load_settings() -> Settings:
     neo4j_password = pick("NEO4J_PASSWORD", "your-neo4j-password")  # Neo4j 密码
     postgres_dsn = pick("POSTGRES_DSN", "postgresql://postgres:password@localhost:5432/emergency_planner")  # Postgres DSN
     amap_api_key = pick_optional("AMAP_API_KEY", "")  # 高德地图API Key（可选）
+    # 语音指挥Agent配置
+    semantic_router_embedding_model = pick_optional(
+        "SEMANTIC_ROUTER_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5"
+    )  # 中文优化embedding
+    semantic_router_embedding_base_url = pick_optional(
+        "SEMANTIC_ROUTER_EMBEDDING_BASE_URL", embedding_base_url
+    )  # 默认复用现有embedding服务
+    robot_command_enabled = pick_optional(
+        "ROBOT_COMMAND_ENABLED", "false"
+    ).lower() in ("true", "1", "yes")  # 默认关闭机器人控制
     return Settings(
         openai_base_url=openai_base_url,
         openai_api_key=openai_api_key,
@@ -105,4 +119,7 @@ def load_settings() -> Settings:
         neo4j_password=neo4j_password,
         postgres_dsn=postgres_dsn,
         amap_api_key=amap_api_key,
+        semantic_router_embedding_model=semantic_router_embedding_model,
+        semantic_router_embedding_base_url=semantic_router_embedding_base_url,
+        robot_command_enabled=robot_command_enabled,
     )

@@ -204,20 +204,16 @@ async def _load_scenario_data(session: AsyncSession, scenario_id: str) -> dict[s
 
 
 async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> list[dict[str, Any]]:
-    """从events_v2加载想定下的所有事件
+    """从events_v2加载所有事件（暂不按想定过滤）
 
     Args:
         session: 数据库会话
-        scenario_id: 想定ID
+        scenario_id: 想定ID（暂未使用）
 
     Returns:
         事件列表
     """
-    try:
-        scenario_uuid = UUID(scenario_id)
-    except ValueError:
-        return []
-
+    # 暂时加载所有事件，不按scenario_id过滤
     result = await session.execute(
         text("""
             SELECT id, event_code, event_type, source_type, source_detail,
@@ -225,10 +221,8 @@ async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> 
                    estimated_victims, casualty_count, reported_at,
                    ST_X(location::geometry) as lon, ST_Y(location::geometry) as lat
             FROM operational_v2.events_v2
-            WHERE scenario_id = :scenario_id
             ORDER BY reported_at, event_code
-        """),
-        {"scenario_id": scenario_uuid}
+        """)
     )
     rows = result.fetchall()
 
@@ -261,29 +255,23 @@ async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> 
 
 
 async def _load_disaster_situations(session: AsyncSession, scenario_id: str) -> list[dict[str, Any]]:
-    """从disaster_situations加载灾情态势
+    """从disaster_situations加载灾情态势（暂不按想定过滤）
 
     Args:
         session: 数据库会话
-        scenario_id: 想定ID
+        scenario_id: 想定ID（暂未使用）
 
     Returns:
         灾情态势列表
     """
-    try:
-        scenario_uuid = UUID(scenario_id)
-    except ValueError:
-        return []
-
+    # 暂时加载所有灾情态势，不按scenario_id过滤
     result = await session.execute(
         text("""
             SELECT id, disaster_type, disaster_name, severity_level,
                    spread_direction, spread_speed_mps, buffer_distance_m,
                    ST_X(center_point::geometry) as lon, ST_Y(center_point::geometry) as lat
             FROM operational_v2.disaster_situations
-            WHERE scenario_id = :scenario_id
-        """),
-        {"scenario_id": scenario_uuid}
+        """)
     )
     rows = result.fetchall()
 
@@ -305,18 +293,16 @@ async def _load_disaster_situations(session: AsyncSession, scenario_id: str) -> 
 
 
 async def _load_available_teams(session: AsyncSession, scenario_id: str) -> list[dict[str, Any]]:
-    """从rescue_teams_v2加载可用救援队伍
-
-    优先加载该想定关联的队伍，若无则加载所有可用队伍
+    """从rescue_teams_v2加载所有救援队伍（暂不按状态过滤）
 
     Args:
         session: 数据库会话
-        scenario_id: 想定ID
+        scenario_id: 想定ID（暂未使用）
 
     Returns:
         可用队伍列表
     """
-    # 查询所有可用（待命或可调度）的队伍
+    # 暂时加载所有队伍，不按状态过滤
     result = await session.execute(
         text("""
             SELECT id, code, name, team_type, parent_org,
@@ -324,7 +310,6 @@ async def _load_available_teams(session: AsyncSession, scenario_id: str) -> list
                    total_personnel, available_personnel,
                    capability_level, response_time_minutes, status
             FROM operational_v2.rescue_teams_v2
-            WHERE status IN ('standby', 'available', 'active')
             ORDER BY team_type, name
         """)
     )
@@ -353,15 +338,16 @@ async def _load_available_teams(session: AsyncSession, scenario_id: str) -> list
 
 
 async def _load_available_supplies(session: AsyncSession, scenario_id: str) -> list[dict[str, Any]]:
-    """从supply_inventory_v2和supplies_v2加载可用物资
+    """从supply_inventory_v2和supplies_v2加载所有物资（暂不按库存过滤）
 
     Args:
         session: 数据库会话
-        scenario_id: 想定ID
+        scenario_id: 想定ID（暂未使用）
 
     Returns:
         可用物资列表（按类别汇总）
     """
+    # 暂时加载所有物资，不过滤库存为0的
     result = await session.execute(
         text("""
             SELECT s.id, s.code, s.name, s.category, s.sphere_category,
@@ -371,7 +357,6 @@ async def _load_available_supplies(session: AsyncSession, scenario_id: str) -> l
             LEFT JOIN operational_v2.supply_inventory_v2 si ON s.id = si.supply_id
             GROUP BY s.id, s.code, s.name, s.category, s.sphere_category, 
                      s.unit, s.weight_kg, s.is_consumable
-            HAVING COALESCE(SUM(si.quantity - si.reserved_quantity), 0) > 0
             ORDER BY s.category, s.name
         """)
     )

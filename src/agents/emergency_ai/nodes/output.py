@@ -7,16 +7,87 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
-from typing import Dict, Any, List
-from datetime import datetime
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta
 
 from ..state import EmergencyAIState
 
 logger = logging.getLogger(__name__)
 
 
-def _generate_scheme_text(
+def _filter_for_commander(text: str, event_time: Optional[datetime] = None) -> str:
+    """
+    过滤和转换文本，让指挥员更易读：
+    1. 过滤掉队伍类型标识，如（RESCUE_TEAM）、（FIRE_TEAM）等
+    2. 将英文灾情级别转换为中文
+    3. 将T+时间格式转换为实际时间
+    """
+    if not text:
+        return text
+    
+    # 1. 过滤队伍类型标识（XXX_TEAM）或（XXX_CENTER）格式
+    text = re.sub(r'（[A-Z_]+(?:_TEAM|_CENTER)）', '', text)
+    
+    # 2. 转换灾情级别为中文
+    severity_map = {
+        'critical': '特别重大（I级）',
+        'high': '重大（II级）',
+        'medium': '较大（III级）',
+        'low': '一般（IV级）',
+    }
+    for en, cn in severity_map.items():
+        # 匹配 "critical级别" 或 "属critical级别" 等模式
+        text = re.sub(rf'属{en}级别', f'属{cn}', text, flags=re.IGNORECASE)
+        text = re.sub(rf'{en}级别', f'{cn}', text, flags=re.IGNORECASE)
+        text = re.sub(rf'级别[：:]\s*{en}', f'级别：{cn}', text, flags=re.IGNORECASE)
+    
+    # 3. 转换T+时间为实际时间
+    base_time = event_time or datetime.now()
+    
+    def convert_t_time(match):
+        """将T+0h或T+0-0.5h转换为实际时间"""
+        t_expr = match.group(0)
+        # 提取小时数，如 T+0、T+0.5、T+0-0.5h 等
+        nums = re.findall(r'[\d.]+', t_expr)
+        if not nums:
+            return t_expr
+        
+        try:
+            # 取第一个数字作为起始小时
+            start_hour = float(nums[0])
+            target_time = base_time + timedelta(hours=start_hour)
+            
+            # 判断是否跨天
+            if target_time.date() == base_time.date():
+                # 当天：只显示时间 如 "14:30"
+                time_str = target_time.strftime("%H:%M")
+            else:
+                # 跨天：显示月日+时间 如 "12月3日 08:00"
+                time_str = f"{target_time.month}月{target_time.day}日 {target_time.strftime('%H:%M')}"
+            
+            # 如果是时间范围（T+0-0.5h），显示范围
+            if len(nums) >= 2:
+                end_hour = float(nums[1])
+                end_time = base_time + timedelta(hours=end_hour)
+                if end_time.date() == base_time.date():
+                    end_str = end_time.strftime("%H:%M")
+                else:
+                    end_str = f"{end_time.month}月{end_time.day}日 {end_time.strftime('%H:%M')}"
+                return f"{time_str}~{end_str}"
+            
+            return time_str
+        except (ValueError, TypeError):
+            return t_expr
+    
+    # 匹配 T+0h、T+0-0.5h、T+24小时 等格式
+    text = re.sub(r'T\+[\d.]+-?[\d.]*\s*[hH小时]*', convert_t_time, text)
+    
+    return text
+
+
+async def _generate_scheme_text(
     parsed_disaster: Dict[str, Any],
     task_sequence: List[Dict[str, Any]],
     recommended_scheme: Dict[str, Any],
@@ -51,7 +122,9 @@ def _generate_scheme_text(
         parsed_disaster.get("disaster_type", "unknown"), 
         parsed_disaster.get("disaster_type", "未知灾害")
     )
-    severity_map = {"critical": "特别严重", "high": "严重", "medium": "中等", "low": "轻微"}
+    # 从数据库获取严重程度显示映射
+    from src.agents.services.config_service import ConfigService
+    severity_map = await ConfigService.get_severity_display_map()
     severity = severity_map.get(parsed_disaster.get("severity", "medium"), "中等")
     
     lines.append(f"灾害类型：{disaster_type}")
@@ -83,7 +156,7 @@ def _generate_scheme_text(
     
     # 三、任务安排
     lines.append("三、任务安排")
-    priority_map = {"critical": "紧急", "high": "高优先", "medium": "中优先", "low": "低优先"}
+    priority_map = await ConfigService.get_priority_display_map()
     for task in task_sequence:
         task_name = task.get("task_name", "未知任务")
         priority = priority_map.get(task.get("priority", "medium"), "中优先")
@@ -180,6 +253,7 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
                     "phase": t.get("phase"),
                     "is_parallel": t.get("is_parallel"),
                     "parallel_group_id": t.get("parallel_group_id"),
+                    "required_capabilities": t.get("required_capabilities", []),
                 }
                 for t in state.get("task_sequence", [])
             ],
@@ -191,6 +265,46 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
                 }
                 for g in state.get("parallel_tasks", [])
             ],
+        },
+        
+        # 阶段2.6: 战略层（任务域/阶段/模块/运力/安全）
+        "strategic": {
+            # 任务域分类
+            "active_domains": state.get("active_domains", []),
+            "domain_priorities": state.get("domain_priorities", []),
+            # 灾害阶段
+            "disaster_phase": state.get("disaster_phase"),
+            "disaster_phase_name": state.get("disaster_phase_name"),
+            # 推荐模块
+            "recommended_modules": [
+                {
+                    "module_id": m.get("module_id"),
+                    "module_name": m.get("module_name"),
+                    "personnel": m.get("personnel"),
+                    "dogs": m.get("dogs"),
+                    "vehicles": m.get("vehicles"),
+                    "match_score": m.get("match_score"),
+                    "provided_capabilities": m.get("provided_capabilities", []),
+                    "equipment_list": m.get("equipment_list", []),
+                }
+                for m in state.get("recommended_modules", [])
+            ],
+            # 运力检查
+            "transport_plans": state.get("transport_plans", []),
+            "transport_warnings": state.get("transport_warnings", []),
+            # 安全规则
+            "safety_violations": [
+                {
+                    "rule_id": v.get("rule_id"),
+                    "rule_type": v.get("rule_type"),
+                    "rule_name": v.get("rule_name"),
+                    "message": v.get("message"),
+                    "severity": v.get("severity"),
+                }
+                for v in state.get("safety_violations", [])
+            ],
+            # 生成报告
+            "generated_reports": state.get("generated_reports", {}),
         },
         
         # 阶段3: 资源匹配（详细信息）
@@ -232,8 +346,11 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
         # 推荐方案
         "recommended_scheme": recommended_scheme,
         
-        # 方案解释
-        "scheme_explanation": state.get("scheme_explanation", ""),
+        # 方案解释（过滤队伍类型标识、转换灾情级别和T+时间为中文，让指挥员更易读）
+        "scheme_explanation": _filter_for_commander(
+            state.get("scheme_explanation", ""),
+            event_time=datetime.now(),  # 使用当前时间作为基准
+        ),
         
         # 方案文本（供指挥员查看/编辑）
         "scheme_text": "",
@@ -248,7 +365,7 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
     
     # 生成方案文本（仅在成功时）
     if success and recommended_scheme:
-        scheme_text = _generate_scheme_text(
+        scheme_text = await _generate_scheme_text(
             parsed_disaster=state.get("parsed_disaster") or {},
             task_sequence=state.get("task_sequence", []),
             recommended_scheme=recommended_scheme,

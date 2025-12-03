@@ -73,12 +73,12 @@ class RiskAreaService:
 
     async def list_by_scenario(
         self,
-        scenario_id: UUID,
+        scenario_id: Optional[UUID] = None,
         area_type: Optional[str] = None,
         min_risk_level: Optional[int] = None,
         passage_status: Optional[str] = None,
     ) -> RiskAreaListResponse:
-        """获取想定下的风险区域列表"""
+        """获取风险区域列表，scenario_id 为 None 时返回所有数据"""
         items = await self.repo.list_by_scenario(
             scenario_id=scenario_id,
             area_type=area_type,
@@ -310,7 +310,6 @@ class RiskAreaService:
             
             if not affected_teams:
                 logger.info("[early_warning] 未找到受影响的队伍")
-                return 0
             
             # 4. 为每个受影响队伍创建预警记录
             warning_repo = WarningRepository(self.db)
@@ -363,10 +362,50 @@ class RiskAreaService:
                 )
                 warnings_created += 1
             
-            # 5. 提交事务（预警记录）
+            # 5. 为穿过风险区域的规划路线生成预警
+            affected_routes = await self._find_affected_routes(risk_area)
+            route_warning_level = self._get_route_warning_level(risk_area.risk_level)
+            route_level_name = {"red": "红色", "orange": "橙色", "yellow": "黄色", "blue": "蓝色"}.get(route_warning_level, "黄色")
+            
+            for route in affected_routes:
+                route_id = route.get("route_id")
+                task_title = route.get("task_title", "未知任务")
+                team_id_route = route.get("team_id")
+                team_name_route = route.get("team_name")
+                vehicle_name = route.get("vehicle_name")
+                
+                warning_title = f"【路线预警-{route_level_name}】{risk_area.name or '风险区域'}"
+                warning_message = (
+                    f"任务「{task_title}」的规划路线穿过风险区域，"
+                    f"风险等级: {risk_area.risk_level}/10，"
+                    f"通行状态: {self.PASSAGE_STATUS_LABELS.get(risk_area.passage_status, '未知')}，"
+                    f"建议: {self._get_route_recommendation(risk_area.passage_status)}"
+                )
+                
+                await warning_repo.create(
+                    disaster_id=risk_area.id,
+                    scenario_id=risk_area.scenario_id,
+                    affected_type="route",
+                    affected_id=UUID(route_id),
+                    affected_name=task_title,
+                    notify_target_type="team_leader" if team_id_route else "driver",
+                    notify_target_name=team_name_route or vehicle_name or "未知",
+                    warning_level=route_warning_level,
+                    distance_m=0,  # 路线相交，距离为0
+                    estimated_contact_minutes=0,
+                    warning_title=warning_title,
+                    warning_message=warning_message,
+                )
+                warnings_created += 1
+            
+            logger.info(
+                f"[early_warning] 路线预警生成: {len(affected_routes)}条"
+            )
+            
+            # 6. 提交事务（预警记录）
             await self.db.commit()
             
-            # 6. 推送预警通知到前端
+            # 7. 推送预警通知到前端
             if warnings_created > 0:
                 try:
                     from src.domains.frontend_api.websocket.router import ws_manager
@@ -455,6 +494,27 @@ class RiskAreaService:
             return ["detour", "standby"]
         else:
             return ["continue", "detour", "standby"]
+
+    def _get_route_warning_level(self, risk_level: int) -> str:
+        """根据风险等级映射路线预警级别"""
+        if risk_level >= 9:
+            return "red"
+        elif risk_level >= 7:
+            return "orange"
+        elif risk_level >= 5:
+            return "yellow"
+        return "blue"
+
+    def _get_route_recommendation(self, passage_status: str) -> str:
+        """根据通行状态生成路线建议"""
+        recommendations = {
+            "confirmed_blocked": "立即停止行进，联系指挥中心改道",
+            "needs_reconnaissance": "减速行驶，等待侦察结果",
+            "passable_with_caution": "减速通过，保持警惕",
+            "clear": "正常通行",
+            "unknown": "谨慎行驶，注意观察",
+        }
+        return recommendations.get(passage_status, "谨慎行驶")
 
     async def _find_affected_routes(
         self,

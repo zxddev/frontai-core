@@ -34,25 +34,7 @@ def _get_llm(max_tokens: int = 4096) -> ChatOpenAI:
     )
 
 
-TASK_TYPE_MAPPING = {
-    "生命探测": "EM06",
-    "无人机侦察": "EM01",
-    "现场评估": "EM03",
-    "被困人员救援": "EM10",
-    "人员搜救": "EM10",
-    "伤员急救": "EM14",
-    "医疗救治": "EM14",
-    "火灾扑救": "EM07",
-    "灭火": "EM07",
-    "危化品处置": "EM08",
-    "疏散群众": "EM15",
-    "交通管制": "EM16",
-    "物资配送": "EM17",
-    "通信保障": "EM18",
-    "心理援助": "EM19",
-    "现场警戒": "EM20",
-    "遗体处置": "EM21",
-}
+# 任务名称→任务ID映射已迁移到Neo4j，通过ConfigService.get_task_type_mapping()获取
 
 
 SYSTEM_PROMPT = """你是应急救灾方案解析专家。你的任务是将自然语言方案文本解析为结构化数据。
@@ -183,8 +165,11 @@ class SchemeParsingAgent:
             )
     
     def _infer_task_type(self, task_name: str) -> str:
-        """根据任务名称推断任务类型代码"""
-        for keyword, code in TASK_TYPE_MAPPING.items():
+        """根据任务名称推断任务类型代码（从Neo4j获取映射）"""
+        from src.agents.services.config_service import ConfigService
+        
+        task_type_mapping = ConfigService.get_task_type_mapping()
+        for keyword, code in task_type_mapping.items():
             if keyword in task_name:
                 return code
         return "EM99"

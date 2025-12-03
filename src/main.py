@@ -99,6 +99,8 @@ api_router_v2.include_router(ai_router)
 api_router_v2.include_router(tts_router)
 
 app.mount(settings.api_prefix, api_router_v2)
+# 添加 /web-api 前缀的挂载，适配前端代理
+app.mount("/web-api" + settings.api_prefix, api_router_v2)
 
 # 前端API适配层，兼容原Java后端接口路径
 frontend_app = FastAPI(title="Frontend API", description="前端适配API")

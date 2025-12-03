@@ -103,8 +103,9 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
         risk_service = RiskAreaService(session)
         device_service = DeviceService(session)
 
+        # 不限想定，加载所有风险区域
         risk_list: RiskAreaListResponse = await risk_service.list_by_scenario(
-            scenario_id=UUID(scenario_id),
+            scenario_id=None,
             area_type=None,
             min_risk_level=None,
             passage_status=None,
@@ -160,7 +161,7 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
             all_devices = []
             device_list = []
 
-        # 加载POI (重点设施)
+        # 加载POI (重点设施) - 不限想定，加载所有数据
         pois: List[Dict[str, Any]] = []
         try:
             poi_result = await session.execute(text("""
@@ -169,10 +170,9 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
                        estimated_population, distance_to_epicenter_m, status,
                        last_reconnaissance_at, reconnaissance_priority
                 FROM operational_v2.poi_v2
-                WHERE scenario_id = :scenario_id
-                  AND status != 'destroyed'
+                WHERE status != 'destroyed'
                 ORDER BY reconnaissance_priority DESC, distance_to_epicenter_m ASC
-            """), {"scenario_id": scenario_id})
+            """))
             for row in poi_result.fetchall():
                 pois.append({
                     "id": str(row.id),
@@ -190,7 +190,7 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
         except Exception as e:  # noqa: BLE001
             logger.warning("[Recon] 加载POI列表失败", extra={"error": str(e)})
 
-        # 加载救援集结点
+        # 加载救援集结点 - 不限想定，加载所有数据
         staging_sites: List[Dict[str, Any]] = []
         try:
             site_result = await session.execute(text("""
@@ -198,10 +198,9 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
                        ST_X(location::geometry) as lon, ST_Y(location::geometry) as lat,
                        max_personnel, status, safety_score
                 FROM operational_v2.rescue_staging_sites_v2
-                WHERE (scenario_id = :scenario_id OR scenario_id IS NULL)
-                  AND status = 'available'
+                WHERE status = 'available'
                 ORDER BY safety_score DESC NULLS LAST
-            """), {"scenario_id": scenario_id})
+            """))
             for row in site_result.fetchall():
                 staging_sites.append({
                     "id": str(row.id),

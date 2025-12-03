@@ -353,6 +353,37 @@ class ScenarioService:
             message=f"想定重置成功，共删除 {total_deleted} 条数据",
         )
     
+    async def reset_active(self) -> ScenarioResetResponse:
+        """重置当前活动的想定"""
+        scenario = await self._repo.get_active()
+        if not scenario:
+            raise NotFoundError("ActiveScenario", "当前没有活动的想定")
+        
+        result = await self._repo.reset_scenario_data(
+            scenario_id=scenario.id,
+            delete_events=True,
+            delete_entities=True,
+            delete_risk_areas=True,
+            delete_schemes=True,
+            delete_tasks=True,
+            delete_messages=True,
+            delete_ai_decisions=True,
+        )
+        
+        total_deleted = sum(result.values())
+        
+        return ScenarioResetResponse(
+            scenario_id=scenario.id,
+            deleted_events=result["deleted_events"],
+            deleted_entities=result["deleted_entities"],
+            deleted_risk_areas=result["deleted_risk_areas"],
+            deleted_schemes=result["deleted_schemes"],
+            deleted_tasks=result["deleted_tasks"],
+            deleted_messages=result["deleted_messages"],
+            deleted_ai_decisions=result["deleted_ai_decisions"],
+            message=f"活动想定重置成功，共删除 {total_deleted} 条数据",
+        )
+    
     def _to_response(self, scenario) -> ScenarioResponse:
         """ORM模型转响应模型"""
         location = None

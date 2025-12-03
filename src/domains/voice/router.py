@@ -97,6 +97,15 @@ class VoiceChatManager:
         self._asr_service = None
         self._tts_service = None
         self._llm = None
+        self._semantic_router = None  # 语义路由器（懒加载）
+    
+    async def _get_semantic_router(self):
+        """延迟加载语义路由器。"""
+        if self._semantic_router is None:
+            from src.agents.voice_commander.semantic_router import VoiceSemanticRouter
+            self._semantic_router = VoiceSemanticRouter()
+            logger.info("语义路由器已加载")
+        return self._semantic_router
     def _calculate_energy(self, audio_data: bytes) -> float:
         """计算音频帧的能量（RMS）。"""
         import struct
@@ -338,11 +347,48 @@ class VoiceChatManager:
         """生成AI回复并合成语音（流式输出）。
 
         流程：
+        0. 语义路由分类，决定使用哪个Agent
         1. 流式调用 LLM，边生成边发送 llm_chunk
         2. 完成后发送 llm_done（完整文本）
         3. TTS 合成后发送 tts（音频）
         """
         try:
+            # 0. 语义路由分类
+            enable_semantic_routing = session.config.get("enable_semantic_routing", True)
+            
+            if enable_semantic_routing:
+                try:
+                    router = await self._get_semantic_router()
+                    route_name, confidence, is_fallback = await router.classify(user_text)
+                    
+                    logger.info(
+                        f"语义路由: route={route_name}, confidence={confidence:.3f}, fallback={is_fallback}"
+                    )
+                    
+                    # 发送路由结果给前端（可选，用于调试）
+                    await self._send_json(
+                        session.websocket,
+                        {
+                            "type": "route_decision",
+                            "route": route_name,
+                            "confidence": round(confidence, 3),
+                            "fallback": is_fallback,
+                        },
+                    )
+                    
+                    # 根据路由分发到不同Agent
+                    if route_name in ("spatial_query", "task_status", "resource_status", "robot_command"):
+                        ai_response = await self._dispatch_to_agent(session, route_name, user_text)
+                        if ai_response:
+                            # Agent返回了结果，发送并合成语音
+                            await self._send_ai_response_and_tts(session, user_text, ai_response)
+                            return
+                        # Agent返回None，降级到基础LLM
+                        logger.info("Agent返回空，降级到基础LLM")
+                    
+                except Exception as route_err:
+                    logger.warning(f"语义路由失败，降级到基础LLM: {route_err}")
+            
             # 通知前端AI正在思考
             await self._send_json(session.websocket, {"type": "ai_thinking"})
 
@@ -432,6 +478,244 @@ class VoiceChatManager:
     async def _send_error(self, websocket: WebSocket, message: str) -> None:
         """发送错误消息。"""
         await self._send_json(websocket, {"type": "error", "message": message})
+
+    async def _dispatch_to_agent(
+        self, session: VoiceSession, route_name: str, user_text: str
+    ) -> Optional["AIResponse"]:
+        """
+        根据路由分发到对应Agent处理
+        
+        Args:
+            session: 语音会话
+            route_name: 路由名称 (spatial_query/task_status/resource_status/robot_command)
+            user_text: 用户输入文本
+            
+        Returns:
+            AIResponse对象（包含文本和UI动作），如果Agent无法处理返回None
+        """
+        from src.agents.voice_commander.ui_actions import AIResponse
+        
+        logger.info(f"分发到Agent: route={route_name}, text={user_text[:30]}...")
+        
+        try:
+            if route_name == "spatial_query":
+                # 调用SpatialAgent处理空间查询
+                from src.agents.voice_commander.spatial_graph import get_spatial_agent_graph
+                
+                graph = get_spatial_agent_graph()
+                initial_state = {
+                    "query": user_text,
+                    "session_id": session.session_id,
+                    "parsed_intent": None,
+                    "selected_tool": None,
+                    "tool_input": {},
+                    "tool_results": [],
+                    "response": None,
+                    "trace": {},
+                }
+                
+                result = await graph.ainvoke(initial_state)
+                response_text = result.get("response")
+                
+                if response_text:
+                    logger.info(f"SpatialAgent返回: {response_text[:50]}...")
+                    # 从结果中提取实体信息用于UI联动
+                    ui_actions = []
+                    mentioned_entities = []
+                    
+                    # 如果有工具结果，尝试提取实体ID用于地图高亮
+                    tool_results = result.get("tool_results", [])
+                    if tool_results:
+                        for tr in tool_results:
+                            entities = tr.get("entities", [])
+                            for entity in entities[:5]:  # 最多5个
+                                entity_id = entity.get("id")
+                                entity_type = entity.get("entity_type", "").lower()
+                                if entity_id:
+                                    full_id = f"{entity_type}-{entity_id}" if entity_type else str(entity_id)
+                                    mentioned_entities.append(full_id)
+                    
+                    # 生成UI动作：定位和高亮
+                    if mentioned_entities:
+                        from src.agents.voice_commander.ui_actions import (
+                            fly_to_entity, highlight_entities
+                        )
+                        ui_actions.append(fly_to_entity(mentioned_entities[0], zoom=14).model_dump(exclude_none=True))
+                        ui_actions.append(highlight_entities(mentioned_entities, duration=8000).model_dump(exclude_none=True))
+                    
+                    return AIResponse(
+                        text=response_text + (" 已在地图上标注。" if mentioned_entities else ""),
+                        ui_actions=ui_actions,
+                        context={"mentioned_entities": mentioned_entities} if mentioned_entities else None,
+                    )
+                else:
+                    logger.warning("SpatialAgent无响应")
+                    return None
+                
+            elif route_name == "task_status":
+                # 调用TaskAgent处理任务状态查询
+                from src.agents.voice_commander.task_agent import run_task_agent
+                
+                ai_response = await run_task_agent(user_text, session.session_id)
+                if ai_response and ai_response.text:
+                    logger.info(f"TaskAgent返回: {ai_response.text[:50]}...")
+                    return ai_response
+                else:
+                    logger.warning("TaskAgent无响应")
+                    return None
+                
+            elif route_name == "resource_status":
+                # 调用ResourceAgent处理资源状态查询
+                from src.agents.voice_commander.resource_agent import run_resource_agent
+                
+                ai_response = await run_resource_agent(user_text, session.session_id)
+                if ai_response and ai_response.text:
+                    logger.info(f"ResourceAgent返回: {ai_response.text[:50]}...")
+                    return ai_response
+                else:
+                    logger.warning("ResourceAgent无响应")
+                    return None
+                
+            elif route_name == "robot_command":
+                # 检查robot_command_enabled配置
+                from src.infra.settings import load_settings
+                settings = load_settings()
+                
+                if not settings.robot_command_enabled:
+                    return AIResponse(text="机器人控制功能未启用。", ui_actions=[])
+                
+                # TODO: Phase 3 实现 CommanderAgent
+                logger.info("CommanderAgent尚未实现")
+                return AIResponse(text="机器人控制功能正在开发中。", ui_actions=[])
+            
+            else:
+                logger.warning(f"未知路由: {route_name}")
+                return None
+                
+        except Exception as e:
+            logger.exception(f"Agent处理失败: {e}")
+            return None
+
+    async def _send_ai_response_and_tts(
+        self, session: VoiceSession, user_text: str, ai_response: "AIResponse"
+    ) -> None:
+        """
+        发送AI响应（包含UI动作）并合成TTS语音
+        
+        Args:
+            session: 语音会话
+            user_text: 用户输入文本
+            ai_response: AI响应对象（包含text和ui_actions）
+        """
+        ai_text = ai_response.text
+        
+        # 发送AI响应（包含文本和UI动作）
+        response_data = {
+            "type": "ai_response",
+            "text": ai_text,
+            "ui_actions": ai_response.ui_actions or [],
+        }
+        if ai_response.context:
+            response_data["context"] = ai_response.context
+        
+        await self._send_json(session.websocket, response_data)
+        
+        # 同时发送 llm_done 保持兼容
+        await self._send_json(
+            session.websocket,
+            {"type": "llm_done", "text": ai_text, "llm_latency_ms": 0},
+        )
+        
+        # 保存对话历史
+        session.chat_history.append({"role": "user", "content": user_text})
+        session.chat_history.append({"role": "assistant", "content": ai_text})
+        
+        # 调用TTS合成语音（如果启用）
+        enable_tts = session.config.get("enable_tts", True)
+        
+        if enable_tts and ai_text:
+            try:
+                tts = await self._get_tts_service()
+                from src.infra.clients.tts import TTSConfig
+                
+                tts_config = TTSConfig(
+                    speed=session.config.get("tts_speed", 1.3),
+                )
+                
+                start_ts = time.time()
+                tts_result = await tts.synthesize(ai_text, tts_config)
+                tts_latency = int((time.time() - start_ts) * 1000)
+                
+                audio_base64 = base64.b64encode(tts_result.audio_data).decode("utf-8")
+                logger.info(f"TTS合成完成: {len(tts_result.audio_data)} bytes ({tts_latency}ms)")
+                
+                await self._send_json(
+                    session.websocket,
+                    {
+                        "type": "tts",
+                        "audio": audio_base64,
+                        "audio_format": "wav",
+                        "tts_latency_ms": tts_latency,
+                    },
+                )
+                
+            except Exception as tts_err:
+                logger.warning(f"TTS合成失败: {tts_err}")
+
+    async def _send_llm_response_and_tts(
+        self, session: VoiceSession, user_text: str, ai_text: str
+    ) -> None:
+        """
+        发送LLM回复并合成TTS语音
+        
+        用于Agent返回结果后的统一响应流程。
+        
+        Args:
+            session: 语音会话
+            user_text: 用户输入文本
+            ai_text: AI回复文本
+        """
+        # 发送完整文本
+        await self._send_json(
+            session.websocket,
+            {"type": "llm_done", "text": ai_text, "llm_latency_ms": 0},
+        )
+        
+        # 保存对话历史
+        session.chat_history.append({"role": "user", "content": user_text})
+        session.chat_history.append({"role": "assistant", "content": ai_text})
+        
+        # 调用TTS合成语音（如果启用）
+        enable_tts = session.config.get("enable_tts", True)
+        
+        if enable_tts and ai_text:
+            try:
+                tts = await self._get_tts_service()
+                from src.infra.clients.tts import TTSConfig
+                
+                tts_config = TTSConfig(
+                    speed=session.config.get("tts_speed", 1.3),
+                )
+                
+                start_ts = time.time()
+                tts_result = await tts.synthesize(ai_text, tts_config)
+                tts_latency = int((time.time() - start_ts) * 1000)
+                
+                audio_base64 = base64.b64encode(tts_result.audio_data).decode("utf-8")
+                logger.info(f"TTS合成完成: {len(tts_result.audio_data)} bytes ({tts_latency}ms)")
+                
+                await self._send_json(
+                    session.websocket,
+                    {
+                        "type": "tts",
+                        "audio": audio_base64,
+                        "audio_format": "wav",
+                        "tts_latency_ms": tts_latency,
+                    },
+                )
+                
+            except Exception as tts_err:
+                logger.warning(f"TTS合成失败: {tts_err}")
 
 
 # 全局管理器实例

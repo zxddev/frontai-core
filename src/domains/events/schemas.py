@@ -6,11 +6,17 @@ from enum import Enum
 
 
 class EventType(str, Enum):
-    earthquake = "earthquake"  # 地震（主震）
+    # 主要事件类型（简化版）
+    earthquake = "earthquake"      # 地震
+    rainstorm = "rainstorm"        # 雨区
+    danger_zone = "danger_zone"    # 危险区
+    
+    # 其他事件类型（保留兼容）
     trapped_person = "trapped_person"
     fire = "fire"
     flood = "flood"
     landslide = "landslide"
+    rockfall = "rockfall"
     building_collapse = "building_collapse"
     road_damage = "road_damage"
     power_outage = "power_outage"
@@ -53,7 +59,7 @@ class Location(BaseModel):
 
 
 class EventCreate(BaseModel):
-    scenario_id: UUID
+    scenario_id: Optional[UUID] = None  # 可选，不传则自动使用当前活动想定
     event_type: EventType
     source_type: EventSourceType = EventSourceType.manual_report
     source_detail: Optional[dict[str, Any]] = None

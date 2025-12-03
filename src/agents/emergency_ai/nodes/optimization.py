@@ -15,68 +15,7 @@ from ..tools.llm_tools import explain_scheme_async
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# 硬规则定义
-# ============================================================================
-
-HARD_RULES = [
-    {
-        "rule_id": "HR-EM-001",
-        "name": "救援人员安全红线",
-        "check": lambda scheme: scheme.get("risk_level", 0) <= 0.15,
-        "message": "救援人员伤亡风险超过15%，方案否决",
-    },
-    {
-        "rule_id": "HR-EM-002",
-        "name": "黄金救援时间",
-        # 地震黄金72小时，首批救援队伍应在4小时内到达
-        # 考虑山区、偏远地区实际情况，设置为180分钟
-        "check": lambda scheme: scheme.get("response_time_min", 0) <= 180,
-        "message": "预计响应时间超过3小时，方案否决",
-    },
-    {
-        "rule_id": "HR-EM-003",
-        "name": "关键能力覆盖",
-        "check": lambda scheme: scheme.get("coverage_rate", 0) >= 0.7,  # 至少70%覆盖
-        "message": "关键能力覆盖率不足70%",
-    },
-    {
-        "rule_id": "HR-EM-004",
-        "name": "救援容量底线",
-        # 救援容量必须覆盖至少50%被困人员，否则资源严重不足
-        "check": lambda scheme: scheme.get("capacity_coverage_rate", 1.0) >= 0.5,
-        "message": "救援容量覆盖率不足50%，资源严重不足需紧急增援",
-    },
-]
-
-
-# ============================================================================
-# 5维评估权重配置（严格对齐军事版）
-# ============================================================================
-
-DEFAULT_WEIGHTS = {
-    "success_rate": 0.35,     # 人命关天，最高权重
-    "response_time": 0.30,    # 黄金救援期72小时
-    "coverage_rate": 0.20,    # 全区域覆盖
-    "risk": 0.05,             # 生命优先于风险规避
-    "redundancy": 0.10,       # 备用资源保障
-}
-
-EARTHQUAKE_WEIGHTS = {
-    "success_rate": 0.35,     # 地震救援成功率最优先
-    "response_time": 0.35,    # 黄金72小时
-    "coverage_rate": 0.15,    # 覆盖率
-    "risk": 0.05,             # 风险
-    "redundancy": 0.10,       # 冗余保障
-}
-
-FIRE_WEIGHTS = {
-    "success_rate": 0.30,
-    "response_time": 0.40,    # 火灾响应时间更关键
-    "coverage_rate": 0.15,
-    "risk": 0.05,
-    "redundancy": 0.10,
-}
+# 硬规则和权重配置已迁移到数据库，通过ConfigService访问
 
 
 async def filter_hard_rules(state: EmergencyAIState) -> Dict[str, Any]:
@@ -92,6 +31,8 @@ async def filter_hard_rules(state: EmergencyAIState) -> Dict[str, Any]:
     Returns:
         更新的状态字段
     """
+    from src.agents.services.config_service import ConfigService
+    
     logger.info("执行硬规则过滤节点", extra={"event_id": state["event_id"]})
     start_time = time.time()
     
@@ -102,6 +43,9 @@ async def filter_hard_rules(state: EmergencyAIState) -> Dict[str, Any]:
         logger.warning("无候选方案，跳过硬规则过滤")
         return {"scheme_scores": []}
     
+    # 从数据库获取硬规则配置
+    hard_rules = await ConfigService.get_hard_rules()
+    
     # 应用硬规则
     scheme_scores: List[SchemeScore] = []
     passed_count = 0
@@ -109,12 +53,12 @@ async def filter_hard_rules(state: EmergencyAIState) -> Dict[str, Any]:
     for solution in solutions:
         violations = []
         
-        for rule in HARD_RULES:
+        for rule in hard_rules:
             try:
-                if not rule["check"](solution):
-                    violations.append(f"{rule['rule_id']}: {rule['message']}")
+                if not rule.check(solution):
+                    violations.append(f"{rule.rule_id}: {rule.message}")
             except Exception as e:
-                logger.warning(f"硬规则检查异常: {rule['rule_id']}", extra={"error": str(e)})
+                logger.warning(f"硬规则检查异常: {rule.rule_id}", extra={"error": str(e)})
         
         score: SchemeScore = {
             "scheme_id": solution["solution_id"],
@@ -137,7 +81,7 @@ async def filter_hard_rules(state: EmergencyAIState) -> Dict[str, Any]:
     # 更新追踪信息
     trace = state.get("trace", {})
     trace["phases_executed"] = trace.get("phases_executed", []) + ["filter_hard_rules"]
-    trace["hard_rules_checked"] = len(HARD_RULES)
+    trace["hard_rules_checked"] = len(hard_rules)
     trace["schemes_passed"] = passed_count
     
     elapsed_ms = int((time.time() - start_time) * 1000)
@@ -179,17 +123,14 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
     parsed_disaster = state.get("parsed_disaster", {})
     capability_requirements = state.get("capability_requirements", [])
     
-    # 获取权重配置
+    # 获取权重配置（从数据库）
+    from src.agents.services.config_service import ConfigService
+    
     weights = state.get("optimization_weights", {})
     if not weights:
-        # 根据灾害类型选择权重
         disaster_type = parsed_disaster.get("disaster_type", "earthquake").lower()
-        if disaster_type == "earthquake":
-            weights = EARTHQUAKE_WEIGHTS
-        elif disaster_type == "fire":
-            weights = FIRE_WEIGHTS
-        else:
-            weights = DEFAULT_WEIGHTS
+        weights_config = await ConfigService.get_evaluation_weights(disaster_type)
+        weights = weights_config.to_dict()
     
     # 获取相似案例用于计算成功率
     similar_cases = state.get("similar_cases", [])
@@ -244,6 +185,15 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
             redundancy_score * weights.get("redundancy", 0.10)
         )
         score["weighted_score"] = round(weighted_score, 3)
+        
+        # 打印5维评估详情
+        logger.info(f"【5维评估】方案{score['scheme_id']}:")
+        logger.info(f"  1. 成功率={success_rate_score:.3f} (权重0.35)")
+        logger.info(f"  2. 响应时间={time_score:.3f} (原始={response_time:.0f}分钟, 权重0.30)")
+        logger.info(f"  3. 覆盖率={coverage_score:.3f} (权重0.20)")
+        logger.info(f"  4. 风险={risk_score:.3f} (权重0.05)")
+        logger.info(f"  5. 冗余性={redundancy_score:.3f} (权重0.10)")
+        logger.info(f"  → 加权总分={weighted_score:.3f}")
     
     # 排名
     passed_scores = [s for s in scheme_scores if s["hard_rule_passed"]]
@@ -265,8 +215,8 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
         logger.warning("[巨灾模式] 所有方案被硬规则否决，启用紧急增援模式")
         requires_reinforcement = True
         
-        # 选择救援容量最大的方案
-        best_solution = max(solutions, key=lambda s: s.get("total_rescue_capacity", 0))
+        # 【安全修复】尝试组合多个方案以提升覆盖率和容量
+        best_solution = _try_combine_catastrophe_solutions(solutions, capability_requirements)
         recommended_scheme = best_solution
         
         # 为巨灾方案计算5维评分（即使硬规则未通过也需要评估）
@@ -512,6 +462,129 @@ async def explain_scheme(state: EmergencyAIState) -> Dict[str, Any]:
         )
         
         return {"scheme_explanation": simple_explanation}
+
+
+# ============================================================================
+# 巨灾模式组合辅助函数
+# ============================================================================
+
+def _try_combine_catastrophe_solutions(
+    solutions: List[AllocationSolution],
+    capability_requirements: List[Dict[str, Any]],
+) -> AllocationSolution:
+    """
+    【安全修复】巨灾模式下尝试组合多个方案
+    
+    在所有方案都被硬规则否决的情况下，尝试组合多个方案
+    以提升能力覆盖率和总救援容量。
+    
+    组合策略：
+    1. 首先选择容量最大的方案作为基础
+    2. 然后按能力互补性添加其他方案的队伍
+    3. 避免队伍重复
+    
+    Args:
+        solutions: 所有候选方案
+        capability_requirements: 能力需求列表
+        
+    Returns:
+        组合后的最优方案
+    """
+    if not solutions:
+        return None
+    
+    if len(solutions) == 1:
+        return solutions[0]
+    
+    logger.info(f"[巨灾-组合] 尝试组合{len(solutions)}个方案")
+    
+    # 提取所有需求能力
+    required_caps = {cap.get("capability_code") for cap in capability_requirements}
+    
+    # 选择容量最大的方案作为基础
+    base_solution = max(solutions, key=lambda s: s.get("total_rescue_capacity", 0))
+    
+    # 收集基础方案的队伍ID和能力
+    combined_allocations = list(base_solution.get("allocations", []))
+    combined_team_ids = {a.get("resource_id") for a in combined_allocations}
+    combined_caps = set()
+    for alloc in combined_allocations:
+        combined_caps.update(alloc.get("assigned_capabilities", []))
+    
+    total_capacity = base_solution.get("total_rescue_capacity", 0)
+    max_eta = base_solution.get("response_time_min", 0)
+    
+    logger.info(f"[巨灾-组合] 基础方案: 容量={total_capacity}, 能力={combined_caps}")
+    
+    # 检查是否有缺失能力
+    missing_caps = required_caps - combined_caps
+    
+    if missing_caps:
+        logger.info(f"[巨灾-组合] 缺失能力: {missing_caps}，尝试从其他方案补充")
+        
+        # 从其他方案中找能提供缺失能力的队伍
+        for solution in solutions:
+            if solution.get("solution_id") == base_solution.get("solution_id"):
+                continue
+            
+            for alloc in solution.get("allocations", []):
+                team_id = alloc.get("resource_id")
+                if team_id in combined_team_ids:
+                    continue
+                
+                team_caps = set(alloc.get("assigned_capabilities", []))
+                new_caps = team_caps.intersection(missing_caps)
+                
+                if new_caps:
+                    # 这个队伍能提供缺失能力，加入组合
+                    combined_allocations.append(alloc)
+                    combined_team_ids.add(team_id)
+                    combined_caps.update(team_caps)
+                    total_capacity += alloc.get("rescue_capacity", 0)
+                    max_eta = max(max_eta, alloc.get("eta_minutes", 0))
+                    
+                    logger.info(
+                        f"[巨灾-组合] 添加队伍 {alloc.get('resource_name')}: "
+                        f"补充能力={new_caps}, 新增容量={alloc.get('rescue_capacity', 0)}"
+                    )
+                    
+                    missing_caps -= new_caps
+                    
+                    if not missing_caps:
+                        break
+            
+            if not missing_caps:
+                break
+    
+    # 构建组合方案
+    combined_solution: AllocationSolution = {
+        "solution_id": f"combined-{base_solution.get('solution_id', 'unknown')}",
+        "allocations": combined_allocations,
+        "total_score": base_solution.get("total_score", 0),
+        "response_time_min": max_eta,
+        "coverage_rate": len(combined_caps.intersection(required_caps)) / len(required_caps) if required_caps else 1.0,
+        "resource_scale": len(combined_allocations),
+        "risk_level": base_solution.get("risk_level", 0),
+        "total_rescue_capacity": total_capacity,
+        "capacity_coverage_rate": base_solution.get("capacity_coverage_rate", 0),
+        "capacity_warning": base_solution.get("capacity_warning"),
+        "uncovered_capabilities": list(required_caps - combined_caps),
+        "max_distance_km": max(a.get("distance_km", 0) for a in combined_allocations) if combined_allocations else 0,
+        "teams_count": len(combined_allocations),
+        "objectives": {
+            "response_time": max_eta,
+            "coverage_rate": len(combined_caps.intersection(required_caps)) / len(required_caps) if required_caps else 1.0,
+            "teams_count": len(combined_allocations),
+        },
+        "is_combined": True,  # 标记这是组合方案
+    }
+    
+    logger.info(
+        f"[巨灾-组合] 组合完成: 队伍数={len(combined_allocations)}, "
+        f"总容量={total_capacity}, 覆盖能力={combined_caps}"
+    )
+    
+    return combined_solution
 
 
 # ============================================================================

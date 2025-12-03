@@ -37,6 +37,7 @@ TeamTypeEnum = ENUM(
     'armed_police',      # 武警部队
     'militia',           # 民兵预备役
     'volunteer',         # 志愿者队伍
+    'command',           # 指挥协调队
     name='team_type_v2',
     schema='operational_v2',
     create_type=False,

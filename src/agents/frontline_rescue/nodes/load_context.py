@@ -2,7 +2,7 @@
 
 This node loads all pending frontline events for a given scenario
 from the operational_v2.events_v2 table:
-- status = 'confirmed'
+- status IN ('pending', 'pre_confirmed', 'confirmed', 'planning')
 - no associated task in tasks_v2
 - exclude main earthquake event_type
 """
@@ -30,14 +30,14 @@ async def load_context_node(state: FrontlineRescueState) -> dict[str, Any]:
     """Load pending frontline events for the given scenario.
 
     Business rules:
-    - Only events with status = 'confirmed'
+    - Events with status in (pending, pre_confirmed, confirmed, planning)
     - Exclude main earthquake entries (event_type != 'earthquake')
     - Exclude events that already have tasks in tasks_v2
     """
 
     scenario_id = state.get("scenario_id")
-    if not scenario_id:
-        raise FrontlineContextError("scenario_id is required for frontline dispatch")
+    # if not scenario_id:
+    #     raise FrontlineContextError("scenario_id is required for frontline dispatch")
 
     logger.info("[Frontline] Loading pending events for scenario %s", scenario_id)
 
@@ -61,16 +61,26 @@ async def load_context_node(state: FrontlineRescueState) -> dict[str, Any]:
         raise FrontlineContextError(f"Failed to load frontline context: {exc}") from exc
 
 
-async def _load_pending_events(session: AsyncSession, scenario_id: str) -> list[FrontlineEvent]:
-    """Query all confirmed events without assigned tasks for a scenario."""
+async def _load_pending_events(session: AsyncSession, scenario_id: str | None) -> list[FrontlineEvent]:
+    """Query all unexecuted events without assigned tasks for a scenario."""
 
-    try:
-        scenario_uuid = UUID(scenario_id)
-    except ValueError as exc:  # noqa: BLE001
-        raise FrontlineContextError(f"Invalid scenario_id format: {scenario_id}") from exc
+    params = {}
+    where_clause = """
+        WHERE e.status IN ('pending', 'pre_confirmed', 'confirmed', 'planning')
+          AND e.event_type NOT IN ('earthquake', 'rainstorm', 'flood', 'landslide', 'rockfall')
+          AND t.id IS NULL
+    """
+    
+    if scenario_id:
+        try:
+            scenario_uuid = UUID(scenario_id)
+            params["scenario_id"] = scenario_uuid
+            where_clause += " AND e.scenario_id = :scenario_id"
+        except ValueError as exc:  # noqa: BLE001
+            raise FrontlineContextError(f"Invalid scenario_id format: {scenario_id}") from exc
 
     sql = text(
-        """
+        f"""
         SELECT 
             e.id,
             e.scenario_id,
@@ -91,10 +101,7 @@ async def _load_pending_events(session: AsyncSession, scenario_id: str) -> list[
         FROM operational_v2.events_v2 e
         LEFT JOIN operational_v2.tasks_v2 t
             ON t.event_id = e.id
-        WHERE e.status = 'confirmed'
-          AND e.event_type != 'earthquake'
-          AND t.id IS NULL
-          AND e.scenario_id = :scenario_id
+        {where_clause}
         ORDER BY 
             CASE e.priority 
                 WHEN 'critical' THEN 1 
@@ -106,7 +113,7 @@ async def _load_pending_events(session: AsyncSession, scenario_id: str) -> list[
         """
     )
 
-    result = await session.execute(sql, {"scenario_id": scenario_uuid})
+    result = await session.execute(sql, params)
     rows = result.fetchall()
 
     events: list[FrontlineEvent] = []

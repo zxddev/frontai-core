@@ -10,7 +10,7 @@ import json
 import logging
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks
@@ -24,6 +24,7 @@ from .schemas import (
     EmergencyAnalyzeRequest,
     EmergencyAnalyzeTaskResponse,
     EmergencyAnalyzeResult,
+    ConfirmEmergencySchemeRequest,
     RoutePlanningRequest,
     RoutePlanningTaskResponse,
     RoutePlanningResult,
@@ -41,7 +42,7 @@ _task_results: Dict[str, Dict[str, Any]] = {}
 # Redis配置
 REDIS_URL = "redis://192.168.31.50:6379/0"
 EMERGENCY_RESULT_PREFIX = "emergency_ai_result:"
-EMERGENCY_RESULT_TTL = 3600  # 结果保存1小时
+EMERGENCY_RESULT_TTL = 36000  # 结果保存10小时
 
 
 
@@ -49,10 +50,15 @@ EMERGENCY_RESULT_TTL = 3600  # 结果保存1小时
 async def _save_result_to_redis(task_id: str, result: Dict[str, Any]) -> bool:
     """保存结果到Redis"""
     try:
-        redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        # redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        # 使用全局配置的Redis客户端，避免硬编码URL
+        from src.core.redis import get_redis_client
+        redis_client = await get_redis_client()
+        
         key = f"{EMERGENCY_RESULT_PREFIX}{task_id}"
         await redis_client.setex(key, EMERGENCY_RESULT_TTL, json.dumps(result, ensure_ascii=False, default=str))
-        await redis_client.close()
+        # 统一管理的Redis客户端不需要每次手动close，由连接池管理
+        # await redis_client.close() 
         logger.info(f"[EmergencyAI] 结果已保存到Redis: {key}")
         return True
     except Exception as e:
@@ -63,10 +69,13 @@ async def _save_result_to_redis(task_id: str, result: Dict[str, Any]) -> bool:
 async def _get_result_from_redis(task_id: str) -> Optional[Dict[str, Any]]:
     """从Redis获取结果"""
     try:
-        redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        # redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        from src.core.redis import get_redis_client
+        redis_client = await get_redis_client()
+        
         key = f"{EMERGENCY_RESULT_PREFIX}{task_id}"
         data = await redis_client.get(key)
-        await redis_client.close()
+        # await redis_client.close()
         if data:
             logger.info(f"[EmergencyAI] 从Redis获取结果: {key}")
             return json.loads(data)
@@ -417,9 +426,9 @@ async def _broadcast_emergency_result(
     """WebSocket推送应急AI分析结果"""
     try:
         await broadcast_event_update(
-            scenario_id=str(request.scenario_id),
+            scenario_id=request.scenario_id,
             event_type="emergency_ai_analysis_completed",
-            data={
+            event_data={
                 "event_id": str(request.event_id),
                 "success": result.get("success"),
                 "has_recommendation": result.get("recommended_scheme") is not None,
@@ -475,6 +484,42 @@ async def emergency_analyze(
     )
 
 
+@router.get("/emergency-analyze/by-event/{event_id}")
+async def get_analysis_by_event_id(event_id: str) -> Dict[str, Any]:
+    """
+    通过事件ID查询分析状态和结果
+    支持页面刷新后的状态恢复
+    """
+    task_id = f"emergency-{event_id}"
+    
+    # 尝试获取结果
+    result = _task_results.get(task_id)
+    if result is None:
+        result = await _get_result_from_redis(task_id)
+        if result:
+             # 同步到内存缓存
+            _task_results[task_id] = result
+            
+    if result:
+        return {
+            "found": True,
+            "task_id": task_id,
+            "status": result.get("status", "unknown"),
+            "result": result if result.get("status") == "completed" else None,
+            "created_at": result.get("created_at"),
+            "completed_at": result.get("completed_at"),
+            "updated_time": result.get("completed_at") or result.get("created_at")
+        }
+    else:
+        # 返回默认空状态而不是404错误
+        return {
+            "found": False,
+            "task_id": task_id,
+            "status": "none",
+            "result": None
+        }
+
+
 @router.get("/emergency-analyze/{task_id}")
 async def get_emergency_analyze_result(task_id: str) -> EmergencyAnalyzeResult:
     """
@@ -511,6 +556,7 @@ async def get_emergency_analyze_result(task_id: str) -> EmergencyAnalyzeResult:
         understanding=result.get("understanding"),
         reasoning=result.get("reasoning"),
         htn_decomposition=result.get("htn_decomposition"),
+        strategic=result.get("strategic"),
         matching=result.get("matching"),
         optimization=result.get("optimization"),
         recommended_scheme=result.get("recommended_scheme"),
@@ -519,6 +565,317 @@ async def get_emergency_analyze_result(task_id: str) -> EmergencyAnalyzeResult:
         errors=result.get("errors", []),
         execution_time_ms=result.get("execution_time_ms"),
     )
+
+
+@router.post("/emergency-analyze/{task_id}/confirm")
+async def confirm_emergency_scheme(
+    task_id: str,
+    request: ConfirmEmergencySchemeRequest,
+) -> Dict[str, Any]:
+    """
+    确认部署AI推荐方案
+    
+    完整流程：
+    1. 获取AI分析结果
+    2. 查询事件详情
+    3. 校验队伍状态
+    4. 创建任务记录 (tasks_v2)
+    5. 创建分配记录 (task_assignments_v2)
+    6. 更新队伍状态 (rescue_teams_v2)
+    7. 更新事件状态 (events_v2)
+    8. WebSocket推送通知
+    
+    Args:
+        task_id: AI分析任务ID (格式: emergency-{event_id})
+        request: 确认请求，包含用户选中的队伍ID列表
+        
+    Returns:
+        确认结果，包含创建的任务ID和部署的队伍信息
+    """
+    from sqlalchemy import text
+    import uuid as uuid_lib
+    
+    logger.info(f"[EmergencyConfirm] 收到确认请求 task_id={task_id}, team_ids={request.team_ids}")
+    
+    # ========== 1. 获取AI分析结果 ==========
+    ai_result = _task_results.get(task_id)
+    if ai_result is None:
+        ai_result = await _get_result_from_redis(task_id)
+    
+    if ai_result is None:
+        raise AITaskNotFoundError(task_id)
+    
+    if not ai_result.get("success"):
+        return {
+            "success": False,
+            "error": "AI分析未成功，无法确认方案",
+            "errors": ai_result.get("errors", []),
+        }
+    
+    # 提取关键信息
+    event_id_str: str = ai_result.get("event_id", "")
+    scenario_id_str: str = ai_result.get("scenario_id", "")
+    scheme_explanation: str = ai_result.get("scheme_explanation", "AI推荐救援方案")
+    
+    if not event_id_str or not scenario_id_str:
+        return {
+            "success": False,
+            "error": "AI结果中缺少event_id或scenario_id",
+        }
+    
+    # 转换UUID
+    try:
+        event_id = UUID(event_id_str)
+        scenario_id = UUID(scenario_id_str)
+    except ValueError as e:
+        return {
+            "success": False,
+            "error": f"无效的event_id或scenario_id格式: {e}",
+        }
+    
+    # ========== 2. 校验前端传的队伍ID格式 ==========
+    validated_team_ids: List[str] = []
+    for tid in request.team_ids:
+        try:
+            validated_team_ids.append(str(UUID(tid)))
+        except ValueError:
+            return {
+                "success": False,
+                "error": f"无效的队伍ID格式: {tid}",
+            }
+    
+    if not validated_team_ids:
+        return {
+            "success": False,
+            "error": "未选择任何队伍",
+        }
+    
+    logger.info(f"[EmergencyConfirm] 校验通过 event_id={event_id}, 队伍数={len(validated_team_ids)}")
+    
+    # ========== 3-8. 在事务中执行所有数据库操作 ==========
+    async with AsyncSessionLocal() as db:
+        try:
+            # 3. 查询事件详情
+            event_query = text("""
+                SELECT id, title, description, priority, status,
+                       ST_X(location::geometry) as lng, ST_Y(location::geometry) as lat
+                FROM operational_v2.events_v2
+                WHERE id = :event_id
+            """)
+            event_result = await db.execute(event_query, {"event_id": str(event_id)})
+            event_row = event_result.fetchone()
+            
+            if not event_row:
+                return {
+                    "success": False,
+                    "error": f"事件不存在: {event_id}",
+                }
+            
+            event_title: str = event_row.title or "救援任务"
+            event_description: str = event_row.description or ""
+            event_priority: str = event_row.priority or "medium"
+            event_status: str = event_row.status
+            event_lng: float = event_row.lng
+            event_lat: float = event_row.lat
+            
+            logger.info(f"[EmergencyConfirm] 事件详情 title={event_title}, status={event_status}")
+            
+            # 4. 查询队伍信息并校验状态
+            placeholders = ','.join(f"'{tid}'" for tid in validated_team_ids)
+            team_query = text(f"""
+                SELECT id, name, status
+                FROM operational_v2.rescue_teams_v2
+                WHERE id IN ({placeholders})
+            """)
+            team_result = await db.execute(team_query)
+            teams = team_result.fetchall()
+            
+            # 构建队伍信息映射
+            team_info_map: Dict[str, Dict[str, Any]] = {}
+            unavailable_teams: List[Dict[str, Any]] = []
+            available_teams: List[Dict[str, Any]] = []
+            
+            for team in teams:
+                team_id_str = str(team.id)
+                team_info_map[team_id_str] = {
+                    "id": team_id_str,
+                    "name": team.name,
+                    "status": team.status,
+                }
+                if team.status != "standby":
+                    unavailable_teams.append({
+                        "id": team_id_str,
+                        "name": team.name,
+                        "current_status": team.status,
+                    })
+                else:
+                    available_teams.append({
+                        "id": team_id_str,
+                        "name": team.name,
+                    })
+            
+            # 检查未找到的队伍
+            found_ids = set(team_info_map.keys())
+            for tid in validated_team_ids:
+                if tid not in found_ids:
+                    unavailable_teams.append({
+                        "id": tid,
+                        "name": "未知队伍",
+                        "current_status": "not_found",
+                    })
+            
+            # 如果有不可用队伍，返回冲突
+            if unavailable_teams:
+                logger.warning(f"[EmergencyConfirm] 存在冲突 不可用队伍={len(unavailable_teams)}")
+                return {
+                    "success": False,
+                    "conflict": True,
+                    "unavailable_teams": unavailable_teams,
+                    "available_teams": [t["id"] for t in available_teams],
+                    "message": f"有 {len(unavailable_teams)} 支队伍不可用",
+                }
+            
+            # ========== 5. 创建任务记录 ==========
+            new_task_id = uuid_lib.uuid4()
+            
+            # 获取下一个任务编号
+            code_query = text("""
+                SELECT COALESCE(MAX(CAST(SUBSTRING(task_code FROM 5) AS INTEGER)), 0) + 1
+                FROM operational_v2.tasks_v2
+                WHERE scenario_id = :scenario_id
+            """)
+            code_result = await db.execute(code_query, {"scenario_id": str(scenario_id)})
+            next_code = code_result.scalar() or 1
+            task_code = f"TSK-{next_code:04d}"
+            
+            # 任务标题：事件标题 + 救援任务
+            task_title = f"{event_title} - 救援任务"
+            
+            # 任务描述：合并事件描述和AI方案说明
+            task_description = f"{event_description}\n\n【AI方案说明】\n{scheme_explanation[:500]}"
+            
+            insert_task = text("""
+                INSERT INTO operational_v2.tasks_v2 (
+                    id, scenario_id, event_id, task_code, task_type,
+                    title, description, status, priority,
+                    target_location, instructions, created_at, updated_at
+                ) VALUES (
+                    :id, :scenario_id, :event_id, :task_code, 'rescue',
+                    :title, :description, 'assigned', :priority,
+                    ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
+                    :instructions, now(), now()
+                )
+            """)
+            await db.execute(insert_task, {
+                "id": str(new_task_id),
+                "scenario_id": str(scenario_id),
+                "event_id": str(event_id),
+                "task_code": task_code,
+                "title": task_title,
+                "description": task_description,
+                "priority": event_priority,
+                "lng": event_lng,
+                "lat": event_lat,
+                "instructions": scheme_explanation[:1000],
+            })
+            
+            logger.info(f"[EmergencyConfirm] 创建任务 task_id={new_task_id}, task_code={task_code}")
+            
+            # ========== 6. 创建分配记录 ==========
+            for team in available_teams:
+                assignment_id = uuid_lib.uuid4()
+                insert_assignment = text("""
+                    INSERT INTO operational_v2.task_assignments_v2 (
+                        id, task_id, assignee_type, assignee_id, assignee_name,
+                        assignment_source, assignment_reason, status,
+                        assigned_at, created_at, updated_at
+                    ) VALUES (
+                        :id, :task_id, 'team', :assignee_id, :assignee_name,
+                        'ai_recommended', :reason, 'pending',
+                        now(), now(), now()
+                    )
+                """)
+                await db.execute(insert_assignment, {
+                    "id": str(assignment_id),
+                    "task_id": str(new_task_id),
+                    "assignee_id": team["id"],
+                    "assignee_name": team["name"],
+                    "reason": "AI智能推荐",
+                })
+            
+            logger.info(f"[EmergencyConfirm] 创建分配记录 数量={len(available_teams)}")
+            
+            # ========== 7. 更新队伍状态 ==========
+            team_id_list = [t["id"] for t in available_teams]
+            placeholders = ','.join(f"'{tid}'" for tid in team_id_list)
+            update_teams = text(f"""
+                UPDATE operational_v2.rescue_teams_v2
+                SET status = 'deployed',
+                    current_task_id = :task_id,
+                    updated_at = now()
+                WHERE id IN ({placeholders})
+                  AND status = 'standby'
+                RETURNING id, name
+            """)
+            update_result = await db.execute(update_teams, {"task_id": str(new_task_id)})
+            deployed_rows = update_result.fetchall()
+            deployed_info = [{"id": str(r.id), "name": r.name} for r in deployed_rows]
+            
+            logger.info(f"[EmergencyConfirm] 更新队伍状态 deployed={len(deployed_info)}")
+            
+            # ========== 8. 更新事件状态 ==========
+            # 状态转换: confirmed → planning
+            if event_status == "confirmed":
+                update_event = text("""
+                    UPDATE operational_v2.events_v2
+                    SET status = 'planning', updated_at = now()
+                    WHERE id = :event_id
+                """)
+                await db.execute(update_event, {"event_id": str(event_id)})
+                logger.info(f"[EmergencyConfirm] 事件状态更新 {event_status} → planning")
+            elif event_status == "planning":
+                # 已经是planning状态，可以保持或更新为executing
+                pass
+            
+            # 提交事务
+            await db.commit()
+            
+            logger.info(
+                f"[EmergencyConfirm] 确认成功 task_id={new_task_id}, "
+                f"task_code={task_code}, deployed={len(deployed_info)}"
+            )
+            
+            # ========== 9. WebSocket推送 ==========
+            try:
+                await broadcast_event_update(
+                    scenario_id=scenario_id,
+                    event_type="rescue_task_created",
+                    event_data={
+                        "event_id": str(event_id),
+                        "task_id": str(new_task_id),
+                        "task_code": task_code,
+                        "deployed_teams": deployed_info,
+                    },
+                )
+                logger.info("[EmergencyConfirm] WebSocket推送成功")
+            except Exception as ws_err:
+                logger.warning(f"[EmergencyConfirm] WebSocket推送失败: {ws_err}")
+            
+            return {
+                "success": True,
+                "task_id": str(new_task_id),
+                "task_code": task_code,
+                "deployed_teams": deployed_info,
+                "message": f"成功创建任务 {task_code}，部署 {len(deployed_info)} 支队伍",
+            }
+            
+        except Exception as e:
+            await db.rollback()
+            logger.exception(f"[EmergencyConfirm] 确认失败: {e}")
+            return {
+                "success": False,
+                "error": f"确认部署失败: {str(e)}",
+            }
 
 
 # ============================================================================

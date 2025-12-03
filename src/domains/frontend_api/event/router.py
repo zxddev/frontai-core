@@ -141,10 +141,13 @@ async def get_pending_events(
 # 地震事件触发（模拟仿真）
 # ============================================================================
 
+from src.domains.scenarios.service import ScenarioService
+
 @router.post("/earthquake/trigger", response_model=ApiResponse[EarthquakeTriggerResponse])
 async def trigger_earthquake_event(
     request: EarthquakeTriggerRequest,
     service: EventService = Depends(get_event_service),
+    db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[EarthquakeTriggerResponse]:
     """
     触发地震事件（模拟仿真）
@@ -160,7 +163,6 @@ async def trigger_earthquake_event(
     请求示例：
     ```json
     {
-        "scenarioId": "550e8400-e29b-41d4-a716-446655440000",
         "magnitude": 6.5,
         "location": {"longitude": 104.5, "latitude": 31.2},
         "depthKm": 10,
@@ -177,6 +179,19 @@ async def trigger_earthquake_event(
     )
     
     try:
+        # 0. 处理想定ID（如果未提供，则从数据库查询当前活动想定）
+        scenario_id = request.scenario_id
+        if not scenario_id:
+            scenario_service = ScenarioService(db)
+            # 查询数据库中状态为 active 的想定
+            active_scenario = await scenario_service.get_active()
+            if active_scenario:
+                scenario_id = active_scenario.id
+                logger.info(f"使用活动想定ID: {scenario_id}")
+            else:
+                # 如果没有活动想定，返回错误
+                return ApiResponse.error(400, "未指定想定ID，且系统中无活动想定（status='active'）")
+
         # 1. 构建推送消息文本（如果用户未提供则自动生成）
         push_message = request.message
         if not push_message:
@@ -187,7 +202,7 @@ async def trigger_earthquake_event(
         
         # 3. 幂等检查：同一想定下相同震中+震级的地震只能创建一次
         existing = await service.repo.find_earthquake_by_params(
-            scenario_id=request.scenario_id,
+            scenario_id=scenario_id,
             epicenter_name=request.epicenter_name,
             magnitude=float(request.magnitude),
         )
@@ -208,7 +223,7 @@ async def trigger_earthquake_event(
         # 4. **创建事件** - 调用EventService创建真实事件记录（入库）
         # EventService.create()内部会自动广播到 /topic/scenario.disaster.triggered
         event_create = EventCreate(
-            scenario_id=request.scenario_id,
+            scenario_id=scenario_id,
             event_type=EventType.earthquake,
             source_type=EventSourceType.system_inference,  # 标记为系统推断（模拟仿真）
             source_detail={
@@ -235,7 +250,7 @@ async def trigger_earthquake_event(
         # 5. 写入风险区域表（用于路径规划绕行判断）
         await _create_earthquake_risk_zones(
             db=service.repo.db,
-            scenario_id=request.scenario_id,
+            scenario_id=scenario_id,
             event_id=event.id,
             center_lng=request.location.longitude,
             center_lat=request.location.latitude,
@@ -279,7 +294,7 @@ async def trigger_earthquake_event(
             },
             source=MapEntitySource.system,
             visible_on_map=True,
-            scenario_id=request.scenario_id,
+            scenario_id=scenario_id,
             event_id=event.id,
         )
         earthquake_entity = await map_entity_service.create(entity_create)
@@ -309,7 +324,7 @@ async def trigger_earthquake_event(
             message=push_message,
             animation_duration_ms=request.animation_duration_ms,
             timestamp=event_timestamp,
-            scenario_id=str(request.scenario_id),
+            scenario_id=str(scenario_id),
             estimated_victims=request.estimated_victims if request.estimated_victims > 0 else None,
             affected_area_km2=request.affected_area_km2,
             # 关联实体ID（前端用于地图渲染）

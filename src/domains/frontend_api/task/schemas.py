@@ -92,6 +92,7 @@ class RescueDetailResponse(BaseModel):
 
 class RescuePoint(BaseModel):
     """救援点信息"""
+    id: str = Field(..., description="事件ID")
     level: int = Field(1, description="紧急级别")
     title: str
     origin: str

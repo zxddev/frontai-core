@@ -31,6 +31,7 @@ class TeamType(str, Enum):
     armed_police = "armed_police"        # 武警部队
     militia = "militia"                  # 民兵预备役
     volunteer = "volunteer"              # 志愿者队伍
+    command = "command"                  # 指挥协调队
 
 
 class TeamStatus(str, Enum):

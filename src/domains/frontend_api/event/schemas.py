@@ -26,7 +26,7 @@ class EarthquakeTriggerRequest(BaseModel):
     1. 先推送动画效果到WebSocket
     2. 然后创建真实事件记录
     """
-    scenario_id: UUID = Field(..., alias="scenarioId", description="想定ID")
+    scenario_id: Optional[UUID] = Field(None, alias="scenarioId", description="想定ID，不传则使用默认或最新活动想定")
     
     # 地震基本参数
     magnitude: Decimal = Field(

@@ -121,6 +121,23 @@ class StagingConstraints(BaseModel):
     require_helicopter_landing: bool = Field(False, description="是否要求直升机起降")
     max_candidates: int = Field(50, ge=1, description="最大候选点数量")
     top_n: int = Field(5, ge=1, description="返回前N个推荐")
+    # 扩展筛选条件
+    min_area_m2: Optional[float] = Field(None, ge=0, description="最小面积要求(m²)")
+    require_ground_stability: Optional[str] = Field(
+        None, description="地面稳定性要求: excellent/good/moderate"
+    )
+    require_network_type: Optional[str] = Field(
+        None, description="通信网络类型要求: 5g/4g_lte/satellite"
+    )
+    max_distance_to_supply_m: Optional[float] = Field(
+        None, ge=0, description="距补给点最大距离(m)"
+    )
+    max_distance_to_medical_m: Optional[float] = Field(
+        None, ge=0, description="距医疗点最大距离(m)"
+    )
+    site_types: Optional[List[str]] = Field(
+        None, description="限定场地类型列表"
+    )
 
 
 class EvaluationWeights(BaseModel):
@@ -261,3 +278,87 @@ class StagingRecommendationRequest(BaseModel):
         default_factory=EvaluationWeights,
         description="评估权重"
     )
+
+
+# ============== 安全点位查找接口模型 ==============
+
+class SafePointConstraints(BaseModel):
+    """安全点位筛选约束"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    min_buffer_m: float = Field(500.0, ge=0, description="距危险区最小缓冲距离(m)")
+    max_slope_deg: float = Field(15.0, ge=0, le=90, description="最大坡度(度)")
+    min_area_m2: Optional[float] = Field(None, ge=0, description="最小面积要求(m²)")
+    require_water_supply: bool = Field(False, description="是否要求水源")
+    require_power_supply: bool = Field(False, description="是否要求电源")
+    require_helicopter_landing: bool = Field(False, description="是否要求直升机起降")
+    require_ground_stability: Optional[str] = Field(
+        None, description="地面稳定性要求: excellent/good/moderate"
+    )
+    require_network_type: Optional[str] = Field(
+        None, description="通信网络类型要求: 5g/4g_lte/satellite"
+    )
+    max_distance_to_supply_m: Optional[float] = Field(
+        None, ge=0, description="距补给点最大距离(m)"
+    )
+    max_distance_to_medical_m: Optional[float] = Field(
+        None, ge=0, description="距医疗点最大距离(m)"
+    )
+    site_types: Optional[List[str]] = Field(
+        None, description="限定场地类型列表: open_ground/parking_lot/sports_field/plaza/helipad等"
+    )
+
+
+class FindSafePointRequest(BaseModel):
+    """安全点位查找请求"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    scenario_id: UUID = Field(..., description="想定ID")
+    center_lon: float = Field(..., description="搜索中心经度")
+    center_lat: float = Field(..., description="搜索中心纬度")
+    search_radius_m: float = Field(30000.0, ge=0, description="搜索半径(m)")
+    constraints: SafePointConstraints = Field(
+        default_factory=SafePointConstraints,
+        description="筛选约束条件"
+    )
+    top_n: int = Field(5, ge=1, le=50, description="返回前N个结果")
+
+
+class SafePointFacilities(BaseModel):
+    """安全点位设施信息"""
+    has_water: bool = False
+    has_power: bool = False
+    can_helicopter: bool = False
+    network_type: str = "none"
+    ground_stability: str = "unknown"
+
+
+class SafePointResult(BaseModel):
+    """安全点位结果"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    site_id: UUID
+    site_code: str
+    name: str
+    longitude: float
+    latitude: float
+    site_type: str
+    area_m2: Optional[float] = None
+    slope_degree: Optional[float] = None
+    distance_m: float = Field(description="距搜索中心距离(m)")
+    distance_to_danger_m: Optional[float] = Field(None, description="距危险区距离(m)")
+    score: float = Field(description="综合评分 0-1")
+    facilities: SafePointFacilities = Field(default_factory=SafePointFacilities)
+    nearest_supply_depot_m: Optional[float] = None
+    nearest_medical_point_m: Optional[float] = None
+
+
+class FindSafePointResponse(BaseModel):
+    """安全点位查找响应"""
+    model_config = ConfigDict(populate_by_name=True)
+
+    success: bool = True
+    error: Optional[str] = None
+    sites: List[SafePointResult] = Field(default_factory=list)
+    total_candidates: int = 0
+    elapsed_ms: int = 0

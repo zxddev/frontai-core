@@ -33,11 +33,14 @@ from src.core.database import Base
 
 # 事件类型枚举
 EventTypeEnum = ENUM(
-    'earthquake',          # 地震（主震）
+    'earthquake',          # 地震
+    'rainstorm',           # 雨区
+    'danger_zone',         # 危险区
     'trapped_person',      # 被困人员
     'fire',                # 火灾
     'flood',               # 洪水
     'landslide',           # 滑坡
+    'rockfall',            # 落石
     'building_collapse',   # 建筑倒塌
     'road_damage',         # 道路损毁
     'power_outage',        # 电力中断

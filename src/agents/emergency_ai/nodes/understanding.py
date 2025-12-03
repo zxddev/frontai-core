@@ -16,8 +16,106 @@ from langchain_core.messages import HumanMessage, AIMessage
 from ..state import EmergencyAIState, ParsedDisasterInfo
 from ..tools.llm_tools import parse_disaster_description_async
 from ..tools.rag_tools import search_similar_cases_async
+from src.planning.algorithms.assessment.disaster_assessment import DisasterAssessment, AlgorithmStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _assess_with_physics_model(
+    parsed_disaster: ParsedDisasterInfo,
+    structured_input: Dict[str, Any]
+) -> ParsedDisasterInfo:
+    """
+    使用物理模型校准灾情评估
+    
+    利用src/planning中的高精度物理模型（烈度衰减、高斯烟羽等）
+    对LLM提取的参数进行二次计算和校准。
+    """
+    try:
+        assessor = DisasterAssessment()
+        disaster_type = parsed_disaster.get("disaster_type", "unknown")
+        
+        # 构造评估参数
+        params = {}
+        
+        # 统一位置格式
+        location = structured_input.get("location", {"latitude": 0, "longitude": 0})
+        if "lat" in location: location["latitude"] = location["lat"]
+        if "lng" in location: location["longitude"] = location["lng"]
+        
+        if disaster_type == "earthquake":
+            # 尝试从parsed_disaster或structured_input获取震级
+            magnitude = parsed_disaster.get("magnitude")
+            if magnitude is None:
+                magnitude = structured_input.get("magnitude", 5.0)
+                
+            params = {
+                "magnitude": float(magnitude),
+                "depth_km": float(parsed_disaster.get("depth_km") or structured_input.get("depth_km", 10.0)),
+                "epicenter": location,
+                "population_density": float(structured_input.get("population_density", 1000)),
+                "building_vulnerability": float(structured_input.get("building_vulnerability", 0.5)),
+            }
+            
+        elif disaster_type == "flood":
+             params = {
+                "rainfall_mm": float(structured_input.get("rainfall_mm", 100.0)),
+                "duration_hours": float(structured_input.get("duration_hours", 24.0)),
+                "affected_area_km2": float(structured_input.get("affected_area_km2", 10.0)),
+                "population_density": float(structured_input.get("population_density", 3000)),
+             }
+             
+        elif disaster_type == "hazmat":
+             # 尝试从additional_info提取化学品类型
+             chemical_type = "unknown"
+             if "additional_info" in parsed_disaster:
+                 chemical_type = parsed_disaster["additional_info"].get("chemical_type", "unknown")
+                 
+             params = {
+                 "chemical_type": chemical_type,
+                 "leak_rate_kg_s": float(structured_input.get("leak_rate", 1.0)),
+                 "wind_speed_ms": float(structured_input.get("wind_speed", 2.0)),
+                 "wind_direction": float(structured_input.get("wind_direction", 0.0)),
+                 "source_location": location,
+             }
+        
+        if params:
+            logger.info(f"[物理模型] 启动评估: type={disaster_type}, params={params}")
+            result = assessor.run({
+                "disaster_type": disaster_type,
+                "params": params
+            })
+            
+            if result.status == AlgorithmStatus.SUCCESS and result.solution:
+                solution = result.solution
+                
+                # 校准数据 (覆盖LLM的估算值)
+                parsed_disaster["affected_area_km2"] = solution.affected_area_km2
+                parsed_disaster["affected_population"] = solution.affected_population
+                parsed_disaster["estimated_casualties"] = solution.estimated_casualties
+                parsed_disaster["disaster_level"] = solution.level.value
+                
+                # 标记校准状态
+                if "additional_info" not in parsed_disaster:
+                    parsed_disaster["additional_info"] = {}
+                parsed_disaster["additional_info"]["physics_model_calibrated"] = True
+                parsed_disaster["additional_info"]["calibration_source"] = "src.planning.algorithms.assessment"
+                
+                logger.info(
+                    f"[物理模型] 校准成功: "
+                    f"面积={solution.affected_area_km2:.2f}km2, "
+                    f"人口={solution.affected_population}, "
+                    f"等级={solution.level.value}"
+                )
+            else:
+                logger.warning(f"[物理模型] 评估未成功: {result.message}")
+        else:
+            logger.info(f"[物理模型] 跳过: 不支持的灾害类型或参数缺失 ({disaster_type})")
+                
+    except Exception as e:
+        logger.warning(f"[物理模型] 执行异常: {e}", exc_info=True)
+        
+    return parsed_disaster
 
 
 async def _parse_disaster_with_llm(
@@ -114,14 +212,15 @@ async def understand_disaster(state: EmergencyAIState) -> Dict[str, Any]:
             "current_phase": "understanding_failed",
         }
     
-    # RAG失败时直接报错，不允许降级
+    # 【安全修复】RAG失败时降级运行，不终止流程
+    # 救灾系统必须具备鲁棒性，RAG故障不应阻止救援决策
     if rag_error:
-        logger.error(f"RAG检索失败: {rag_error}")
-        errors.append(f"RAG检索失败: {rag_error}")
-        return {
-            "errors": errors,
-            "current_phase": "understanding_failed",
-        }
+        logger.warning(f"[降级模式] RAG检索失败: {rag_error}，继续使用纯LLM结果")
+        cases = []  # 使用空案例列表继续
+    
+    # 使用物理模型进行二次校准
+    if parsed_disaster:
+        parsed_disaster = _assess_with_physics_model(parsed_disaster, structured_input)
     
     # 更新追踪信息
     trace = state.get("trace", {})
@@ -129,6 +228,8 @@ async def understand_disaster(state: EmergencyAIState) -> Dict[str, Any]:
     trace["llm_calls"] = trace.get("llm_calls", 0) + 1
     trace["rag_calls"] = trace.get("rag_calls", 0) + 1
     trace["parallel_optimization"] = True
+    if parsed_disaster.get("additional_info", {}).get("physics_model_calibrated"):
+        trace["physics_model_used"] = True
     
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(

@@ -69,21 +69,15 @@ async def extract_capability_needs(state: TaskDispatchState) -> Dict[str, Any]:
     for task in scheme_tasks:
         task_id = task.get("task_id", "")
         
-        # 从mt_library查询元任务详情
+        # 从Neo4j获取元任务详情
         meta_task = get_meta_task(task_id)
-        if meta_task:
-            required_caps = meta_task.get("required_capabilities", [])
-            duration_range = meta_task.get("duration_range", {})
-            duration_min = duration_range.get("max", 60)  # 取最大值作为预估
-        else:
-            required_caps = task.get("required_capabilities", [])
-            duration_min = task.get("duration_min", 60)
+        required_caps: List[str] = meta_task.get("required_capabilities", [])
+        duration_min: int = meta_task.get("duration_max", 60)
         
-        # 更新任务信息
         enriched_task: SchemeTaskInfo = {
             "task_id": task_id,
-            "task_name": task.get("task_name", meta_task.get("name", "") if meta_task else ""),
-            "phase": task.get("phase", meta_task.get("phase", "") if meta_task else ""),
+            "task_name": task.get("task_name") or meta_task.get("name", ""),
+            "phase": task.get("phase") or meta_task.get("phase", ""),
             "priority": task.get("priority", "medium"),
             "sequence": task.get("sequence", 0),
             "depends_on": task.get("depends_on", []),

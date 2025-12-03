@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 from uuid import UUID
 
 from src.core.database import get_db
+from src.domains.frontend_api.common import ApiResponse
 from .service import EventService
 from .schemas import (
     EventCreate, EventUpdate, EventResponse, EventStatusUpdate,
@@ -20,13 +21,28 @@ def get_service(db: AsyncSession = Depends(get_db)) -> EventService:
     return EventService(db)
 
 
-@router.post("", response_model=EventResponse, status_code=201)
+@router.post("", response_model=ApiResponse[EventResponse], status_code=200)
 async def create_event(
     data: EventCreate,
     service: EventService = Depends(get_service),
+    db: AsyncSession = Depends(get_db),
 ):
-    """创建/上报事件"""
-    return await service.create(data)
+    """创建/上报事件
+    
+    如果不传 scenario_id，自动使用当前活动想定（status='active'）
+    """
+    # 如果没有传 scenario_id，从数据库查询活动想定
+    if not data.scenario_id:
+        from src.domains.scenarios.service import ScenarioService
+        scenario_service = ScenarioService(db)
+        active_scenario = await scenario_service.get_active()
+        if active_scenario:
+            data.scenario_id = active_scenario.id
+        else:
+            raise HTTPException(status_code=400, detail="未指定scenario_id，且系统中无活动想定（status='active'）")
+    
+    result = await service.create(data)
+    return ApiResponse.success(result)
 
 
 @router.get("", response_model=EventListResponse)

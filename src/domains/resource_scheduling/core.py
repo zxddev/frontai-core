@@ -314,7 +314,7 @@ class ResourceSchedulingCore:
             FROM operational_v2.rescue_teams_v2 t
             JOIN operational_v2.team_capabilities_v2 tc ON t.id = tc.team_id
             LEFT JOIN team_vehicles tv ON t.id = tv.team_id
-            WHERE t.status = 'available'
+            WHERE t.status = 'standby'
             AND ST_DWithin(
                 t.base_location::geography,
                 ST_SetSRID(ST_MakePoint(:dest_lon, :dest_lat), 4326)::geography,

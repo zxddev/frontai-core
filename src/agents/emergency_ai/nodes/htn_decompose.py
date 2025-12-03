@@ -1,7 +1,8 @@
 """
 HTN任务分解节点
 
-基于mt_library.json的任务链配置进行任务分解，支持多场景组合和并行任务调度。
+基于Neo4j知识图谱的Scene/TaskChain/MetaTask节点进行任务分解，
+支持多场景组合和并行任务调度。
 """
 from __future__ import annotations
 
@@ -16,189 +17,209 @@ from ..state import (
     ParallelTaskGroup,
 )
 from ..utils.mt_library import (
-    load_mt_library,
-    get_chain_for_scene,
     get_meta_task,
     TaskChainConfig,
-    SCENE_TO_CHAIN,
 )
-from ..tools.kg_tools import query_task_dependencies_async
+from ..tools.kg_tools import (
+    query_task_dependencies_async,
+    query_scene_by_disaster_async,
+    query_task_chain_async,
+    query_metatask_dependencies_async,
+    query_metatask_details_async,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# 场景识别
+# 场景识别（Neo4j驱动）
 # ============================================================================
 
-def _identify_scenes(parsed_disaster: ParsedDisasterInfo) -> List[str]:
+async def _identify_scenes_from_kg(parsed_disaster: ParsedDisasterInfo) -> List[str]:
     """
-    根据灾情分析结果识别场景
+    根据灾情分析结果从Neo4j查询匹配的场景
     
     Args:
         parsed_disaster: LLM解析的灾情信息
         
     Returns:
         场景代码列表，如["S1", "S2"]
-    """
-    scenes: List[str] = []
-    disaster_type = parsed_disaster.get("disaster_type", "").lower()
-    
-    # 详细日志：输入参数
-    logger.info(f"[HTN-场景识别] 输入参数:")
-    logger.info(f"  - disaster_type: {disaster_type}")
-    logger.info(f"  - has_secondary_fire: {parsed_disaster.get('has_secondary_fire')}")
-    logger.info(f"  - has_hazmat_leak: {parsed_disaster.get('has_hazmat_leak')}")
-    logger.info(f"  - severity: {parsed_disaster.get('severity')}")
-    logger.info(f"  - estimated_trapped: {parsed_disaster.get('estimated_trapped')}")
-    
-    # 地震相关场景
-    if disaster_type == "earthquake" or "地震" in disaster_type:
-        scenes.append("S1")  # 地震主灾
-        logger.info(f"[HTN-场景识别] 识别到地震场景 -> 添加S1")
         
-        # 检查次生灾害
-        if parsed_disaster.get("has_secondary_fire"):
-            scenes.append("S2")  # 次生火灾
-            logger.info(f"[HTN-场景识别] 存在次生火灾 -> 添加S2")
-        if parsed_disaster.get("has_hazmat_leak"):
-            scenes.append("S3")  # 危化品泄漏
-            logger.info(f"[HTN-场景识别] 存在危化品泄漏 -> 添加S3")
-    
-    # 洪水/泥石流场景
-    if disaster_type in ["flood", "debris_flow", "landslide"] or "洪" in disaster_type or "泥石流" in disaster_type or "滑坡" in disaster_type:
-        scenes.append("S4")  # 山洪泥石流
-        logger.info(f"[HTN-场景识别] 识别到洪水/泥石流/滑坡 -> 添加S4")
-    
-    # 暴雨内涝场景
-    if disaster_type == "waterlogging" or "内涝" in disaster_type or "暴雨" in disaster_type:
-        scenes.append("S5")  # 暴雨内涝
-        logger.info(f"[HTN-场景识别] 识别到暴雨内涝 -> 添加S5")
-    
-    # 火灾场景（非地震次生）
-    if disaster_type == "fire" and "S2" not in scenes:
-        scenes.append("S2")  # 火灾处置链
-        logger.info(f"[HTN-场景识别] 识别到独立火灾 -> 添加S2")
-    
-    # 危化品泄漏（非地震次生）
-    if disaster_type == "hazmat" and "S3" not in scenes:
-        scenes.append("S3")  # 危化品处置链
-        logger.info(f"[HTN-场景识别] 识别到独立危化品泄漏 -> 添加S3")
-    
-    # 默认场景
-    if not scenes:
-        logger.warning(f"[HTN-场景识别] 无法识别场景，灾害类型: {disaster_type}，使用默认S1")
-        scenes.append("S1")
-    
-    logger.info(f"[HTN-场景识别] 最终识别场景: {scenes}")
-    return scenes
-
-
-# ============================================================================
-# 任务链合并
-# ============================================================================
-
-def _merge_chains(chains: List[TaskChainConfig]) -> Tuple[List[str], Dict[str, List[str]]]:
+    Raises:
+        RuntimeError: Neo4j查询失败
     """
-    合并多条任务链
+    disaster_type = parsed_disaster.get("disaster_type", "earthquake")
     
-    复合灾害时需要执行多条任务链，合并任务和依赖关系。
+    conditions = {
+        "has_secondary_fire": parsed_disaster.get("has_secondary_fire", False),
+        "has_hazmat_leak": parsed_disaster.get("has_hazmat_leak", False),
+        "has_building_collapse": parsed_disaster.get("has_building_collapse", False),
+    }
+    
+    logger.info(f"[HTN-场景识别] 从Neo4j查询场景")
+    logger.info(f"  - disaster_type: {disaster_type}")
+    logger.info(f"  - conditions: {conditions}")
+    
+    scene_results = await query_scene_by_disaster_async(
+        disaster_type=disaster_type,
+        conditions=conditions,
+    )
+    
+    if not scene_results:
+        raise RuntimeError(
+            f"Neo4j未返回匹配场景: disaster_type={disaster_type}, conditions={conditions}"
+        )
+    
+    scene_codes = [s["scene_code"] for s in scene_results]
+    scene_names = [s["scene_name"] for s in scene_results]
+    
+    logger.info(f"[HTN-场景识别] Neo4j返回场景: {scene_codes}")
+    for s in scene_results:
+        logger.info(f"  - {s['scene_code']}: {s['scene_name']}")
+    
+    return scene_codes
+
+
+# ============================================================================
+# 任务链加载与合并（Neo4j驱动）
+# ============================================================================
+
+async def _load_chains_from_kg(scene_codes: List[str]) -> List[Dict[str, Any]]:
+    """
+    从Neo4j加载场景对应的任务链配置
     
     Args:
-        chains: 任务链配置列表
+        scene_codes: 场景代码列表
         
     Returns:
-        (合并后的任务列表, 合并后的依赖关系)
+        任务链配置列表
+        
+    Raises:
+        RuntimeError: 如果任何场景没有对应的任务链
+    """
+    chains: List[Dict[str, Any]] = []
+    
+    for scene_code in scene_codes:
+        chain = await query_task_chain_async(scene_code)
+        if chain is None:
+            raise RuntimeError(f"Neo4j未找到场景{scene_code}对应的任务链")
+        chains.append(chain)
+        logger.info(f"[HTN-加载] 从Neo4j加载任务链: {chain['chain_name']} ({len(chain['tasks'])}个任务)")
+    
+    return chains
+
+
+async def _merge_chains_with_kg_deps(
+    chains: List[Dict[str, Any]],
+) -> Tuple[List[str], Dict[str, List[str]]]:
+    """
+    合并多条任务链，并从Neo4j查询依赖关系
+    
+    Args:
+        chains: 从Neo4j加载的任务链配置列表
+        
+    Returns:
+        (合并后的任务ID列表, Neo4j查询的依赖关系)
     """
     logger.info(f"[HTN-合并] 开始合并{len(chains)}条任务链")
     
-    all_tasks: Set[str] = set()
-    merged_deps: Dict[str, List[str]] = {}
+    all_task_ids: Set[str] = set()
     
     for chain in chains:
-        chain_name = chain.get("name", "未知")
+        chain_name = chain.get("chain_name", "未知")
         chain_tasks = chain.get("tasks", [])
-        chain_deps = chain.get("dependencies", {})
+        task_ids = [t["task_id"] for t in chain_tasks]
+        
         logger.info(f"[HTN-合并] 处理任务链: {chain_name}")
-        logger.info(f"  - 任务数: {len(chain_tasks)}")
-        logger.info(f"  - 依赖关系数: {len(chain_deps)}")
-        logger.info(f"  - 任务列表: {chain_tasks}")
+        logger.info(f"  - 任务数: {len(task_ids)}")
+        logger.info(f"  - 任务列表: {task_ids}")
         
-        # 合并任务
-        all_tasks.update(chain_tasks)
-        
-        # 合并依赖关系
-        for task_id, deps in chain_deps.items():
-            if task_id in merged_deps:
-                # 已有依赖，合并去重
-                existing = set(merged_deps[task_id])
-                existing.update(deps)
-                merged_deps[task_id] = list(existing)
-            else:
-                merged_deps[task_id] = list(deps)
+        all_task_ids.update(task_ids)
+    
+    task_list = list(all_task_ids)
+    logger.info(f"[HTN-合并] 合并后任务: {sorted(task_list)}")
+    
+    # 从Neo4j查询MetaTask之间的DEPENDS_ON关系
+    logger.info(f"[HTN-合并] 从Neo4j查询任务依赖关系...")
+    merged_deps = await query_metatask_dependencies_async(task_list)
     
     logger.info(f"[HTN-合并] 合并完成:")
-    logger.info(f"  - 总任务数: {len(all_tasks)}")
+    logger.info(f"  - 总任务数: {len(task_list)}")
     logger.info(f"  - 总依赖关系数: {len(merged_deps)}")
-    logger.info(f"  - 合并后任务: {sorted(all_tasks)}")
     
-    return list(all_tasks), merged_deps
+    return task_list, merged_deps
 
 
-def _identify_parallel_tasks(chains: List[TaskChainConfig]) -> List[ParallelTaskGroup]:
+def _identify_parallel_tasks_from_kg(
+    chains: List[Dict[str, Any]],
+    dependencies: Dict[str, List[str]],
+) -> List[ParallelTaskGroup]:
     """
-    识别可并行执行的任务组
+    基于Neo4j任务链和依赖关系识别可并行执行的任务组
+    
+    通过分析依赖关系，找出没有相互依赖的同phase任务作为并行组。
     
     Args:
-        chains: 任务链配置列表
+        chains: 从Neo4j加载的任务链配置列表
+        dependencies: 任务依赖关系字典
         
     Returns:
         并行任务组列表
     """
     logger.info(f"[HTN-并行识别] 开始识别可并行任务")
     
+    # 按phase分组任务
+    phase_tasks: Dict[str, List[str]] = {}
+    for chain in chains:
+        for task in chain.get("tasks", []):
+            task_id = task["task_id"]
+            phase = task.get("phase", "unknown")
+            if phase not in phase_tasks:
+                phase_tasks[phase] = []
+            if task_id not in phase_tasks[phase]:
+                phase_tasks[phase].append(task_id)
+    
     parallel_groups: List[ParallelTaskGroup] = []
-    seen_groups: Set[frozenset] = set()
     group_index = 0
     
-    for chain in chains:
-        chain_name = chain.get("name", "未知")
-        chain_parallel = chain.get("parallel_groups", [])
-        logger.info(f"[HTN-并行识别] 检查任务链: {chain_name}, 配置并行组数: {len(chain_parallel)}")
+    # 对每个phase，找出没有相互依赖的任务组
+    for phase, task_ids in phase_tasks.items():
+        if len(task_ids) < 2:
+            continue
         
-        for group_tasks in chain_parallel:
-            # 去重：相同任务组只保留一个
-            group_key = frozenset(group_tasks)
-            if group_key in seen_groups:
-                logger.info(f"  - 跳过重复组: {group_tasks}")
-                continue
-            seen_groups.add(group_key)
-            
-            # 生成并行组
+        # 找出没有相互依赖的任务
+        independent_tasks: List[str] = []
+        for task_id in task_ids:
+            task_deps = set(dependencies.get(task_id, []))
+            # 检查是否与其他同phase任务有依赖
+            has_phase_dep = bool(task_deps.intersection(set(task_ids)))
+            if not has_phase_dep:
+                independent_tasks.append(task_id)
+        
+        if len(independent_tasks) >= 2:
             group_index += 1
-            reason = _get_parallel_reason(group_tasks)
+            reason = _get_parallel_reason(independent_tasks)
             group = ParallelTaskGroup(
                 group_id=f"PG-{group_index:02d}",
-                task_ids=list(group_tasks),
+                task_ids=independent_tasks,
                 reason=reason,
             )
             parallel_groups.append(group)
-            logger.info(f"  - 发现并行组: PG-{group_index:02d} = {group_tasks}")
-            logger.info(f"    原因: {reason}")
+            logger.info(f"[HTN-并行识别] 发现并行组: PG-{group_index:02d} ({phase}阶段)")
+            logger.info(f"  - 任务: {independent_tasks}")
+            logger.info(f"  - 原因: {reason}")
     
     logger.info(f"[HTN-并行识别] 完成，共{len(parallel_groups)}个并行组")
     return parallel_groups
 
 
 def _get_parallel_reason(task_ids: List[str]) -> str:
-    """获取并行原因描述"""
-    # 根据任务类型推断
+    """根据任务类别推断并行执行的原因"""
     if all(tid.startswith("EM0") for tid in task_ids):
-        task_categories = set()
+        task_categories: set[str] = set()
         for tid in task_ids:
             meta = get_meta_task(tid)
-            if meta:
-                task_categories.add(meta.get("category", ""))
+            task_categories.add(meta.get("category", ""))
         
         if "search_rescue" in task_categories or "sensing" in task_categories:
             return "探测类任务可同时执行，提高搜救效率"
@@ -285,9 +306,9 @@ def topological_sort(tasks: List[str], dependencies: Dict[str, List[str]]) -> Li
 
 async def htn_decompose(state: EmergencyAIState) -> Dict[str, Any]:
     """
-    HTN任务分解节点
+    HTN任务分解节点（Neo4j驱动）
     
-    根据灾情分析结果识别场景，加载对应的任务链配置，
+    从Neo4j知识图谱查询场景、任务链和依赖关系，
     进行拓扑排序生成正确的任务执行序列。
     
     Args:
@@ -295,8 +316,11 @@ async def htn_decompose(state: EmergencyAIState) -> Dict[str, Any]:
         
     Returns:
         状态更新字典
+        
+    Raises:
+        RuntimeError: Neo4j查询失败
     """
-    logger.info(f"[HTN分解] 开始执行，event_id={state['event_id']}")
+    logger.info(f"[HTN分解] 开始执行（Neo4j驱动），event_id={state['event_id']}")
     start_time = time.time()
     
     errors: List[str] = list(state.get("errors", []))
@@ -305,62 +329,30 @@ async def htn_decompose(state: EmergencyAIState) -> Dict[str, Any]:
     # 检查前置条件
     parsed_disaster = state.get("parsed_disaster")
     if parsed_disaster is None:
-        error_msg = "HTN分解失败：缺少灾情解析结果"
-        logger.error(f"[HTN分解] {error_msg}")
-        errors.append(error_msg)
-        return {
-            "scene_codes": [],
-            "task_sequence": [],
-            "parallel_tasks": [],
-            "errors": errors,
-            "trace": trace,
-        }
+        raise RuntimeError("HTN分解失败：缺少灾情解析结果")
     
-    # 步骤1：场景识别
-    scene_codes = _identify_scenes(parsed_disaster)
-    logger.info(f"[HTN分解] 识别场景: {scene_codes}")
+    # 检查前置条件
+    parsed_disaster = state.get("parsed_disaster")
+    if parsed_disaster is None:
+        raise RuntimeError("HTN分解失败：缺少灾情解析结果")
     
-    # 步骤2：加载任务链配置
-    chains: List[TaskChainConfig] = []
-    for scene_code in scene_codes:
-        chain = get_chain_for_scene(scene_code)
-        if chain:
-            chains.append(chain)
-            logger.info(f"[HTN分解] 加载任务链: {chain['name']}")
+    # 步骤1：从Neo4j查询匹配场景
+    scene_codes = await _identify_scenes_from_kg(parsed_disaster)
+    logger.info(f"[HTN分解] Neo4j返回场景: {scene_codes}")
     
-    if not chains:
-        error_msg = f"未找到场景对应的任务链: {scene_codes}"
-        logger.error(f"[HTN分解] {error_msg}")
-        errors.append(error_msg)
-        return {
-            "scene_codes": scene_codes,
-            "task_sequence": [],
-            "parallel_tasks": [],
-            "errors": errors,
-            "trace": trace,
-        }
+    # 步骤2：从Neo4j加载任务链配置
+    chains = await _load_chains_from_kg(scene_codes)
+    logger.info(f"[HTN分解] 加载{len(chains)}条任务链")
     
-    # 步骤3：合并多条任务链
-    merged_tasks, merged_deps = _merge_chains(chains)
+    # 步骤3：合并任务链，从Neo4j查询依赖关系
+    merged_tasks, merged_deps = await _merge_chains_with_kg_deps(chains)
     logger.info(f"[HTN分解] 合并后任务数: {len(merged_tasks)}")
     
     # 步骤4：拓扑排序
-    try:
-        sorted_tasks = topological_sort(merged_tasks, merged_deps)
-    except ValueError as e:
-        error_msg = f"任务拓扑排序失败: {e}"
-        logger.error(f"[HTN分解] {error_msg}")
-        errors.append(error_msg)
-        return {
-            "scene_codes": scene_codes,
-            "task_sequence": [],
-            "parallel_tasks": [],
-            "errors": errors,
-            "trace": trace,
-        }
+    sorted_tasks = topological_sort(merged_tasks, merged_deps)
     
-    # 步骤5：识别并行任务
-    parallel_groups = _identify_parallel_tasks(chains)
+    # 步骤5：识别并行任务（基于Neo4j依赖关系）
+    parallel_groups = _identify_parallel_tasks_from_kg(chains, merged_deps)
     parallel_task_ids: Set[str] = set()
     task_to_group: Dict[str, str] = {}
     for group in parallel_groups:
@@ -368,33 +360,37 @@ async def htn_decompose(state: EmergencyAIState) -> Dict[str, Any]:
             parallel_task_ids.add(task_id)
             task_to_group[task_id] = group["group_id"]
     
-    # 步骤6：查询Neo4j补充golden_hour
-    golden_hours: Dict[str, Optional[int]] = {}
-    try:
-        kg_result = await query_task_dependencies_async(sorted_tasks)
-        for item in kg_result:
-            task_code = item.get("task_code")
-            golden_hours[task_code] = item.get("golden_hour")
-        logger.info(f"[HTN分解] 从Neo4j获取golden_hour: {len(golden_hours)}个任务")
-    except Exception as e:
-        logger.warning(f"[HTN分解] Neo4j查询失败，跳过golden_hour: {e}")
+    # 步骤6：从Neo4j查询MetaTask详情（包含golden_hour等）
+    task_details = await query_metatask_details_async(sorted_tasks)
+    logger.info(f"[HTN分解] 从Neo4j获取任务详情: {len(task_details)}个任务")
+    
+    # 构建任务ID到chain任务的映射（用于补充信息）
+    chain_task_map: Dict[str, Dict[str, Any]] = {}
+    for chain in chains:
+        for task in chain.get("tasks", []):
+            chain_task_map[task["task_id"]] = task
     
     # 步骤7：构建任务序列
     task_sequence: List[TaskSequenceItem] = []
     for idx, task_id in enumerate(sorted_tasks, start=1):
+        # 从Neo4j获取MetaTask详情
+        detail = task_details.get(task_id, {})
+        chain_task = chain_task_map.get(task_id, {})
         meta = get_meta_task(task_id)
-        task_name = meta["name"] if meta else task_id
-        phase = meta["phase"] if meta else "unknown"
+        
+        task_name = detail.get("name") or chain_task.get("task_name") or meta["name"]
+        phase = detail.get("phase") or chain_task.get("phase") or meta["phase"]
         
         item = TaskSequenceItem(
             task_id=task_id,
             task_name=task_name,
             sequence=idx,
             depends_on=merged_deps.get(task_id, []),
-            golden_hour=golden_hours.get(task_id),
+            golden_hour=None,  # MetaTask暂无golden_hour字段
             phase=phase,
             is_parallel=task_id in parallel_task_ids,
             parallel_group_id=task_to_group.get(task_id),
+            required_capabilities=detail.get("required_capabilities", []),
         )
         task_sequence.append(item)
     
@@ -408,9 +404,20 @@ async def htn_decompose(state: EmergencyAIState) -> Dict[str, Any]:
         "parallel_groups_count": len(parallel_groups),
     }
     
+    # 打印任务序列详情（含能力需求）
+    logger.info(f"【HTN-任务序列】构建完成，共{len(task_sequence)}个任务:")
+    for task in task_sequence:
+        caps = task.get("required_capabilities", [])
+        deps = task.get("depends_on", [])
+        parallel = "并行" if task.get("is_parallel") else "串行"
+        logger.info(f"  {task['sequence']}. {task['task_id']} ({task['task_name']}) [{parallel}]")
+        logger.info(f"     需要能力: {caps}")
+        if deps:
+            logger.info(f"     前置依赖: {deps}")
+    
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(
-        f"[HTN分解] 完成，场景{scene_codes}，{len(task_sequence)}个任务，"
+        f"【HTN分解】完成，场景{scene_codes}，{len(task_sequence)}个任务，"
         f"{len(parallel_groups)}个并行组，耗时{elapsed_ms}ms"
     )
     
@@ -422,3 +429,5 @@ async def htn_decompose(state: EmergencyAIState) -> Dict[str, Any]:
         "errors": errors,
         "current_phase": "htn_decompose",
     }
+
+

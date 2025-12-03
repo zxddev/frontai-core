@@ -231,7 +231,7 @@ class TeamDispatchRequest(BaseModel):
         ..., 
         min_length=2, 
         max_length=2, 
-        description="目标位置 [经度, 纬度]"
+        description="目标位置 [经度, 纬度]（GCJ02火星坐标系）"
     )
     waypoints: list[Waypoint] = Field(
         default_factory=list, 
@@ -244,7 +244,11 @@ class TeamDispatchRequest(BaseModel):
     )
     scenario_id: Optional[UUID] = Field(
         None, 
-        description="场景ID，用于关联地图实体"
+        description="场景ID，用于关联地图实体和灾害避障查询"
+    )
+    use_internal_routing: bool = Field(
+        False,
+        description="是否使用内部A*路径规划（True=内部路网避障，False=高德API）"
     )
 
 

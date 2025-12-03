@@ -369,6 +369,7 @@ class EmergencyAnalyzeResult(BaseModel):
     understanding: Optional[Dict[str, Any]] = Field(default=None, description="灾情理解结果")
     reasoning: Optional[Dict[str, Any]] = Field(default=None, description="规则推理结果")
     htn_decomposition: Optional[Dict[str, Any]] = Field(default=None, description="HTN任务分解结果")
+    strategic: Optional[Dict[str, Any]] = Field(default=None, description="战略层结果(任务域/阶段/模块/运力/安全)")
     matching: Optional[Dict[str, Any]] = Field(default=None, description="资源匹配结果")
     optimization: Optional[Dict[str, Any]] = Field(default=None, description="方案优化结果")
     
@@ -380,6 +381,25 @@ class EmergencyAnalyzeResult(BaseModel):
     trace: Optional[Dict[str, Any]] = Field(default=None, description="执行追踪")
     errors: List[str] = Field(default_factory=list, description="错误列表")
     execution_time_ms: Optional[int] = Field(default=None, description="执行时间(ms)")
+
+
+class ConfirmEmergencySchemeRequest(BaseModel):
+    """确认部署请求 - 接收前端选中的队伍ID列表"""
+    team_ids: List[str] = Field(
+        ..., 
+        min_length=1, 
+        description="用户选中的队伍ID列表（UUID字符串）"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "team_ids": [
+                    "72c767de-379d-421a-bbf5-7fb01abd7cc7",
+                    "1fe8d3b7-3bfc-4d1d-b246-fe4cec9f30c8"
+                ]
+            }
+        }
 
 
 # ============================================================================

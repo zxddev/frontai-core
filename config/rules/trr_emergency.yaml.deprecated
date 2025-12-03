@@ -960,13 +960,13 @@ rules:
 
   TRR-EM-040:
     name: "滑坡搜救规则"
-    description: "滑坡掩埋人员时启动搜救"
+    description: "滑坡有被困/被埋人员时启动搜救"
     trigger:
       conditions:
         - field: "disaster_type"
           operator: "eq"
           value: "landslide"
-        - field: "has_buried"
+        - field: "has_trapped_persons"
           operator: "eq"
           value: true
       logic: "AND"
