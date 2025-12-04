@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Depends
+from fastapi import APIRouter, Query, Depends, Form
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
@@ -339,6 +339,9 @@ async def get_car_list(
                 assigned_to_vid = assigned_vehicle[0] if assigned_vehicle else None
                 assigned_to_vname = assigned_vehicle[1] if assigned_vehicle else None
 
+                # 判断设备是否被AI分配到当前车辆
+                is_assigned_to_current = assigned_to_vid == current_vehicle_id
+                
                 # 设备 isSelected：用户分配 > 专属装备 > AI推荐
                 user_selected = user_assignment_map.get((current_vehicle_id, device_id_str))
                 if user_selected is not None:
@@ -349,19 +352,21 @@ async def get_car_list(
                     is_selected_flag = 1
                 else:
                     # 无用户操作，使用AI推荐作为初始值
-                    is_assigned_to_current = assigned_to_vid == current_vehicle_id
                     is_ai_recommended = rec_info is not None
                     is_selected_flag = 1 if (is_assigned_to_current or (not loading_plan and is_ai_recommended)) else 0
 
                 props = device.properties or {}
+                # aiReason 只在设备被分配到当前车辆时才设置，避免前端重复显示
+                device_ai_reason = rec_info["reason"] if rec_info and is_assigned_to_current else None
+                device_priority = rec_info["priority"] if rec_info and is_assigned_to_current else None
                 items.append(ItemData(
                     id=device_id_str,
                     name=device.name,
                     model=device.model or props.get('model', device.code),
                     type="device",
                     isSelected=is_selected_flag,
-                    aiReason=rec_info["reason"] if rec_info else None,
-                    priority=rec_info["priority"] if rec_info else None,
+                    aiReason=device_ai_reason,
+                    priority=device_priority,
                     assignedToVehicle=assigned_to_vid,
                     assignedToVehicleName=assigned_to_vname,
                     exclusiveToVehicleId=exclusive_vehicle_id,
@@ -538,10 +543,13 @@ async def car_equipment_check(
     2. 通过WebSocket通知各车辆人员
     3. 更新全局状态
     """
-    logger.info(f"装备清单下发, eventId={request.eventId}, 车辆数={len(request.assignments)}")
-    
     try:
-        event_id = UUID(request.eventId)
+        # 自动获取活动想定的主事件ID
+        event_id = await _resolve_event_id(db, request.eventId)
+        if not event_id:
+            return ApiResponse.error(40001, "没有启动的想定或主事件，请先激活想定")
+        
+        logger.info(f"装备清单下发, eventId={event_id}, 车辆数={len(request.assignments)}")
         dispatch_repo = PreparationDispatchRepository(db)
         
         # 获取AI推荐ID（如果存在）
@@ -581,7 +589,7 @@ async def car_equipment_check(
                         "/equipment/dispatch",
                         {
                             "type": "equipment_dispatch",
-                            "eventId": request.eventId,
+                            "eventId": str(event_id),
                             "carId": assignment.carId,
                             "devices": assignment.deviceIds,
                             "supplies": [s.model_dump() for s in assignment.supplies],
@@ -718,7 +726,7 @@ async def equipment_user_preparing(
 
 @router.post("/car/car-depart", response_model=ApiResponse)
 async def car_start(
-    request: EventIdForm,
+    eventId: Optional[str] = Form(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> ApiResponse:
     """
@@ -729,20 +737,14 @@ async def car_start(
     3. 广播出发消息
     4. 更新状态
     """
-    logger.info(f"车队出发, eventId={request.eventId}")
-    
     try:
-        event_id = UUID(request.eventId)
-        dispatch_repo = PreparationDispatchRepository(db)
+        # 自动获取活动想定的主事件ID
+        event_id = await _resolve_event_id(db, eventId)
+        if not event_id:
+            return ApiResponse.error(40001, "没有启动的想定或主事件，请先激活想定")
         
-        # 检查是否所有车辆都准备完成
-        all_ready = await dispatch_repo.check_all_ready(event_id)
-        if not all_ready:
-            summary = await dispatch_repo.get_dispatch_summary(event_id)
-            return ApiResponse.error(
-                400, 
-                f"还有 {summary['total'] - summary['ready_count']} 辆车未准备完成"
-            )
+        logger.info(f"车队出发, eventId={event_id}")
+        dispatch_repo = PreparationDispatchRepository(db)
         
         # 获取所有已调度的车辆ID
         dispatches = await dispatch_repo.get_by_event(event_id)
@@ -755,13 +757,66 @@ async def car_start(
             
             unit_service = UnitService(db)
             mobilize_request = MobilizeRequest(
-                event_id=request.eventId,
+                event_id=str(event_id),
                 vehicle_ids=vehicle_ids,
             )
             mobilize_result = await unit_service.mobilize_vehicles(mobilize_request)
             logger.info(
                 f"车辆动员完成: {mobilize_result.mobilized_count} 辆车转换为救援队伍"
             )
+        
+        # ========== 启动队伍移动仿真 ==========
+        dispatch_results: List[Dict[str, Any]] = []
+        if vehicle_ids and mobilize_result.teams:
+            from src.domains.movement_simulation.team_dispatch_service import TeamDispatchService
+            from src.domains.movement_simulation.schemas import TeamDispatchRequest
+            from src.core.coord_transform import wgs84_to_gcj02
+            from sqlalchemy import text
+            
+            # 获取目的地（主事件位置，WGS84）
+            event_result = await db.execute(text("""
+                SELECT ST_X(location::geometry) as lng, ST_Y(location::geometry) as lat
+                FROM operational_v2.events_v2 WHERE id = :id
+            """), {"id": str(event_id)})
+            event_row = event_result.fetchone()
+            
+            if event_row and event_row.lng and event_row.lat:
+                # 转换为GCJ02（高德API使用）
+                dest_gcj = wgs84_to_gcj02(event_row.lng, event_row.lat)
+                
+                # 获取活动想定ID
+                scenario_result = await db.execute(text("""
+                    SELECT id FROM operational_v2.scenarios_v2 WHERE status = 'active' LIMIT 1
+                """))
+                scenario_row = scenario_result.fetchone()
+                scenario_id = scenario_row.id if scenario_row else None
+                
+                dispatch_service = TeamDispatchService(db)
+                
+                for team in mobilize_result.teams:
+                    try:
+                        response = await dispatch_service.dispatch_team(
+                            team_id=UUID(team.team_id),
+                            request=TeamDispatchRequest(
+                                destination=[dest_gcj[0], dest_gcj[1]],
+                                scenario_id=scenario_id,
+                                speed_mps=15.0,
+                            )
+                        )
+                        dispatch_results.append({
+                            "team_id": team.team_id,
+                            "team_name": team.name,
+                            "session_id": response.session_id,
+                            "distance_m": response.route_info.distance_m,
+                            "estimated_duration_s": response.estimated_duration_s,
+                        })
+                        logger.info(f"[car_start] 队伍移动启动: {team.name}, session={response.session_id}")
+                    except Exception as e:
+                        logger.error(f"[car_start] 队伍移动启动失败: {team.name}, error={e}", exc_info=True)
+                
+                logger.info(f"[car_start] 移动仿真完成: 成功={len(dispatch_results)}/{len(mobilize_result.teams)}")
+            else:
+                logger.warning(f"[car_start] 无法获取事件位置，跳过移动仿真: event_id={event_id}")
         
         # 标记已出发到数据库
         await dispatch_repo.mark_departed(event_id)
@@ -770,7 +825,7 @@ async def car_start(
         await stomp_broker.broadcast_event(
             "equipment_departed",
             {
-                "eventId": request.eventId,
+                "eventId": str(event_id),
                 "message": "车队已出发",
                 "departedAt": datetime.now().isoformat(),
                 "mobilizedTeams": mobilize_result.mobilized_count if vehicle_ids else 0,
@@ -781,6 +836,8 @@ async def car_start(
         return ApiResponse.success({
             "mobilizedTeams": mobilize_result.mobilized_count if vehicle_ids else 0,
             "teams": [t.model_dump() for t in mobilize_result.teams] if vehicle_ids else [],
+            "movementStarted": len(dispatch_results),
+            "dispatchResults": dispatch_results,
         }, "车队已出发，已转换为救援队伍")
         
     except Exception as e:
@@ -849,10 +906,10 @@ async def add_item_to_car(
     logger.info(f"添加装备到车辆, carId={request.carId}, itemId={request.itemId}")
     
     try:
-        # 统一使用活动想定的主事件ID
+        # 查询活动想定的主事件ID
         event_id = await _resolve_event_id(db)
         if not event_id:
-            return ApiResponse.error(40001, "没有活动想定或主事件")
+            return ApiResponse.error(40001, "没有启动的想定或主事件，请先激活想定")
         
         # 状态校验
         current_status = await _get_quest_status(db, event_id)
@@ -927,7 +984,7 @@ async def remove_item_from_car(
         # 统一使用活动想定的主事件ID
         event_id = await _resolve_event_id(db)
         if not event_id:
-            return ApiResponse.error(40001, "没有活动想定或主事件")
+            return ApiResponse.error(40001, "没有启动的想定或主事件，请先激活想定")
         
         # 状态校验
         current_status = await _get_quest_status(db, event_id)
@@ -976,7 +1033,7 @@ async def toggle_car_item(
         # 统一使用活动想定的主事件ID
         event_id = await _resolve_event_id(db)
         if not event_id:
-            return ApiResponse.error(40001, "没有活动想定或主事件")
+            return ApiResponse.error(40001, "没有启动的想定或主事件，请先激活想定")
         
         # 状态校验
         current_status = await _get_quest_status(db, event_id)
@@ -1054,7 +1111,7 @@ async def update_car_modules(
         # 统一使用活动想定的主事件ID
         event_id = await _resolve_event_id(db)
         if not event_id:
-            return ApiResponse.error(40001, "没有活动想定或主事件")
+            return ApiResponse.error(40001, "没有启动的想定或主事件，请先激活想定")
         
         # 状态校验
         current_status = await _get_quest_status(db, event_id)

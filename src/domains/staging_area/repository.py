@@ -263,8 +263,9 @@ class StagingAreaRepository:
         使用 PostGIS 空间查询，支持多种筛选条件。
         """
         # 构建动态 WHERE 条件
+        # scenario_id 支持匹配或 NULL（全局通用数据）
         conditions = [
-            "scenario_id = :scenario_id",
+            "(scenario_id = :scenario_id OR scenario_id IS NULL)",
             "ST_DWithin(location, ST_SetSRID(ST_Point(:center_lon, :center_lat), 4326)::geography, :search_radius_m)",
         ]
         params = {
@@ -384,15 +385,15 @@ class StagingAreaRepository:
             
             sites = []
             for row in rows:
-                # 计算简单评分
+                # 计算简单评分（转换 Decimal 为 float）
                 score = self._calculate_safe_point_score(
-                    distance_m=row[15],
-                    distance_to_danger_m=row[16],
+                    distance_m=float(row[15]) if row[15] else 0,
+                    distance_to_danger_m=float(row[16]) if row[16] else None,
                     has_water=row[9],
                     has_power=row[10],
                     can_helicopter=row[11],
-                    area_m2=row[6],
-                    slope_degree=row[7],
+                    area_m2=float(row[6]) if row[6] else None,
+                    slope_degree=float(row[7]) if row[7] else None,
                 )
                 
                 sites.append({
