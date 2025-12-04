@@ -267,9 +267,10 @@ async def enhance_with_cases(state: EmergencyAIState) -> Dict[str, Any]:
     Returns:
         更新的状态字段
     """
-    # 如果已有案例（并行模式），直接生成总结并返回
-    existing_cases = state.get("similar_cases", [])
-    if existing_cases:
+    # 如果已执行过RAG（并行模式），直接生成总结并返回
+    # 使用is not None判断，空列表[]表示RAG已执行但无结果，不应重试
+    existing_cases = state.get("similar_cases")
+    if existing_cases is not None:
         logger.info(f"[跳过] 案例已由并行模式检索，共{len(existing_cases)}个案例")
         parsed_disaster = state.get("parsed_disaster", {})
         disaster_type = parsed_disaster.get("disaster_type", "unknown")

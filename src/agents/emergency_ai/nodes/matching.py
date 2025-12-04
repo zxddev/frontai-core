@@ -673,6 +673,18 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
         if solution3:
             solutions.append(solution3)
 
+        # 方案4: 最高救援容量优先（巨灾场景）
+        solution4 = _generate_greedy_solution(
+            candidates=candidates,
+            capability_requirements=capability_requirements,
+            strategy="capacity",
+            solution_id=f"solution-{uuid.uuid4().hex[:8]}",
+            estimated_trapped=estimated_trapped,
+            capacity_safety_factor=capacity_safety_factor,
+        )
+        if solution4:
+            solutions.append(solution4)
+
     # 为每个方案生成任务-资源分配序列
     if task_sequence and solutions:
         for solution in solutions:
@@ -759,7 +771,7 @@ def _run_nsga2_optimization(
         def __init__(self):
             super().__init__(
                 n_var=n_resources,
-                n_obj=3,  # 响应时间、覆盖率(负)、队伍数
+                n_obj=5,  # 成功率、响应时间、覆盖率、风险、冗余性
                 n_constr=1,  # 覆盖率约束
                 xl=0,
                 xu=1,
@@ -770,36 +782,66 @@ def _run_nsga2_optimization(
             selected_indices = np.where(x > 0.5)[0]
             
             if len(selected_indices) == 0:
-                out["F"] = [1e5, 0, 1e5]
+                out["F"] = [1.0, 1e5, 1.0, 1.0, 1.0]  # 5维惩罚值
                 out["G"] = [1.0]
                 return
             
             max_eta = 0.0
-            covered_caps = set()
+            covered_caps: set = set()
+            total_match_score = 0.0
+            total_capacity = 0
             
             for idx in selected_indices:
                 cand = candidates[idx]
                 max_eta = max(max_eta, cand.get("eta_minutes", 0))
                 covered_caps.update(cand["capabilities"])
+                total_match_score += cand.get("match_score", 0.5)
+                total_capacity += cand.get("rescue_capacity", 0)
             
+            # 覆盖率：已覆盖能力 / 所需能力
             coverage = len(covered_caps.intersection(required_caps)) / len(required_caps) if required_caps else 1.0
+            avg_match_score = total_match_score / len(selected_indices) if selected_indices.size > 0 else 0.5
             
-            # 目标: [min时间, max覆盖(转min), min数量(降低权重)]
-            # 队伍数权重降低到0.5，允许更多队伍以提高能力覆盖
-            out["F"] = [max_eta, -coverage, len(selected_indices) * 0.5]
-            # 约束: 覆盖率 >= 95%（提高要求以确保能力充分覆盖）
+            # 冗余性：每个能力被多少队伍覆盖（平均值归一化）
+            cap_coverage_count: Dict[str, int] = {}
+            for idx in selected_indices:
+                for cap in candidates[idx]["capabilities"]:
+                    if cap in required_caps:
+                        cap_coverage_count[cap] = cap_coverage_count.get(cap, 0) + 1
+            redundancy = sum(min(c, 2) for c in cap_coverage_count.values()) / (2 * len(required_caps)) if required_caps else 1.0
+            
+            # 5维目标（pymoo最小化所有目标，最大化需取负）
+            # f0: 成功率（基于覆盖率×匹配度，取负最大化）
+            success_rate = coverage * avg_match_score
+            # f1: 响应时间（归一化到0-1，120分钟为基准）
+            time_score = min(max_eta / 120.0, 1.0)
+            # f2: 覆盖率（取负最大化）
+            # f3: 风险（1-覆盖率，最小化）
+            risk = 1.0 - coverage
+            # f4: 冗余性（取负最大化）
+            
+            out["F"] = [
+                -success_rate,  # f0: 成功率（权重0.35）
+                time_score,     # f1: 响应时间（权重0.30）
+                -coverage,      # f2: 覆盖率（权重0.20）
+                risk,           # f3: 风险（权重0.05）
+                -redundancy,    # f4: 冗余性（权重0.10）
+            ]
+            # 约束: 覆盖率 >= 95%
             out["G"] = [0.95 - coverage]
 
-    # 调用统一算法优化器
+    # 调用统一算法优化器（5目标使用NSGA-III）
     optimizer = PymooOptimizer()
     result = optimizer.run({
         "problem": EmergencyAllocationProblem(),
-        "pop_size": 50,
-        "n_generations": 50,
-        "algorithm": "nsga2",
+        "pop_size": 100,
+        "n_generations": 80,
+        "algorithm": "nsga3",  # 5维目标使用NSGA-III
+        "objective_names": ["success_rate", "response_time", "coverage_rate", "risk", "redundancy"],
         "verbose": False,
         "seed": 42
     })
+    logger.info(f"[NSGA-III] 5维优化完成: 成功率、响应时间、覆盖率、风险、冗余性")
     
     if result.status != AlgorithmStatus.SUCCESS or not result.solution:
         logger.warning(f"[NSGA-II] 优化未找到可行解: {result.message}")
@@ -877,9 +919,11 @@ def _run_nsga2_optimization(
             "max_distance_km": round(max_distance, 2),
             "teams_count": len(allocations),
             "objectives": {
-                "response_time": round(objectives.get("f0", 0), 1),
-                "coverage_rate": round(-objectives.get("f1", 0), 3), # 负转正
-                "teams_count": int(objectives.get("f2", 0)),
+                "success_rate": round(-objectives.get("success_rate", 0), 3),  # 负转正
+                "response_time": round(objectives.get("response_time", 0), 3),
+                "coverage_rate": round(-objectives.get("coverage_rate", 0), 3),  # 负转正
+                "risk": round(objectives.get("risk", 0), 3),
+                "redundancy": round(-objectives.get("redundancy", 0), 3),  # 负转正
             }
         }
         solutions.append(allocation_sol)
@@ -889,7 +933,7 @@ def _run_nsga2_optimization(
             
     # 按覆盖率排序
     solutions.sort(key=lambda s: s["coverage_rate"], reverse=True)
-    logger.info(f"[NSGA-II] 生成 {len(solutions)} 个Pareto解")
+    logger.info(f"[NSGA-III] 生成 {len(solutions)} 个Pareto解")
     
     return solutions
 
@@ -1115,7 +1159,7 @@ async def _query_teams_from_db(
         FROM operational_v2.rescue_teams_v2 t
         LEFT JOIN operational_v2.team_capabilities_v2 tc ON tc.team_id = t.id
         LEFT JOIN primary_vehicles pv ON pv.team_id = t.id
-        WHERE t.status = 'standby'
+        WHERE (t.status = 'standby' OR t.team_type = 'command')
           AND t.base_location IS NOT NULL
           AND ST_Distance(
                 t.base_location,
@@ -1559,6 +1603,9 @@ def _generate_greedy_solution(
         sorted_candidates = sorted(candidates, key=lambda x: x["distance_km"])
     elif strategy == "availability":
         sorted_candidates = sorted(candidates, key=lambda x: x["availability_score"], reverse=True)
+    elif strategy == "capacity":
+        # 容量优先：按救援容量降序排序（巨灾场景优先选择大容量队伍）
+        sorted_candidates = sorted(candidates, key=lambda x: x.get("rescue_capacity", 0), reverse=True)
     else:
         sorted_candidates = list(candidates)
 
@@ -1730,6 +1777,13 @@ def _generate_greedy_solution(
             )
             logger.warning(f"[贪心-提示] {capacity_warning}")
 
+    # 计算5维目标值（与NSGA-III对齐）
+    success_rate = coverage_rate * avg_score
+    time_score = min(max_eta / 120.0, 1.0)
+    risk = 1.0 - coverage_rate
+    # 冗余性：每个能力被多少队伍覆盖（平均值归一化）
+    redundancy = sum(min(c, 2) for c in capability_coverage_count.values()) / (2 * len(required_caps)) if required_caps else 1.0
+    
     solution: AllocationSolution = {
         "solution_id": solution_id,
         "allocations": allocations,
@@ -1745,6 +1799,14 @@ def _generate_greedy_solution(
         "uncovered_capabilities": list(uncovered) if uncovered else [],
         "max_distance_km": round(total_distance, 2),
         "teams_count": len(allocations),
+        # 5维优化目标（与NSGA-III对齐）
+        "objectives": {
+            "success_rate": round(success_rate, 3),
+            "response_time": round(time_score, 3),
+            "coverage_rate": round(coverage_rate, 3),
+            "risk": round(risk, 3),
+            "redundancy": round(redundancy, 3),
+        },
     }
 
     # 打印贪心方案汇总

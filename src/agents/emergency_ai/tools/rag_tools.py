@@ -5,7 +5,6 @@ RAG工具封装
 """
 from __future__ import annotations
 
-import os
 import logging
 from typing import Dict, Any, List, Optional
 
@@ -14,7 +13,12 @@ from langchain_openai import OpenAIEmbeddings
 from qdrant_client import QdrantClient
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
+from src.infra.settings import load_settings
+
 logger = logging.getLogger(__name__)
+
+# 加载统一配置
+_settings = load_settings()
 
 
 # ============================================================================
@@ -23,23 +27,18 @@ logger = logging.getLogger(__name__)
 
 def _get_qdrant_client() -> QdrantClient:
     """获取Qdrant客户端实例"""
-    qdrant_url = os.environ.get('QDRANT_URL', 'http://192.168.31.50:6333')
-    qdrant_api_key = os.environ.get('QDRANT_API_KEY', '')
     return QdrantClient(
-        url=qdrant_url,
-        api_key=qdrant_api_key if qdrant_api_key else None,
+        url=_settings.qdrant_url,
+        api_key=_settings.qdrant_api_key if _settings.qdrant_api_key else None,
     )
 
 
 def _get_embeddings() -> OpenAIEmbeddings:
     """获取向量化模型"""
-    embedding_base_url = os.environ.get('EMBEDDING_BASE_URL', 'http://192.168.31.50:8001/v1')
-    embedding_model = os.environ.get('EMBEDDING_MODEL', 'embedding-3')
-    embedding_api_key = os.environ.get('OPENAI_API_KEY', 'dummy_key')
     return OpenAIEmbeddings(
-        model=embedding_model,
-        base_url=embedding_base_url,
-        api_key=embedding_api_key,
+        model=_settings.embedding_model,
+        base_url=_settings.embedding_base_url,
+        api_key=_settings.embedding_api_key,
     )
 
 
@@ -118,7 +117,7 @@ def search_similar_cases(
         # 其他异常（网络、连接等）也直接抛出
         logger.error(
             "Qdrant连接失败",
-            extra={"error": str(e), "qdrant_url": os.environ.get('QDRANT_URL')}
+            extra={"error": str(e), "qdrant_url": _settings.qdrant_url}
         )
         raise RuntimeError(f"Qdrant连接失败: {e}") from e
     

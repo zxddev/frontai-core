@@ -48,3 +48,4 @@ scripts/test_passage_status_api_e2e.py
 scripts/test_passage_status_e2e.py
 scripts/test_risk_area_api.py
 docs/智能体规划/应急救援智能体架构设计.md
+.kiro/

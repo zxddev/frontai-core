@@ -1,0 +1,169 @@
+{
+  "flight_conditions": {
+    "wind": {
+      "multirotor": {
+        "safe_max_ms": 8,
+        "caution_max_ms": 12,
+        "no_fly_above_ms": 15,
+        "description": "多旋翼抗风能力较弱"
+      },
+      "vtol_fixed_wing": {
+        "safe_max_ms": 12,
+        "caution_max_ms": 17,
+        "no_fly_above_ms": 20,
+        "description": "垂直起降固定翼抗风能力中等"
+      },
+      "large_fixed_wing": {
+        "safe_max_ms": 15,
+        "caution_max_ms": 20,
+        "no_fly_above_ms": 25,
+        "description": "大型固定翼抗风能力最强"
+      }
+    },
+    "rain": {
+      "none": {
+        "all_types": true,
+        "restrictions": []
+      },
+      "light": {
+        "requires_ip_rating": "IP43",
+        "multirotor": "caution",
+        "vtol_fixed_wing": "caution",
+        "large_fixed_wing": true,
+        "restrictions": ["检查设备防水等级", "缩短任务时间"]
+      },
+      "moderate": {
+        "requires_ip_rating": "IP55",
+        "multirotor": false,
+        "vtol_fixed_wing": "caution",
+        "large_fixed_wing": true,
+        "restrictions": ["多旋翼禁飞", "仅允许防水设备", "持续监控天气"]
+      },
+      "heavy": {
+        "requires_ip_rating": "IP67",
+        "multirotor": false,
+        "vtol_fixed_wing": false,
+        "large_fixed_wing": "caution",
+        "restrictions": ["大部分设备禁飞", "仅允许大型固定翼紧急任务"]
+      },
+      "storm": {
+        "all_types": false,
+        "restrictions": ["全部设备禁飞", "等待天气好转"]
+      }
+    },
+    "visibility": {
+      "min_safe_m": 1000,
+      "min_caution_m": 500,
+      "no_fly_below_m": 300,
+      "restrictions_below_1000m": ["降低飞行速度", "增加安全高度", "使用避障系统"],
+      "restrictions_below_500m": ["仅允许有避障系统的设备", "限制飞行范围"]
+    },
+    "temperature": {
+      "min_safe_c": -10,
+      "max_safe_c": 40,
+      "battery_degrade_below_c": 0,
+      "battery_degrade_above_c": 35,
+      "restrictions_cold": ["预热电池", "缩短任务时间", "监控电压"],
+      "restrictions_hot": ["注意散热", "避免长时间悬停", "监控电机温度"]
+    }
+  },
+  "decision_matrix": {
+    "green": {
+      "level": "green",
+      "name": "良好",
+      "description": "良好飞行条件",
+      "criteria": {
+        "wind_below_safe": true,
+        "rain": ["none", "light"],
+        "visibility_above_safe": true,
+        "temperature_in_range": true
+      },
+      "recommendation": "所有设备可正常执行任务",
+      "device_restrictions": []
+    },
+    "yellow": {
+      "level": "yellow",
+      "name": "谨慎",
+      "description": "谨慎飞行条件",
+      "criteria": {
+        "wind_in_caution_range": true,
+        "or_rain": "moderate",
+        "or_visibility_in_caution": true,
+        "or_temperature_marginal": true
+      },
+      "recommendation": "优先使用抗风能力强的设备，缩短任务时间，加强监控",
+      "device_restrictions": ["small_multirotor"]
+    },
+    "red": {
+      "level": "red",
+      "name": "危险",
+      "description": "危险飞行条件",
+      "criteria": {
+        "wind_above_caution": true,
+        "or_rain": "heavy",
+        "or_visibility_below_caution": true
+      },
+      "recommendation": "仅允许大型固定翼在必要情况下执行紧急任务，其他设备禁飞",
+      "device_restrictions": ["multirotor", "vtol_fixed_wing"]
+    },
+    "black": {
+      "level": "black",
+      "name": "禁飞",
+      "description": "禁止飞行",
+      "criteria": {
+        "wind_above_no_fly": true,
+        "or_rain": "storm",
+        "or_visibility_below_no_fly": true
+      },
+      "recommendation": "所有设备禁止飞行，等待天气好转",
+      "device_restrictions": ["all"]
+    }
+  },
+  "ip_rating_requirements": {
+    "none": "IP00",
+    "light": "IP43",
+    "moderate": "IP55",
+    "heavy": "IP67"
+  },
+  "wind_speed_reference": {
+    "0-3_ms": "无风/微风 (0级)",
+    "3-5_ms": "轻风 (2级)",
+    "5-8_ms": "和风 (3级)",
+    "8-11_ms": "清风 (4级)",
+    "11-14_ms": "劲风 (5级)",
+    "14-17_ms": "强风 (6级)",
+    "17-21_ms": "疾风 (7级)",
+    "21-25_ms": "大风 (8级)",
+    "25+_ms": "烈风+ (9级以上)"
+  },
+  "rain_level_reference": {
+    "none": "无降水",
+    "light": "小雨 (<10mm/h)",
+    "moderate": "中雨 (10-25mm/h)",
+    "heavy": "大雨 (25-50mm/h)",
+    "storm": "暴雨 (>50mm/h)"
+  },
+  "assessment_algorithm": {
+    "description": "综合评估算法",
+    "steps": [
+      "1. 检查风速是否超过no_fly阈值",
+      "2. 检查降雨是否为storm级别",
+      "3. 检查能见度是否低于no_fly阈值",
+      "4. 如果任一条件满足，返回black",
+      "5. 检查wind/rain/visibility是否在caution范围",
+      "6. 如果多个条件在caution范围，返回red",
+      "7. 如果单个条件在caution范围，返回yellow",
+      "8. 否则返回green"
+    ]
+  },
+  "weather_forecast_rules": {
+    "look_ahead_hours": 4,
+    "abort_if_deteriorating": true,
+    "min_stable_window_hours": 2,
+    "rules": [
+      "如果预报显示2小时内天气恶化，缩短任务时间",
+      "如果预报显示持续恶化，考虑推迟任务",
+      "如果预报显示好转，可以等待更好的窗口"
+    ]
+  }
+}

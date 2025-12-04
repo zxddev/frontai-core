@@ -42,6 +42,13 @@ class TeamStatus(str, Enum):
     unavailable = "unavailable"  # 不可用
 
 
+class TeamSource(str, Enum):
+    """队伍来源"""
+    internal = "internal"    # 前突车队内部小队
+    external = "external"    # 外部救援队伍
+    mobilized = "mobilized"  # 动员生成的车辆队伍
+
+
 class Location(BaseModel):
     """地理坐标"""
     longitude: float = Field(..., ge=-180, le=180, description="经度")
@@ -75,6 +82,10 @@ class TeamCreate(BaseModel):
     response_time_minutes: Optional[int] = Field(None, ge=0, description="平均响应时间（分钟）")
     max_deployment_hours: int = Field(72, ge=1, description="最大连续部署时长（小时）")
     
+    # 队伍来源与层级
+    team_source: TeamSource = Field(TeamSource.external, description="队伍来源")
+    parent_team_id: Optional[UUID] = Field(None, description="父级队伍ID")
+    
     # 扩展
     properties: dict[str, Any] = Field(default_factory=dict, description="扩展属性")
 
@@ -106,6 +117,10 @@ class TeamUpdate(BaseModel):
     
     # 状态
     status: Optional[TeamStatus] = Field(None, description="队伍状态")
+    
+    # 队伍来源与层级
+    team_source: Optional[TeamSource] = Field(None, description="队伍来源")
+    parent_team_id: Optional[UUID] = Field(None, description="父级队伍ID")
     
     # 扩展
     properties: Optional[dict[str, Any]] = Field(None, description="扩展属性")
@@ -145,8 +160,12 @@ class TeamResponse(BaseModel):
     status: TeamStatus
     current_task_id: Optional[UUID]
     
+    # 队伍来源与层级
+    team_source: Optional[TeamSource] = Field(default=TeamSource.external, description="队伍来源")
+    parent_team_id: Optional[UUID] = Field(default=None, description="父级队伍ID")
+    
     # 扩展
-    properties: dict[str, Any]
+    properties: dict[str, Any] = Field(default_factory=dict, description="扩展属性")
     
     # 时间戳
     created_at: datetime

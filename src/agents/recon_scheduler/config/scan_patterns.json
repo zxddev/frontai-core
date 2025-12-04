@@ -1,0 +1,300 @@
+{
+  "patterns": {
+    "zigzag": {
+      "id": "zigzag",
+      "name": "Z字形扫描",
+      "alias": ["lawnmower", "serpentine", "蛇形"],
+      "description": "平行航线来回扫描，适合大面积均匀覆盖",
+      "use_cases": ["广域侦察", "测绘建图", "热成像搜索"],
+      "advantages": ["覆盖率高", "效率高", "易于规划"],
+      "disadvantages": ["转弯时有盲区", "不适合不规则区域"],
+      "parameters": {
+        "altitude_m": {
+          "description": "飞行高度（米）",
+          "typical_range": [50, 200],
+          "affects": "覆盖宽度和分辨率"
+        },
+        "speed_ms": {
+          "description": "飞行速度（米/秒）",
+          "typical_range": [5, 20],
+          "affects": "任务时间和图像质量"
+        },
+        "overlap_percent": {
+          "description": "航线重叠率（%）",
+          "typical_range": [20, 40],
+          "affects": "覆盖完整性"
+        },
+        "heading_deg": {
+          "description": "航线方向（度，0=北）",
+          "default": "auto_optimize",
+          "affects": "总航程"
+        },
+        "line_spacing_m": {
+          "description": "航线间距（米）",
+          "calculation": "swath_width * (1 - overlap_percent / 100)",
+          "affects": "覆盖效率"
+        }
+      },
+      "swath_width_calculation": {
+        "formula": "2 * altitude_m * tan(sensor_fov_deg / 2)",
+        "example": "100m高度，90°FOV → 200m覆盖宽度"
+      },
+      "optimization_rules": [
+        "选择最短总航程的航向（通常沿短边方向）",
+        "考虑风向，尽量顺风飞行",
+        "避免逆光飞行（太阳方位角）"
+      ]
+    },
+    "spiral_inward": {
+      "id": "spiral_inward",
+      "name": "向内螺旋",
+      "description": "从外向内螺旋飞行，适合定点详查",
+      "use_cases": ["热信号点详查", "目标确认", "精确定位"],
+      "advantages": ["逐步聚焦目标", "覆盖完整"],
+      "disadvantages": ["时间较长", "终点在中心"],
+      "parameters": {
+        "center": {
+          "description": "螺旋中心点坐标",
+          "required": true
+        },
+        "start_radius_m": {
+          "description": "起始半径（米）",
+          "typical_range": [50, 200]
+        },
+        "end_radius_m": {
+          "description": "结束半径（米）",
+          "typical_range": [5, 20],
+          "default": 10
+        },
+        "ring_spacing_m": {
+          "description": "环间距（米）",
+          "typical_range": [10, 50],
+          "affects": "覆盖密度"
+        },
+        "altitude_m": {
+          "description": "飞行高度（米）",
+          "typical_range": [30, 100]
+        },
+        "speed_ms": {
+          "description": "飞行速度（米/秒）",
+          "typical_range": [3, 10]
+        }
+      }
+    },
+    "spiral_outward": {
+      "id": "spiral_outward",
+      "name": "向外螺旋",
+      "description": "从中心向外螺旋飞行，适合从已知点展开搜索",
+      "use_cases": ["扩展搜索", "从报警点展开"],
+      "advantages": ["从目标开始搜索", "逐步扩大范围"],
+      "disadvantages": ["起点需要精确"],
+      "parameters": {
+        "center": {
+          "description": "螺旋中心点坐标",
+          "required": true
+        },
+        "start_radius_m": {
+          "description": "起始半径（米）",
+          "default": 10
+        },
+        "end_radius_m": {
+          "description": "结束半径（米）",
+          "typical_range": [100, 500]
+        },
+        "ring_spacing_m": {
+          "description": "环间距（米）",
+          "typical_range": [20, 100]
+        }
+      }
+    },
+    "circular": {
+      "id": "circular",
+      "name": "环形扫描",
+      "description": "绕中心点圆形飞行，适合目标监视",
+      "use_cases": ["火情监测", "目标监视", "周边侦察"],
+      "advantages": ["持续监视目标", "保持安全距离"],
+      "disadvantages": ["覆盖范围有限"],
+      "parameters": {
+        "center": {
+          "description": "圆心坐标（通常是危险源）",
+          "required": true
+        },
+        "radius_m": {
+          "description": "飞行半径（米）",
+          "typical_range": [100, 500]
+        },
+        "altitude_m": {
+          "description": "飞行高度（米）",
+          "typical_range": [100, 300]
+        },
+        "approach_direction": {
+          "description": "接近方向",
+          "options": ["upwind", "downwind", "crosswind"],
+          "default": "upwind",
+          "safety_critical": true
+        },
+        "orbit_direction": {
+          "description": "绕行方向",
+          "options": ["clockwise", "counterclockwise"],
+          "default": "clockwise"
+        },
+        "laps": {
+          "description": "绕行圈数",
+          "default": 1
+        }
+      },
+      "safety_rules": [
+        "火灾/危化品场景必须上风向接近",
+        "保持安全距离",
+        "云台始终对准中心"
+      ]
+    },
+    "strip": {
+      "id": "strip",
+      "name": "条带扫描",
+      "description": "沿线性目标飞行，适合道路、河流、山脊",
+      "use_cases": ["道路评估", "河流测绘", "滑坡边界"],
+      "advantages": ["针对线性目标效率高"],
+      "disadvantages": ["仅适合线性区域"],
+      "parameters": {
+        "start_point": {
+          "description": "起点坐标",
+          "required": true
+        },
+        "end_point": {
+          "description": "终点坐标",
+          "required": true
+        },
+        "altitude_m": {
+          "description": "飞行高度（米）",
+          "typical_range": [50, 150]
+        },
+        "speed_ms": {
+          "description": "飞行速度（米/秒）",
+          "typical_range": [8, 15]
+        },
+        "offset_m": {
+          "description": "偏移距离（米，正=右侧）",
+          "default": 0
+        },
+        "heading_alignment": {
+          "description": "航向对齐方式",
+          "options": ["along_target", "perpendicular"],
+          "default": "along_target"
+        }
+      }
+    },
+    "grid": {
+      "id": "grid",
+      "name": "网格扫描",
+      "description": "正交网格扫描，双向覆盖",
+      "use_cases": ["高精度测绘", "精细搜索"],
+      "advantages": ["覆盖完整", "双向重叠"],
+      "disadvantages": ["时间长", "航程长"],
+      "parameters": {
+        "altitude_m": {
+          "description": "飞行高度（米）",
+          "typical_range": [50, 150]
+        },
+        "speed_ms": {
+          "description": "飞行速度（米/秒）",
+          "typical_range": [5, 12]
+        },
+        "line_spacing_m": {
+          "description": "航线间距（米）",
+          "typical_range": [30, 100]
+        },
+        "primary_heading_deg": {
+          "description": "主航向（度）",
+          "default": 0
+        },
+        "secondary_heading_deg": {
+          "description": "副航向（度）",
+          "default": 90
+        }
+      }
+    },
+    "expanding_square": {
+      "id": "expanding_square",
+      "name": "扩展方形",
+      "description": "从中心向外扩展的方形搜索",
+      "use_cases": ["海上搜救", "失联目标搜索"],
+      "advantages": ["从已知点高效扩展", "系统化覆盖"],
+      "disadvantages": ["后期航程增加"],
+      "parameters": {
+        "center": {
+          "description": "搜索中心点",
+          "required": true
+        },
+        "initial_leg_m": {
+          "description": "初始边长（米）",
+          "typical_range": [50, 200]
+        },
+        "leg_increment_m": {
+          "description": "边长增量（米）",
+          "typical_range": [50, 200]
+        },
+        "max_radius_m": {
+          "description": "最大搜索半径（米）",
+          "typical_range": [500, 2000]
+        }
+      }
+    }
+  },
+  "pattern_selection_rules": {
+    "area_survey": {
+      "default": "zigzag",
+      "alternatives": ["grid"],
+      "selection_criteria": [
+        "规则区域用zigzag",
+        "高精度需求用grid",
+        "考虑风向选择航向"
+      ]
+    },
+    "thermal_search": {
+      "default": "zigzag",
+      "parameters": {
+        "altitude_m": 50,
+        "speed_ms": 8,
+        "overlap_percent": 30
+      }
+    },
+    "point_inspection": {
+      "default": "spiral_inward",
+      "alternatives": ["circular"],
+      "selection_criteria": [
+        "需要详查用spiral_inward",
+        "需要监视用circular"
+      ]
+    },
+    "fire_monitoring": {
+      "default": "circular",
+      "mandatory_rules": [
+        "必须上风向接近",
+        "保持安全距离"
+      ]
+    },
+    "flood_mapping": {
+      "default": "zigzag",
+      "parameters": {
+        "heading_alignment": "along_waterway"
+      }
+    },
+    "landslide_mapping": {
+      "default": "strip",
+      "parameters": {
+        "heading_alignment": "along_slope"
+      }
+    }
+  },
+  "gsd_reference": {
+    "description": "地面采样距离参考",
+    "formula": "GSD_cm = (altitude_m * sensor_pixel_size_um) / (focal_length_mm * 10)",
+    "typical_values": {
+      "50m_altitude": "1.5-2.5cm",
+      "100m_altitude": "3-5cm",
+      "150m_altitude": "5-8cm",
+      "200m_altitude": "7-10cm"
+    }
+  }
+}

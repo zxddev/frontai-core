@@ -242,6 +242,7 @@ async def trigger_earthquake_event(
             priority=_get_earthquake_priority(request.magnitude),
             estimated_victims=request.estimated_victims,
             is_time_critical=request.magnitude >= Decimal("5.0"),  # 5级以上为时间紧急
+            is_main_event=True,  # 地震事件作为想定的主事件
         )
         
         event = await service.create(event_create)

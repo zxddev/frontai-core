@@ -6,6 +6,7 @@ EmergencyAIAgent主类
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Dict, Any, Optional
 from uuid import UUID
@@ -235,13 +236,16 @@ class EmergencyAIAgent:
             # 不阻塞主流程
 
 
-# 单例实例
+# 单例实例及线程锁
 _agent_instance: Optional[EmergencyAIAgent] = None
+_agent_lock: threading.Lock = threading.Lock()
 
 
 def get_emergency_ai_agent() -> EmergencyAIAgent:
-    """获取EmergencyAIAgent单例"""
+    """获取EmergencyAIAgent单例（线程安全，双重检查锁定）"""
     global _agent_instance
     if _agent_instance is None:
-        _agent_instance = EmergencyAIAgent()
+        with _agent_lock:
+            if _agent_instance is None:
+                _agent_instance = EmergencyAIAgent()
     return _agent_instance

@@ -22,6 +22,7 @@ from src.domains.integrations import integrations_router
 from src.domains.staging_area import router as staging_area_router
 from src.domains.movement_simulation import movement_router
 from src.domains.simulation import simulation_router
+from src.domains.routing import routing_router
 from src.domains.equipment_recommendation import router as equipment_rec_router
 from src.agents import router as ai_router
 from src.domains.frontend_api import frontend_router
@@ -95,6 +96,7 @@ api_router_v2.include_router(staging_area_router)
 api_router_v2.include_router(movement_router)
 api_router_v2.include_router(simulation_router)
 api_router_v2.include_router(equipment_rec_router)
+api_router_v2.include_router(routing_router)
 api_router_v2.include_router(ai_router)
 api_router_v2.include_router(tts_router)
 

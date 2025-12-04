@@ -341,8 +341,10 @@ class StompBroker:
         await self.send_to_destination("/topic/scenario.task.triggered", {"payload": task_data}, scenario_id)
     
     async def broadcast_alert(self, alert_data: dict, scenario_id: Optional[UUID] = None):
-        """广播告警"""
-        await self.send_to_destination("/topic/alerts", {"payload": alert_data}, scenario_id)
+        """广播告警 - 发送给所有订阅者，不限场景"""
+        # 告警消息应该发送给所有订阅者，不限制场景
+        # scenario_id 仅作为消息内容的一部分，不用于过滤连接
+        await self.send_to_destination("/topic/alerts", {"payload": alert_data}, None)
 
 
 # 全局单例

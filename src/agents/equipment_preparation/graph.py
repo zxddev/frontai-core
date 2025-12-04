@@ -151,8 +151,11 @@ async def run_equipment_preparation(
     Returns:
         最终状态，包含推荐结果
     """
-    logger.info(f"启动装备准备智能体，事件ID: {event_id}")
     start_time = time.time()
+    desc_preview = disaster_description[:100] + "..." if len(disaster_description) > 100 else disaster_description
+    logger.info(f"[装备推荐] ========== 开始执行 ==========")
+    logger.info(f"[装备推荐] 事件ID: {event_id}")
+    logger.info(f"[装备推荐] 灾情描述: {desc_preview}")
     
     graph = get_equipment_preparation_graph()
     
@@ -176,15 +179,17 @@ async def run_equipment_preparation(
     if isinstance(final_state.get("trace"), dict):
         final_state["trace"]["total_time_ms"] = total_time
     
-    logger.info(
-        f"装备准备智能体执行完成",
-        extra={
-            "event_id": event_id,
-            "total_time_ms": total_time,
-            "devices_recommended": len(final_state.get("recommended_devices", [])),
-            "supplies_recommended": len(final_state.get("recommended_supplies", [])),
-            "shortage_alerts": len(final_state.get("shortage_alerts", [])),
-        }
-    )
+    devices_count = len(final_state.get("recommended_devices", []))
+    supplies_count = len(final_state.get("recommended_supplies", []))
+    shortage_count = len(final_state.get("shortage_alerts", []))
+    loading_plan = final_state.get("loading_plan", {})
+    vehicles_count = len(loading_plan)
+    
+    logger.info(f"[装备推荐] ========== 执行完成 ==========")
+    logger.info(f"[装备推荐] 总耗时: {total_time}ms")
+    logger.info(f"[装备推荐] 推荐设备: {devices_count}个")
+    logger.info(f"[装备推荐] 推荐物资: {supplies_count}种")
+    logger.info(f"[装备推荐] 缺口告警: {shortage_count}个")
+    logger.info(f"[装备推荐] 装载车辆: {vehicles_count}辆")
     
     return final_state

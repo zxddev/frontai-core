@@ -46,6 +46,8 @@ class TeamRepository:
             certification_level=data.certification_level,
             response_time_minutes=data.response_time_minutes,
             max_deployment_hours=data.max_deployment_hours,
+            team_source=data.team_source.value if data.team_source else 'external',
+            parent_team_id=data.parent_team_id,
             properties=data.properties,
             status='standby',
         )
@@ -156,6 +158,13 @@ class TeamRepository:
                 update_dict['status'].value 
                 if hasattr(update_dict['status'], 'value') 
                 else update_dict['status']
+            )
+        
+        if 'team_source' in update_dict and update_dict['team_source']:
+            update_dict['team_source'] = (
+                update_dict['team_source'].value
+                if hasattr(update_dict['team_source'], 'value')
+                else update_dict['team_source']
             )
         
         for key, value in update_dict.items():

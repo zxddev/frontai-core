@@ -11,8 +11,12 @@ import re
 import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
+from uuid import UUID
+
+from sqlalchemy import text
 
 from ..state import EmergencyAIState
+from src.core.database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +89,89 @@ def _filter_for_commander(text: str, event_time: Optional[datetime] = None) -> s
     text = re.sub(r'T\+[\d.]+-?[\d.]*\s*[hH小时]*', convert_t_time, text)
     
     return text
+
+
+async def _enrich_allocations(allocations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    为allocations补充队伍的全部能力、车辆和装备信息
+    
+    Args:
+        allocations: 原始分配列表
+        
+    Returns:
+        补充了all_capabilities, vehicles, equipments字段的分配列表
+    """
+    if not allocations:
+        return allocations
+    
+    team_ids = [a.get("resource_id") for a in allocations if a.get("resource_id")]
+    if not team_ids:
+        return allocations
+    
+    try:
+        async with AsyncSessionLocal() as db:
+            # 转换为UUID数组
+            uuid_ids = [UUID(tid) if isinstance(tid, str) else tid for tid in team_ids]
+            
+            # 1. 查询全部能力
+            caps_result = await db.execute(text('''
+                SELECT team_id::text, array_agg(DISTINCT capability_code) as all_capabilities
+                FROM operational_v2.team_capabilities_v2
+                WHERE team_id = ANY(:ids)
+                GROUP BY team_id
+            '''), {"ids": uuid_ids})
+            caps_map = {row[0]: list(row[1]) for row in caps_result}
+            
+            # 2. 查询车辆
+            vehicles_result = await db.execute(text('''
+                SELECT tv.team_id::text, 
+                       json_agg(json_build_object(
+                           'name', v.name, 
+                           'type', v.vehicle_type, 
+                           'speed_kmh', v.max_speed_kmh
+                       )) as vehicles
+                FROM operational_v2.team_vehicles_v2 tv
+                JOIN operational_v2.vehicles_v2 v ON tv.vehicle_id = v.id
+                WHERE tv.team_id = ANY(:ids) AND tv.status = 'available'
+                GROUP BY tv.team_id
+            '''), {"ids": uuid_ids})
+            vehicles_map = {row[0]: row[1] for row in vehicles_result}
+            
+            # 3. 查询装备
+            equips_result = await db.execute(text('''
+                SELECT te.team_id::text, 
+                       json_agg(json_build_object(
+                           'name', e.name, 
+                           'code', e.code, 
+                           'quantity', te.quantity
+                       )) as equipments
+                FROM operational_v2.team_equipment_v2 te
+                JOIN operational_v2.equipment_v2 e ON te.equipment_id = e.id
+                WHERE te.team_id = ANY(:ids)
+                GROUP BY te.team_id
+            '''), {"ids": uuid_ids})
+            equips_map = {row[0]: row[1] for row in equips_result}
+            
+            # 4. 合并到allocations
+            enriched = []
+            for alloc in allocations:
+                tid = alloc.get("resource_id")
+                enriched_alloc = dict(alloc)
+                enriched_alloc["all_capabilities"] = caps_map.get(tid, [])
+                enriched_alloc["vehicles"] = vehicles_map.get(tid, [])
+                enriched_alloc["equipments"] = equips_map.get(tid, [])
+                enriched.append(enriched_alloc)
+            
+            return enriched
+            
+    except Exception as e:
+        logger.warning(f"[输出] 补充队伍详细信息失败: {e}")
+        # 失败时返回原始数据，添加空字段
+        for alloc in allocations:
+            alloc.setdefault("all_capabilities", [])
+            alloc.setdefault("vehicles", [])
+            alloc.setdefault("equipments", [])
+        return allocations
 
 
 async def _generate_scheme_text(
@@ -200,6 +287,13 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
     # 判断是否成功
     errors = state.get("errors", [])
     recommended_scheme = state.get("recommended_scheme")
+    
+    # 补充队伍详细信息（全部能力、车辆、装备）
+    if recommended_scheme and recommended_scheme.get("allocations"):
+        recommended_scheme = dict(recommended_scheme)  # 避免修改原对象
+        recommended_scheme["allocations"] = await _enrich_allocations(
+            recommended_scheme["allocations"]
+        )
     
     success = len(errors) == 0 and recommended_scheme is not None
     

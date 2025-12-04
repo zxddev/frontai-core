@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -94,46 +95,57 @@ async def match_and_recommend(state: EquipmentPreparationState) -> Dict[str, Any
     3. 计算物资数量
     4. 生成每项的选择理由
     """
-    logger.info("执行匹配推荐节点", extra={"event_id": state.get("event_id")})
+    import time
+    start_time = time.time()
+    logger.info(f"[匹配推荐] ========== 开始匹配推荐 ==========")
     
     requirement_spec = state.get("requirement_spec")
     warehouse_inventory = state.get("warehouse_inventory")
     parsed_disaster = state.get("parsed_disaster", {})
     
     if not requirement_spec or not warehouse_inventory:
-        logger.warning("缺少需求规格或仓库库存")
+        logger.warning("[匹配推荐] 缺少需求规格或仓库库存，跳过")
         return {
             "recommended_devices": [],
             "recommended_supplies": [],
         }
     
+    # 打印需求信息
+    required_caps = requirement_spec.get("required_capabilities", [])
+    required_types = requirement_spec.get("required_device_types", [])
+    logger.info(f"[匹配推荐] 需求能力: {required_caps}")
+    logger.info(f"[匹配推荐] 需求设备类型: {required_types}")
+    
     # 匹配设备
+    device_start = time.time()
+    logger.info(f"[设备匹配] 开始匹配，共{len(warehouse_inventory.get('devices', []))}个设备")
     recommended_devices = await _match_devices(
         devices=warehouse_inventory.get("devices", []),
         modules=warehouse_inventory.get("modules", []),
         requirement_spec=requirement_spec,
         parsed_disaster=parsed_disaster,
     )
+    device_time = int((time.time() - device_start) * 1000)
+    logger.info(f"[设备匹配] 完成，推荐{len(recommended_devices)}个设备，耗时{device_time}ms")
     
     # 匹配物资
+    supply_start = time.time()
+    logger.info(f"[物资推荐] 开始计算，共{len(warehouse_inventory.get('supplies', []))}种物资")
     recommended_supplies = await _match_supplies(
         supplies=warehouse_inventory.get("supplies", []),
         requirement_spec=requirement_spec,
         parsed_disaster=parsed_disaster,
     )
+    supply_time = int((time.time() - supply_start) * 1000)
+    logger.info(f"[物资推荐] 完成，推荐{len(recommended_supplies)}种物资，耗时{supply_time}ms")
     
     # 更新追踪
     trace = state.get("trace", {})
     trace["phases_executed"] = trace.get("phases_executed", []) + ["match_and_recommend"]
     trace["llm_calls"] = trace.get("llm_calls", 0) + len(recommended_devices) + len(recommended_supplies)
     
-    logger.info(
-        "匹配推荐完成",
-        extra={
-            "devices_recommended": len(recommended_devices),
-            "supplies_recommended": len(recommended_supplies),
-        }
-    )
+    total_time = int((time.time() - start_time) * 1000)
+    logger.info(f"[匹配推荐] ========== 匹配推荐完成，总耗时{total_time}ms ==========")
     
     return {
         "recommended_devices": recommended_devices,
@@ -155,6 +167,8 @@ async def _match_devices(
     disaster_type = parsed_disaster.get("disaster_type", "earthquake")
     
     recommendations: List[DeviceRecommendation] = []
+    # 追踪已分配的模块ID，避免同一模块被多个设备使用
+    allocated_module_ids: set = set()
     
     for device in devices:
         device_type = device.get("device_type")
@@ -168,11 +182,12 @@ async def _match_devices(
         if applicable and disaster_type not in applicable:
             continue
         
-        # 匹配模块
+        # 匹配模块（传入已分配的模块集合）
         matched_modules = _match_modules_for_device(
             device=device,
             modules=modules,
             required_capabilities=required_capabilities,
+            allocated_module_ids=allocated_module_ids,
         )
         
         # 确定优先级
@@ -206,16 +221,18 @@ def _match_modules_for_device(
     device: Dict[str, Any],
     modules: List[Dict[str, Any]],
     required_capabilities: List[str],
+    allocated_module_ids: set,
 ) -> List[Dict[str, Any]]:
-    """为设备匹配模块"""
+    """为设备匹配模块（每个模块只能分配给一个设备）"""
     device_type = device.get("device_type")
     module_slots = device.get("module_slots", 0)
     base_capabilities = device.get("base_capabilities", [])
     
-    # 找出设备缺少但需要的能力
-    missing_capabilities = [
-        cap for cap in required_capabilities 
-        if cap not in base_capabilities
+    # 找出设备缺少但需要的能力（转为大写以便匹配）
+    base_caps_upper = [cap.upper() for cap in base_capabilities]
+    missing_capabilities_upper = [
+        cap.upper() for cap in required_capabilities 
+        if cap.upper() not in base_caps_upper
     ]
     
     matched_modules = []
@@ -225,29 +242,38 @@ def _match_modules_for_device(
         if slots_used >= module_slots:
             break
         
+        module_id = module["id"]
+        
+        # 跳过已被其他设备分配的模块
+        if module_id in allocated_module_ids:
+            continue
+        
         # 检查模块是否兼容该设备
         compatible_devices = module.get("compatible_devices", [])
         if device_type not in compatible_devices:
             continue
         
-        # 检查模块是否提供所需能力
+        # 检查模块是否提供所需能力（大小写不敏感）
         module_capabilities = module.get("capabilities", [])
+        module_caps_upper = [cap.upper() for cap in module_capabilities]
         provides_needed = any(
-            cap in missing_capabilities 
-            for cap in module_capabilities
+            cap in missing_capabilities_upper 
+            for cap in module_caps_upper
         )
         
         if provides_needed:
             matched_modules.append({
-                "module_id": module["id"],
+                "module_id": module_id,
                 "module_name": module["name"],
                 "reason": f"提供{', '.join(module_capabilities)}能力",
             })
+            # 标记模块已分配，其他设备不能再使用
+            allocated_module_ids.add(module_id)
             slots_used += 1
             # 更新缺少的能力
-            for cap in module_capabilities:
-                if cap in missing_capabilities:
-                    missing_capabilities.remove(cap)
+            for cap in module_caps_upper:
+                if cap in missing_capabilities_upper:
+                    missing_capabilities_upper.remove(cap)
     
     return matched_modules
 
@@ -346,11 +372,48 @@ async def _match_supplies(
     if affected_population == 0 and estimated_trapped > 0:
         affected_population = estimated_trapped * 5
     
+    # 如果仍然没有受灾人数，根据地震震级推测
+    if affected_population == 0 and disaster_type == "earthquake":
+        magnitude = parsed_disaster.get("magnitude", 0)
+        # 从描述中提取震级
+        if magnitude == 0:
+            description = parsed_disaster.get("description", "")
+            match = re.search(r'(\d+\.?\d*)\s*级', description)
+            if match:
+                magnitude = float(match.group(1))
+        
+        # 基于震级估算受灾人数（参考中国地震灾害统计数据）
+        if magnitude >= 8.0:
+            affected_population = 100000  # 8级以上：10万人
+            estimated_trapped = 500
+        elif magnitude >= 7.0:
+            affected_population = 30000   # 7-8级：3万人
+            estimated_trapped = 150
+        elif magnitude >= 6.0:
+            affected_population = 5000    # 6-7级：5千人
+            estimated_trapped = 50
+        elif magnitude >= 5.0:
+            affected_population = 1000    # 5-6级：1千人
+            estimated_trapped = 20
+        elif magnitude >= 4.0:
+            affected_population = 200     # 4-5级：200人
+            estimated_trapped = 5
+        
+        if affected_population > 0:
+            logger.info(
+                f"[物资推荐] 根据震级{magnitude}推测受灾人数: "
+                f"affected={affected_population}, trapped={estimated_trapped}"
+            )
+    
     # 使用 SphereDemandCalculator 计算需求量
     demand_requirements: Dict[str, Dict[str, Any]] = {}
     
+    logger.info(f"[物资推荐] 灾害类型: {disaster_type}, 严重程度: {severity}")
+    logger.info(f"[物资推荐] 受影响人口: {affected_population}, 被困人数: {estimated_trapped}")
+    
     if affected_population > 0:
         try:
+            logger.info(f"[物资推荐] 开始调用SphereDemandCalculator计算需求...")
             # 构造伤亡估算（使用通用模型）
             estimator = CasualtyEstimator()
             try:

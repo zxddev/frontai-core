@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import logging
 from typing import Dict, Any, List, Optional
@@ -297,30 +298,31 @@ async def query_trr_rules_async(
     disaster_type: str,
     conditions: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """异步版本的TRR规则查询"""
-    # Neo4j Python驱动是同步的，直接调用
-    return query_trr_rules.invoke({
-        "disaster_type": disaster_type,
-        "conditions": conditions,
-    })
+    """异步版本的TRR规则查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(
+        query_trr_rules.invoke,
+        {"disaster_type": disaster_type, "conditions": conditions},
+    )
 
 
 async def query_capability_mapping_async(
     capability_codes: List[str],
 ) -> List[Dict[str, Any]]:
-    """异步版本的能力映射查询"""
-    return query_capability_mapping.invoke({
-        "capability_codes": capability_codes,
-    })
+    """异步版本的能力映射查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(
+        query_capability_mapping.invoke,
+        {"capability_codes": capability_codes},
+    )
 
 
 async def query_task_dependencies_async(
     task_codes: List[str],
 ) -> List[Dict[str, Any]]:
-    """异步版本的任务依赖查询"""
-    return query_task_dependencies.invoke({
-        "task_codes": task_codes,
-    })
+    """异步版本的任务依赖查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(
+        query_task_dependencies.invoke,
+        {"task_codes": task_codes},
+    )
 
 
 # ============================================================================
@@ -613,38 +615,41 @@ async def query_scene_by_disaster_async(
     disaster_type: str,
     conditions: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    """异步版本的场景查询"""
-    return query_scene_by_disaster.invoke({
-        "disaster_type": disaster_type,
-        "conditions": conditions,
-    })
+    """异步版本的场景查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(
+        query_scene_by_disaster.invoke,
+        {"disaster_type": disaster_type, "conditions": conditions},
+    )
 
 
 async def query_task_chain_async(
     scene_code: str,
 ) -> Optional[Dict[str, Any]]:
-    """异步版本的任务链查询"""
-    return query_task_chain.invoke({
-        "scene_code": scene_code,
-    })
+    """异步版本的任务链查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(
+        query_task_chain.invoke,
+        {"scene_code": scene_code},
+    )
 
 
 async def query_metatask_dependencies_async(
     task_ids: List[str],
 ) -> Dict[str, List[str]]:
-    """异步版本的MetaTask依赖查询"""
-    return query_metatask_dependencies.invoke({
-        "task_ids": task_ids,
-    })
+    """异步版本的MetaTask依赖查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(
+        query_metatask_dependencies.invoke,
+        {"task_ids": task_ids},
+    )
 
 
 async def query_metatask_details_async(
     task_ids: List[str],
 ) -> Dict[str, Dict[str, Any]]:
-    """异步版本的MetaTask详情查询"""
-    return query_metatask_details.invoke({
-        "task_ids": task_ids,
-    })
+    """异步版本的MetaTask详情查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(
+        query_metatask_details.invoke,
+        {"task_ids": task_ids},
+    )
 
 
 # ============================================================================
@@ -675,10 +680,8 @@ def query_rule_domains(rule_ids: List[str]) -> List[Dict[str, Any]]:
 
 
 async def query_rule_domains_async(rule_ids: List[str]) -> List[Dict[str, Any]]:
-    """异步版本的规则域查询"""
-    import asyncio
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, query_rule_domains, rule_ids)
+    """异步版本的规则域查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(query_rule_domains, rule_ids)
 
 
 def query_phase_priorities(phase_id: str) -> List[Dict[str, Any]]:
@@ -720,17 +723,13 @@ def query_phase_info(phase_id: str) -> Optional[Dict[str, Any]]:
 
 
 async def query_phase_priorities_async(phase_id: str) -> List[Dict[str, Any]]:
-    """异步版本的阶段优先级查询"""
-    import asyncio
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, query_phase_priorities, phase_id)
+    """异步版本的阶段优先级查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(query_phase_priorities, phase_id)
 
 
 async def query_phase_info_async(phase_id: str) -> Optional[Dict[str, Any]]:
-    """异步版本的阶段信息查询"""
-    import asyncio
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, query_phase_info, phase_id)
+    """异步版本的阶段信息查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(query_phase_info, phase_id)
 
 
 def query_modules_by_capabilities(capability_codes: List[str]) -> List[Dict[str, Any]]:
@@ -776,7 +775,5 @@ def query_modules_by_capabilities(capability_codes: List[str]) -> List[Dict[str,
 
 
 async def query_modules_by_capabilities_async(capability_codes: List[str]) -> List[Dict[str, Any]]:
-    """异步版本的模块能力查询"""
-    import asyncio
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, query_modules_by_capabilities, capability_codes)
+    """异步版本的模块能力查询，使用线程池避免阻塞事件循环"""
+    return await asyncio.to_thread(query_modules_by_capabilities, capability_codes)

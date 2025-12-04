@@ -791,6 +791,26 @@ async def car_start(
                 scenario_row = scenario_result.fetchone()
                 scenario_id = scenario_row.id if scenario_row else None
                 
+                # 路径规划服务（用于获取 polyline）
+                from src.domains.routing.service import RoutePlanningService
+                from src.domains.routing.schemas import Point as RoutingPoint
+                routing_service = RoutePlanningService(db)
+                
+                # 起点：成都市中心（GCJ02）
+                origin_gcj = wgs84_to_gcj02(104.0668, 30.5728)
+                origin = RoutingPoint(lon=origin_gcj[0], lat=origin_gcj[1])
+                destination = RoutingPoint(lon=dest_gcj[0], lat=dest_gcj[1])
+                
+                # 先规划路径获取 polyline（所有队伍共用同一条路径）
+                polyline: List[Dict[str, float]] = []
+                try:
+                    route_result = await routing_service.plan_route(origin, destination)
+                    if route_result.success and route_result.polyline:
+                        polyline = [{"lon": p.lon, "lat": p.lat} for p in route_result.polyline]
+                        logger.info(f"[car_start] 路径规划成功: points={len(polyline)}, distance={route_result.total_distance_m/1000:.1f}km")
+                except Exception as route_err:
+                    logger.error(f"[car_start] 路径规划失败: {route_err}", exc_info=True)
+                
                 dispatch_service = TeamDispatchService(db)
                 
                 for team in mobilize_result.teams:
@@ -809,6 +829,7 @@ async def car_start(
                             "session_id": response.session_id,
                             "distance_m": response.route_info.distance_m,
                             "estimated_duration_s": response.estimated_duration_s,
+                            "polyline": polyline,
                         })
                         logger.info(f"[car_start] 队伍移动启动: {team.name}, session={response.session_id}")
                     except Exception as e:

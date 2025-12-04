@@ -17,7 +17,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.websocket import broadcast_alert
+from src.core.stomp.broker import stomp_broker
 from .repository import RiskAreaRepository
 from .schemas import (
     RiskAreaCreateRequest,
@@ -197,29 +197,64 @@ class RiskAreaService:
             # 2. 查询受影响的活动路线
             affected_routes = await self._find_affected_routes(risk_area)
             
+            # 2.5 查询正在移动车辆的剩余路径是否穿过风险区域
+            affected_moving_entities = await self._find_affected_moving_entities(risk_area)
+            
             # 3. 生成可用决策选项
             available_actions = self._get_available_actions(risk_area.passage_status)
             
-            # 4. 构建通知 payload
+            # 3.5 使用 LLM 生成风险描述和建议（高风险时）
+            llm_advice = None
+            if risk_area.risk_level >= 5 and (affected_routes or affected_moving_entities):
+                llm_advice = await self._generate_llm_risk_advice(
+                    risk_area=risk_area,
+                    affected_routes=affected_routes,
+                    affected_moving_entities=affected_moving_entities,
+                )
+            
+            # 4. 构建通知 payload（匹配前端 route-warning-modal 期望的格式）
+            # 从受影响路径中提取第一个用于绕行方案生成
+            first_affected = affected_routes[0] if affected_routes else None
+            
             alert_data = {
-                "risk_area_id": str(risk_area.id),
-                "risk_area_name": risk_area.name,
                 "change_type": change_type,
-                "risk_level": risk_area.risk_level,
-                "old_risk_level": old_risk_level,
-                "passage_status": risk_area.passage_status,
                 "requires_decision": requires_decision,
                 "available_actions": available_actions,
+                # 前端期望的数组格式
+                "risk_area_ids": [str(risk_area.id)],
+                "risk_areas": [{
+                    "id": str(risk_area.id),
+                    "name": risk_area.name,
+                    "risk_level": risk_area.risk_level,
+                    "passage_status": risk_area.passage_status,
+                }],
+                # 用于生成绕行方案的参数
+                "task_id": first_affected.get("task_id") if first_affected else None,
+                "team_id": first_affected.get("team_id") if first_affected else None,
+                "origin": first_affected.get("origin") if first_affected else None,
+                "destination": first_affected.get("destination") if first_affected else None,
+                # 附加信息
                 "affected_routes": affected_routes,
+                "affected_moving_entities": affected_moving_entities,
+                "llm_advice": llm_advice,
                 "geometry": risk_area.geometry_geojson,
                 "description": risk_area.description,
             }
             
-            # 5. WebSocket 广播（通知所有前端）
-            await broadcast_alert(
+            # 5. STOMP 广播（通知所有前端）
+            broadcast_payload = {
+                "event_type": "risk_area_change",
+                **alert_data,
+            }
+            logger.info(
+                f"[风险区域通知] 准备广播: requires_decision={requires_decision}, "
+                f"affected_routes_count={len(affected_routes)}, risk_area_ids={alert_data.get('risk_area_ids')}"
+            )
+            logger.info(f"[风险区域通知] 广播内容: {broadcast_payload}")
+            
+            await stomp_broker.broadcast_alert(
+                alert_data=broadcast_payload,
                 scenario_id=risk_area.scenario_id,
-                alert_type="risk_area_change",
-                alert_data=alert_data,
             )
             
             logger.info(
@@ -533,7 +568,19 @@ class RiskAreaService:
         if risk_area.scenario_id is None:
             return []
         
+        # planned_routes_v2.task_id 外键引用 tasks_v2(id)
+        # 风险区域可能存储在 disaster_affected_areas_v2 或 entities_v2 (type='danger_area')
         sql = text("""
+            WITH risk_geometry AS (
+                SELECT geometry 
+                FROM operational_v2.disaster_affected_areas_v2 
+                WHERE id = :risk_area_id
+                UNION ALL
+                SELECT ST_GeomFromGeoJSON(geometry::text)::geography::geometry
+                FROM operational_v2.entities_v2 
+                WHERE id = :risk_area_id AND type = 'danger_area'
+                LIMIT 1
+            )
             SELECT 
                 pr.id as route_id,
                 t.id as task_id,
@@ -542,18 +589,20 @@ class RiskAreaService:
                 pr.vehicle_id,
                 pr.team_id,
                 v.name as vehicle_name,
-                tm.name as team_name
+                tm.name as team_name,
+                ST_X(pr.start_location::geometry) as origin_lng,
+                ST_Y(pr.start_location::geometry) as origin_lat,
+                ST_X(pr.end_location::geometry) as dest_lng,
+                ST_Y(pr.end_location::geometry) as dest_lat
             FROM operational_v2.planned_routes_v2 pr
-            JOIN operational_v2.tasks_v2 t ON pr.task_id = t.id
+            LEFT JOIN operational_v2.tasks_v2 t ON pr.task_id = t.id
             LEFT JOIN operational_v2.vehicles_v2 v ON pr.vehicle_id = v.id
             LEFT JOIN operational_v2.rescue_teams_v2 tm ON pr.team_id = tm.id
-            WHERE t.scenario_id = :scenario_id
-              AND t.status IN ('assigned', 'accepted', 'in_progress')
-              AND pr.status = 'active'
+            WHERE pr.status = 'active'
+              AND (t.scenario_id = :scenario_id OR pr.task_id IS NULL)
               AND ST_Intersects(
-                  pr.route_geometry,
-                  (SELECT geometry FROM operational_v2.disaster_affected_areas_v2 
-                   WHERE id = :risk_area_id)
+                  pr.route_geometry::geometry,
+                  (SELECT geometry FROM risk_geometry)
               )
         """)
         
@@ -566,13 +615,15 @@ class RiskAreaService:
             return [
                 {
                     "route_id": str(row.route_id),
-                    "task_id": str(row.task_id),
+                    "task_id": str(row.task_id) if row.task_id else None,
                     "task_title": row.task_title,
                     "task_status": row.task_status,
                     "vehicle_id": str(row.vehicle_id) if row.vehicle_id else None,
                     "vehicle_name": row.vehicle_name,
                     "team_id": str(row.team_id) if row.team_id else None,
                     "team_name": row.team_name,
+                    "origin": {"lng": row.origin_lng, "lat": row.origin_lat} if row.origin_lng else None,
+                    "destination": {"lng": row.dest_lng, "lat": row.dest_lat} if row.dest_lng else None,
                 }
                 for row in result.fetchall()
             ]
@@ -583,6 +634,218 @@ class RiskAreaService:
                 exc_info=True,
             )
             return []
+
+    async def _find_affected_moving_entities(
+        self,
+        risk_area: RiskAreaResponse,
+    ) -> list[dict]:
+        """
+        查询正在移动的实体，其剩余路径是否穿过风险区域
+        
+        从 Redis 获取活跃移动会话，计算每个会话的剩余路径，
+        使用 PostGIS ST_Intersects 检测与风险区域的交集。
+        
+        Returns:
+            受影响的移动实体列表
+        """
+        affected = []
+        
+        try:
+            from src.domains.movement_simulation.persistence import get_persistence
+            from src.domains.movement_simulation.schemas import MovementState
+            
+            persistence = await get_persistence()
+            sessions = await persistence.get_active_sessions()
+            
+            if not sessions:
+                return []
+            
+            # 获取风险区域几何（支持两种数据源）
+            risk_geometry_sql = text("""
+                SELECT geometry 
+                FROM operational_v2.disaster_affected_areas_v2 
+                WHERE id = :risk_area_id
+                UNION ALL
+                SELECT ST_GeomFromGeoJSON(geometry::text)::geography::geometry
+                FROM operational_v2.entities_v2 
+                WHERE id = :risk_area_id AND type = 'danger_area'
+                LIMIT 1
+            """)
+            risk_result = await self.db.execute(risk_geometry_sql, {
+                "risk_area_id": str(risk_area.id),
+            })
+            risk_row = risk_result.first()
+            if not risk_row:
+                logger.warning(f"[剩余路径检测] 未找到风险区域几何: {risk_area.id}")
+                return []
+            
+            for session in sessions:
+                if session.state not in (MovementState.MOVING, MovementState.PAUSED):
+                    continue
+                
+                # 计算剩余路径：当前位置到终点
+                remaining_route = session.route[session.current_segment_index:]
+                if len(remaining_route) < 2:
+                    continue
+                
+                # 构建剩余路径的 WKT LINESTRING
+                coords_str = ", ".join(
+                    f"{p.lon} {p.lat}" for p in remaining_route
+                )
+                remaining_linestring = f"LINESTRING({coords_str})"
+                
+                # 检测剩余路径是否与风险区域相交
+                intersect_sql = text("""
+                    SELECT ST_Intersects(
+                        ST_GeomFromText(:linestring, 4326),
+                        (SELECT geometry 
+                         FROM operational_v2.disaster_affected_areas_v2 
+                         WHERE id = :risk_area_id
+                         UNION ALL
+                         SELECT ST_GeomFromGeoJSON(geometry::text)::geography::geometry
+                         FROM operational_v2.entities_v2 
+                         WHERE id = :risk_area_id AND type = 'danger_area'
+                         LIMIT 1)
+                    ) as intersects
+                """)
+                
+                try:
+                    result = await self.db.execute(intersect_sql, {
+                        "linestring": remaining_linestring,
+                        "risk_area_id": str(risk_area.id),
+                    })
+                    row = result.first()
+                    
+                    if row and row.intersects:
+                        affected.append({
+                            "session_id": session.session_id,
+                            "entity_id": str(session.entity_id),
+                            "entity_type": session.entity_type.value,
+                            "resource_id": str(session.resource_id) if session.resource_id else None,
+                            "current_segment": session.current_segment_index,
+                            "total_segments": len(session.route),
+                            "remaining_distance_m": session.total_distance_m - session.traveled_distance_m,
+                            "speed_kmh": session.speed_mps * 3.6,
+                        })
+                        
+                except Exception as e:
+                    logger.debug(f"[剩余路径检测] 单个会话检测失败: {e}")
+                    continue
+            
+            if affected:
+                logger.info(
+                    f"[剩余路径检测] 发现 {len(affected)} 个移动实体受影响"
+                )
+            
+            return affected
+            
+        except Exception as e:
+            logger.warning(f"[剩余路径检测] 失败: {e}", exc_info=True)
+            return []
+
+    async def _generate_llm_risk_advice(
+        self,
+        risk_area: RiskAreaResponse,
+        affected_routes: list[dict],
+        affected_moving_entities: list[dict],
+    ) -> Optional[dict]:
+        """
+        使用 LLM 生成风险描述和建议
+        
+        Args:
+            risk_area: 风险区域信息
+            affected_routes: 受影响的规划路线
+            affected_moving_entities: 受影响的移动实体
+            
+        Returns:
+            LLM 生成的建议，包含 summary, recommendation, urgency
+        """
+        try:
+            import os
+            from langchain_openai import ChatOpenAI
+            from langchain_core.prompts import ChatPromptTemplate
+            
+            # 获取 LLM 客户端
+            llm = ChatOpenAI(
+                model=os.environ.get('LLM_MODEL', '/models/openai/gpt-oss-120b'),
+                base_url=os.environ.get('OPENAI_BASE_URL', 'http://192.168.31.50:8000/v1'),
+                api_key=os.environ.get('OPENAI_API_KEY', 'dummy_key'),
+                timeout=30,
+                max_retries=0,
+                max_tokens=512,
+            )
+            
+            # 构建提示词
+            passage_status_labels = {
+                "confirmed_blocked": "已确认完全不可通行",
+                "needs_reconnaissance": "需侦察确认",
+                "passable_with_caution": "可通行但需谨慎",
+                "clear": "安全通行",
+                "unknown": "未知状态",
+            }
+            
+            area_type_labels = {
+                "flood": "洪涝区域",
+                "debris": "泥石流区域",
+                "collapse": "塌方区域",
+                "fire": "火灾区域",
+                "chemical": "化学污染区域",
+                "road_damage": "道路损毁区域",
+                "other": "其他危险区域",
+            }
+            
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """你是一名专业的应急救援指挥顾问。根据风险区域信息和受影响的救援队伍/路线，
+生成简洁的风险评估和行动建议。回复格式必须严格为JSON：
+{{"summary": "风险概述（50字内）", "recommendation": "行动建议（100字内）", "urgency": "紧急程度high/medium/low"}}"""),
+                ("user", """风险区域信息：
+- 名称：{area_name}
+- 类型：{area_type}
+- 风险等级：{risk_level}/10
+- 通行状态：{passage_status}
+- 描述：{description}
+
+受影响情况：
+- 规划路线数：{route_count}条
+- 移动中车辆数：{moving_count}辆
+
+请生成风险评估和行动建议（JSON格式）：""")
+            ])
+            
+            # 调用 LLM
+            chain = prompt | llm
+            response = await chain.ainvoke({
+                "area_name": risk_area.name or "未命名区域",
+                "area_type": area_type_labels.get(risk_area.area_type, "危险区域"),
+                "risk_level": risk_area.risk_level,
+                "passage_status": passage_status_labels.get(risk_area.passage_status, "未知"),
+                "description": risk_area.description or "无详细描述",
+                "route_count": len(affected_routes),
+                "moving_count": len(affected_moving_entities),
+            })
+            
+            # 解析 JSON 响应
+            import json
+            content = response.content.strip()
+            # 尝试提取 JSON 部分
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0]
+            
+            advice = json.loads(content)
+            
+            logger.info(f"[LLM风险建议] 生成成功: urgency={advice.get('urgency')}")
+            return advice
+            
+        except Exception as e:
+            logger.warning(f"[LLM风险建议] 生成失败，使用默认建议: {e}")
+            # 返回默认建议
+            return {
+                "summary": f"发现{risk_area.name or '风险区域'}，风险等级{risk_area.risk_level}/10",
+                "recommendation": self._get_route_recommendation(risk_area.passage_status),
+                "urgency": "high" if risk_area.risk_level >= 7 else "medium",
+            }
 
     # =========================================================================
     # 通行状态变更通知
@@ -657,10 +920,12 @@ class RiskAreaService:
                 "geometry": risk_area.geometry_geojson,
             }
             
-            await broadcast_alert(
+            await stomp_broker.broadcast_alert(
+                alert_data={
+                    "event_type": "risk_area_passage_change",
+                    **alert_data,
+                },
                 scenario_id=risk_area.scenario_id,
-                alert_type="risk_area_passage_change",
-                alert_data=alert_data,
             )
             
             logger.info(

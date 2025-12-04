@@ -36,6 +36,9 @@ class Settings:
     semantic_router_embedding_model: str  # 语义路由embedding模型（中文优化）
     semantic_router_embedding_base_url: str  # 语义路由embedding服务地址
     robot_command_enabled: bool  # 机器人控制功能开关
+    # 机器狗适配器配置
+    adapter_hub_base_url: str  # adapter-hub 服务地址，如 http://192.168.31.40:8082
+    default_robotdog_id: str  # 默认机器狗设备ID
 
 
 def _require_env(name: str, default: Optional[str] = None) -> str:
@@ -101,6 +104,9 @@ def load_settings() -> Settings:
     robot_command_enabled = pick_optional(
         "ROBOT_COMMAND_ENABLED", "false"
     ).lower() in ("true", "1", "yes")  # 默认关闭机器人控制
+    # 机器狗适配器配置（固定值）
+    adapter_hub_base_url = "http://192.168.31.40:8082"
+    default_robotdog_id = "11"
     return Settings(
         openai_base_url=openai_base_url,
         openai_api_key=openai_api_key,
@@ -122,4 +128,6 @@ def load_settings() -> Settings:
         semantic_router_embedding_model=semantic_router_embedding_model,
         semantic_router_embedding_base_url=semantic_router_embedding_base_url,
         robot_command_enabled=robot_command_enabled,
+        adapter_hub_base_url=adapter_hub_base_url,
+        default_robotdog_id=default_robotdog_id,
     )

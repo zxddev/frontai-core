@@ -556,27 +556,45 @@ def _try_combine_catastrophe_solutions(
             if not missing_caps:
                 break
     
+    # 计算组合方案的指标
+    coverage_rate = len(combined_caps.intersection(required_caps)) / len(required_caps) if required_caps else 1.0
+    avg_score = sum(a.get("match_score", 0.5) for a in combined_allocations) / len(combined_allocations) if combined_allocations else 0.5
+    success_rate = coverage_rate * avg_score
+    time_score = min(max_eta / 120.0, 1.0) if max_eta > 0 else 0.0
+    risk = 1.0 - coverage_rate
+    
+    # 计算冗余性
+    cap_coverage_count: dict = {}
+    for alloc in combined_allocations:
+        for cap in alloc.get("assigned_capabilities", []):
+            if cap in required_caps:
+                cap_coverage_count[cap] = cap_coverage_count.get(cap, 0) + 1
+    redundancy = sum(min(c, 2) for c in cap_coverage_count.values()) / (2 * len(required_caps)) if required_caps else 1.0
+    
     # 构建组合方案
     combined_solution: AllocationSolution = {
         "solution_id": f"combined-{base_solution.get('solution_id', 'unknown')}",
         "allocations": combined_allocations,
-        "total_score": base_solution.get("total_score", 0),
+        "total_score": round(avg_score, 3),
         "response_time_min": max_eta,
-        "coverage_rate": len(combined_caps.intersection(required_caps)) / len(required_caps) if required_caps else 1.0,
+        "coverage_rate": round(coverage_rate, 3),
         "resource_scale": len(combined_allocations),
-        "risk_level": base_solution.get("risk_level", 0),
+        "risk_level": round(risk, 3),
         "total_rescue_capacity": total_capacity,
         "capacity_coverage_rate": base_solution.get("capacity_coverage_rate", 0),
         "capacity_warning": base_solution.get("capacity_warning"),
         "uncovered_capabilities": list(required_caps - combined_caps),
         "max_distance_km": max(a.get("distance_km", 0) for a in combined_allocations) if combined_allocations else 0,
         "teams_count": len(combined_allocations),
+        # 5维优化目标（与NSGA-III和贪心对齐）
         "objectives": {
-            "response_time": max_eta,
-            "coverage_rate": len(combined_caps.intersection(required_caps)) / len(required_caps) if required_caps else 1.0,
-            "teams_count": len(combined_allocations),
+            "success_rate": round(success_rate, 3),
+            "response_time": round(time_score, 3),
+            "coverage_rate": round(coverage_rate, 3),
+            "risk": round(risk, 3),
+            "redundancy": round(redundancy, 3),
         },
-        "is_combined": True,  # 标记这是组合方案
+        "is_combined": True,
     }
     
     logger.info(

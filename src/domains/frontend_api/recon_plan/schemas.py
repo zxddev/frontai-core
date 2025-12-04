@@ -92,6 +92,7 @@ class ReconExecutionPlan(BaseModel):
 class ReconPlanResponse(BaseModel):
     """Initial recon plan returned to frontend."""
 
+    planId: Optional[str] = Field(default=None, description="方案ID，保存到数据库后返回")
     scenarioId: str = Field(..., description="想定ID")
     eventId: Optional[str] = Field(default=None, description="事件ID")
     targets: List[ReconTargetItem] = Field(default_factory=list, description="按优先级排序的侦察目标列表")

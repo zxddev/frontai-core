@@ -29,40 +29,53 @@ async def query_warehouse(state: EquipmentPreparationState) -> Dict[str, Any]:
     2. 可用模块
     3. 物资库存
     """
-    logger.info("执行仓库查询节点", extra={"event_id": state.get("event_id")})
+    import time
+    start_time = time.time()
+    logger.info(f"[仓库查询] ========== 开始仓库查询 ==========")
     
     requirement_spec = state.get("requirement_spec")
     if not requirement_spec:
-        logger.warning("无需求规格，跳过仓库查询")
+        logger.warning("[仓库查询] 无需求规格，跳过仓库查询")
         return {"warehouse_inventory": None}
     
     required_device_types = requirement_spec.get("required_device_types", [])
     required_capabilities = requirement_spec.get("required_capabilities", [])
     required_supply_categories = requirement_spec.get("required_supply_categories", [])
     
+    logger.info(f"[仓库查询] 查询设备类型: {required_device_types}")
+    logger.info(f"[仓库查询] 查询能力需求: {required_capabilities}")
+    logger.info(f"[仓库查询] 查询物资类别: {required_supply_categories}")
+    
     # 获取灾害类型用于物资过滤
     parsed_disaster = state.get("parsed_disaster", {})
     disaster_type = parsed_disaster.get("disaster_type") if parsed_disaster else None
+    logger.info(f"[仓库查询] 灾害类型过滤: {disaster_type}")
     
     async with AsyncSessionLocal() as session:
         # 查询可用设备
+        logger.info(f"[仓库查询] 查询可用设备...")
         devices = await _query_available_devices(
             session, 
             device_types=required_device_types
         )
+        logger.info(f"[仓库查询] 找到{len(devices)}个设备")
         
         # 查询可用模块
+        logger.info(f"[仓库查询] 查询可用模块...")
         modules = await _query_available_modules(
             session,
             capabilities=required_capabilities
         )
+        logger.info(f"[仓库查询] 找到{len(modules)}个模块")
         
         # 查询物资库存（使用真实库存数据）
+        logger.info(f"[仓库查询] 查询物资库存...")
         supplies = await _query_supplies(
             session,
             categories=required_supply_categories,
             disaster_type=disaster_type,
         )
+        logger.info(f"[仓库查询] 找到{len(supplies)}种物资")
     
     warehouse_inventory: WarehouseInventory = {
         "devices": devices,
@@ -74,8 +87,10 @@ async def query_warehouse(state: EquipmentPreparationState) -> Dict[str, Any]:
     trace = state.get("trace", {})
     trace["phases_executed"] = trace.get("phases_executed", []) + ["query_warehouse"]
     
+    total_time = int((time.time() - start_time) * 1000)
+    logger.info(f"[仓库查询] ========== 仓库查询完成，耗时{total_time}ms ==========")
     logger.info(
-        "仓库查询完成",
+        f"[仓库查询] 汇总: {len(devices)}设备, {len(modules)}模块, {len(supplies)}物资",
         extra={
             "devices_found": len(devices),
             "modules_found": len(modules),
@@ -161,9 +176,16 @@ async def _query_available_modules(
         }
         modules.append(module)
     
-    # 如果指定了能力过滤
+    # 如果指定了能力过滤（大小写不敏感匹配）
     if capabilities:
-        modules = [m for m in modules if any(cap in m["capabilities"] for cap in capabilities)]
+        capabilities_upper = [cap.upper() for cap in capabilities]
+        modules = [
+            m for m in modules 
+            if any(
+                mc.upper() in capabilities_upper 
+                for mc in m["capabilities"]
+            )
+        ]
     
     logger.info(f"查询到 {len(modules)} 个可用模块")
     return modules

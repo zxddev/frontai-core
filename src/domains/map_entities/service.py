@@ -92,7 +92,78 @@ class EntityService:
         logger.info(f"广播实体创建: type={response.type.value}, geometry={broadcast_data['geometry']}")
         await _get_stomp_broker().broadcast_entity_create(broadcast_data)
         
+        # 如果是危险区域（前端绘制），触发风险检测通知
+        if response.type.value == 'danger_area':
+            logger.info(f"[危险区域创建] 检测到 danger_area 类型，准备触发风险检测: entity_id={entity.id}")
+            await self._trigger_danger_area_risk_check(response, data.scenario_id)
+        
         return response
+    
+    async def _trigger_danger_area_risk_check(
+        self, 
+        entity: EntityResponse, 
+        scenario_id: Optional[UUID]
+    ) -> None:
+        """
+        当前端创建危险区域时，触发风险检测通知
+        
+        检测所有活跃路线和移动中的车辆是否穿过该危险区域
+        """
+        try:
+            from src.domains.frontend_api.risk_area.schemas import RiskAreaResponse
+            from src.domains.frontend_api.risk_area.service import RiskAreaService
+            
+            # 构建一个类似 RiskAreaResponse 的对象
+            # 从 entity 的 properties 中提取风险信息
+            props = entity.properties or {}
+            
+            # 创建一个模拟的 RiskAreaResponse
+            risk_level = props.get('risk_level', 7)  # 默认高风险
+            passage_status = props.get('passage_status', 'needs_reconnaissance')
+            
+            # 根据风险等级确定严重程度
+            if risk_level >= 9:
+                severity = "critical"
+            elif risk_level >= 7:
+                severity = "high"
+            elif risk_level >= 5:
+                severity = "medium"
+            else:
+                severity = "low"
+            
+            risk_area = RiskAreaResponse(
+                id=entity.id,
+                scenario_id=scenario_id,
+                name=props.get('name', '前端绘制的危险区域'),
+                area_type=props.get('area_type', 'other'),
+                risk_level=risk_level,
+                severity=severity,
+                passage_status=passage_status,
+                passable=passage_status not in ('confirmed_blocked',),
+                passable_vehicle_types=None,
+                speed_reduction_percent=50 if passage_status == 'passable_with_caution' else 100,
+                reconnaissance_required=passage_status == 'needs_reconnaissance',
+                geometry_geojson=entity.geometry.model_dump() if entity.geometry else None,
+                description=props.get('description', ''),
+                created_at=entity.created_at,
+                updated_at=entity.updated_at,
+            )
+            
+            # 调用风险区域服务的通知方法
+            risk_service = RiskAreaService(self._db)
+            await risk_service._notify_risk_area_change(
+                risk_area=risk_area,
+                change_type="created",
+            )
+            
+            logger.info(
+                f"[危险区域风险检测] 已触发: entity_id={entity.id}, "
+                f"scenario_id={scenario_id}"
+            )
+            
+        except Exception as e:
+            # 风险检测失败不阻塞实体创建
+            logger.warning(f"[危险区域风险检测] 触发失败: {e}", exc_info=True)
     
     async def get_by_id(self, entity_id: UUID) -> EntityResponse:
         """根据ID获取实体"""

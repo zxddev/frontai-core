@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.exceptions import NotFoundError
 from src.domains.frontend_api.car.repository import CarItemAssignmentRepository
 from src.domains.resources.teams.repository import TeamRepository
-from src.domains.resources.teams.schemas import TeamCreate, TeamUpdate
+from src.domains.resources.teams.schemas import TeamCreate, TeamUpdate, TeamSource, Location
 from src.domains.map_entities.service import EntityService
 from src.domains.map_entities.schemas import EntityCreate, EntityType, EntitySource
 from .schemas import MobilizeRequest, MobilizeResponse, MobilizedTeamSummary
@@ -159,6 +159,9 @@ class UnitService:
         team_name = f"前突指挥车队-{vehicle.name}"
         team_code = f"FLEET-{vehicle.code}"
         
+        # 成都市中心作为默认集结点（WGS84坐标）
+        default_location = Location(longitude=104.0668, latitude=30.5728)
+        
         properties = {
             "source_vehicle_id": str(vehicle.id),
             "is_mobilized_fleet": True,
@@ -166,12 +169,20 @@ class UnitService:
             "ai_context": ai_context
         }
         
+        # 获取前突指挥车队父级队伍ID
+        parent_team_id = await self._get_fleet_hq_id()
+        
         # 根据名称查找是否已存在
         existing_team = await self._get_team_by_name(team_name)
         
         if existing_team:
             # 更新现有队伍
-            update_data = TeamUpdate(properties=properties)
+            update_data = TeamUpdate(
+                properties=properties,
+                team_source=TeamSource.mobilized,
+                parent_team_id=parent_team_id,
+                base_location=default_location,
+            )
             # 合并现有 properties
             if existing_team.properties:
                 properties = {**existing_team.properties, **properties}
@@ -180,7 +191,7 @@ class UnitService:
             logger.info(f"更新队伍: {team_name} (id={existing_team.id})")
             return await self._team_repo.update(existing_team, update_data)
         else:
-            # 创建新队伍
+            # 创建新队伍，设置team_source=mobilized, parent_team_id=前突车队
             from src.domains.resources.teams.schemas import TeamType
             create_data = TeamCreate(
                 code=team_code,
@@ -188,10 +199,21 @@ class UnitService:
                 team_type=TeamType.search_rescue,
                 total_personnel=4,
                 available_personnel=4,
+                team_source=TeamSource.mobilized,
+                parent_team_id=parent_team_id,
+                base_location=default_location,
                 properties=properties
             )
-            logger.info(f"创建队伍: {team_name}")
+            logger.info(f"创建队伍: {team_name}, parent={parent_team_id}")
             return await self._team_repo.create(create_data)
+    
+    async def _get_fleet_hq_id(self) -> Optional[UUID]:
+        """获取前突指挥车队父级队伍ID"""
+        result = await self._db.execute(
+            text("SELECT id FROM operational_v2.rescue_teams_v2 WHERE code = 'FLEET-HQ' LIMIT 1")
+        )
+        row = result.fetchone()
+        return row.id if row else None
     
     async def _get_team_by_name(self, name: str) -> Optional[Any]:
         """根据名称查询队伍"""
@@ -227,12 +249,17 @@ class UnitService:
             "phone": team.contact_phone or ""
         }
         
-        # 获取车辆位置作为初始位置 (如果有)
-        # 暂时默认为中心点或从车辆最新位置获取
-        # 这里先 mock 一个位置，或者如果 vehicle 表有位置字段则使用
-        # 假设 entity 不存在则创建
+        # 获取队伍位置（优先使用 base_location，否则使用成都默认坐标）
+        from shapely import wkb
+        entity_lon, entity_lat = 104.0668, 30.5728  # 成都市中心默认值
+        if team.base_location:
+            try:
+                point = wkb.loads(bytes(team.base_location.data))
+                entity_lon, entity_lat = point.x, point.y
+            except Exception as e:
+                logger.warning(f"解析队伍位置失败: {e}")
         
-        # 我们尝试用 team_id 作为 entity_id 的种子生成 UUID，确保幂等
+        # 使用 team_id 生成确定性 entity_id，确保幂等
         entity_uuid = uuid.uuid5(uuid.NAMESPACE_DNS, f"team-entity-{team.id}")
         
         existing_entity = await self._entity_service._entity_repo.get_by_id(entity_uuid)
@@ -247,7 +274,7 @@ class UnitService:
                 layer_code="layer.team",
                 geometry={
                     "type": "Point",
-                    "coordinates": [116.40, 39.90] # 默认坐标，后续应该从车辆遥测获取
+                    "coordinates": [entity_lon, entity_lat]
                 },
                 properties=props,
                 source=EntitySource.system,

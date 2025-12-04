@@ -6,8 +6,17 @@
 - 车辆来源统一使用 operational_v2.vehicles_v2 中的真实车辆记录
 - loading_plan 的 key 为车辆的 UUID 字符串（vehicles_v2.id）
 - 设备优先分配到其专属车辆（vehicle_devices 关联表）
+- 无专属绑定时，按设备类型匹配适合的车辆类型
 """
 from __future__ import annotations
+
+# 设备类型到优先车辆类型的映射（包含所有车辆类型以确保每辆车都能分配到设备）
+DEVICE_VEHICLE_TYPE_MAPPING: dict[str, list[str]] = {
+    "drone": ["drone_transport", "reconnaissance", "command", "logistics", "medical", "ship_transport"],
+    "dog": ["reconnaissance", "command", "logistics", "medical", "drone_transport", "ship_transport"],
+    "ship": ["ship_transport", "logistics", "reconnaissance", "command", "medical", "drone_transport"],
+    "robot": ["reconnaissance", "command", "logistics", "medical", "drone_transport", "ship_transport"],
+}
 
 import logging
 from typing import Any, Dict, List, Set
@@ -60,11 +69,16 @@ async def generate_loading_plan(state: EquipmentPreparationState) -> Dict[str, A
     3. 考虑重量和体积约束
     4. 计算各车辆利用率
     """
-    logger.info("执行装载方案生成节点", extra={"event_id": state.get("event_id")})
+    import time
+    start_time = time.time()
+    logger.info(f"[装载分配] ========== 开始装载方案生成 ==========")
     
     recommended_devices = state.get("recommended_devices", [])
     recommended_supplies = state.get("recommended_supplies", [])
     warehouse_inventory = state.get("warehouse_inventory", {})
+    
+    logger.info(f"[装载分配] 待分配设备: {len(recommended_devices)}个")
+    logger.info(f"[装载分配] 待分配物资: {len(recommended_supplies)}种")
     
     # 获取设备详情（含重量体积）
     device_details = {d["id"]: d for d in warehouse_inventory.get("devices", [])}
@@ -107,6 +121,7 @@ async def generate_loading_plan(state: EquipmentPreparationState) -> Dict[str, A
             loading_plan[vid] = {
                 "vehicle_id": vid,
                 "vehicle_name": v.name,
+                "vehicle_type": v.vehicle_type,  # 保存车辆类型用于设备匹配
                 "devices": [],
                 "supplies": [],
                 "weight_usage": 0.0,
@@ -119,7 +134,7 @@ async def generate_loading_plan(state: EquipmentPreparationState) -> Dict[str, A
 
     # 如果没有可用车辆（或查询失败），直接返回空装载方案
     if not loading_plan:
-        logger.warning("未找到可用于装载的车辆，返回空装载方案", extra={"event_id": state.get("event_id")})
+        logger.warning("[装载分配] 未找到可用车辆，返回空装载方案")
         trace = state.get("trace", {})
         trace["phases_executed"] = trace.get("phases_executed", []) + ["generate_loading_plan"]
         return {
@@ -128,58 +143,117 @@ async def generate_loading_plan(state: EquipmentPreparationState) -> Dict[str, A
             "trace": trace,
         }
     
-    # 按优先级排序设备
-    priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    sorted_devices = sorted(
-        recommended_devices,
-        key=lambda x: priority_order.get(x.get("priority", "low"), 3)
-    )
+    # 打印可用车辆
+    logger.info(f"[装载分配] 可用车辆: {len(loading_plan)}辆")
+    for vid, plan in loading_plan.items():
+        logger.info(f"[装载分配]   - {plan['vehicle_name']} ({plan.get('vehicle_type', '未知类型')})")
     
-    # 分配设备到车辆
-    # 策略：
-    # 1. 有专属车辆的设备 → 只能分配到专属车辆
-    # 2. 未绑定的设备 → 只能分配到没有绑定该设备的车辆（即不能占用其他车的专属设备位）
-    for device_rec in sorted_devices:
+    # 每辆车推荐的设备数量上限
+    MAX_DEVICES_PER_VEHICLE = 3
+    logger.info(f"[装载分配] 每车设备上限: {MAX_DEVICES_PER_VEHICLE}个")
+    
+    # 计算设备对车辆的适配分数
+    def calc_device_score(device_rec: dict, vehicle_type: str) -> float:
+        """
+        计算设备对车辆的适配分数
+        分数越高越适配
+        """
+        device_type = device_rec.get("device_type", "")
+        priority = device_rec.get("priority", "low")
+        
+        # 基础分数：根据优先级
+        priority_scores = {"critical": 100, "high": 80, "medium": 60, "low": 40}
+        score = priority_scores.get(priority, 40)
+        
+        # 适配分数：设备类型与车辆类型的匹配度
+        preferred_types = DEVICE_VEHICLE_TYPE_MAPPING.get(device_type, [])
+        if vehicle_type in preferred_types:
+            # 排名越靠前分数越高
+            rank = preferred_types.index(vehicle_type)
+            score += (len(preferred_types) - rank) * 20
+        
+        return score
+    
+    # 已分配的设备ID集合
+    assigned_device_ids: Set[str] = set()
+    
+    # 第一轮：分配专属设备到专属车辆
+    for device_rec in recommended_devices:
         device_id = device_rec.get("device_id")
-        device_info = device_details.get(device_id, {})
-        
-        weight = device_info.get("weight_kg", 5)
-        volume = device_info.get("volume_m3", 0.1)
-        
-        assigned = False
         bound_vehicle_id = device_to_vehicle.get(device_id)
         
-        if bound_vehicle_id:
-            # 情况1：设备有专属车辆，只能分配到该车辆
-            if bound_vehicle_id in loading_plan:
-                plan = loading_plan[bound_vehicle_id]
-                if plan["_remaining_weight"] >= weight and plan["_remaining_volume"] >= volume:
-                    plan["devices"].append(device_id)
-                    plan["_remaining_weight"] -= weight
-                    plan["_remaining_volume"] -= volume
-                    assigned = True
-                    logger.debug(f"设备 {device_id} 分配到专属车辆 {plan['vehicle_name']}")
-                else:
-                    logger.warning(
-                        f"设备 {device_id} 的专属车辆 {plan['vehicle_name']} 容量不足，无法分配"
-                    )
-            else:
-                logger.warning(f"设备 {device_id} 的专属车辆 {bound_vehicle_id} 不在可用车辆列表中")
-        else:
-            # 情况2：设备未绑定，可以分配到任意有空间的车辆
-            for vid, plan in loading_plan.items():
-                if plan["_remaining_weight"] >= weight and plan["_remaining_volume"] >= volume:
-                    plan["devices"].append(device_id)
-                    plan["_remaining_weight"] -= weight
-                    plan["_remaining_volume"] -= volume
-                    assigned = True
-                    logger.debug(f"设备 {device_id} 分配到 {plan['vehicle_name']}（未绑定设备）")
-                    break
+        if bound_vehicle_id and bound_vehicle_id in loading_plan:
+            plan = loading_plan[bound_vehicle_id]
+            device_info = device_details.get(device_id, {})
+            weight = device_info.get("weight_kg", 5)
+            volume = device_info.get("volume_m3", 0.1)
+            
+            if plan["_remaining_weight"] >= weight and plan["_remaining_volume"] >= volume:
+                plan["devices"].append(device_id)
+                plan["_remaining_weight"] -= weight
+                plan["_remaining_volume"] -= volume
+                assigned_device_ids.add(device_id)
+                logger.debug(f"设备 {device_id} 分配到专属车辆 {plan['vehicle_name']}")
+    
+    # 第二轮：为每辆车选择最适配的设备（每车最多3个）
+    logger.info(f"[装载分配] 开始为每辆车分配最适配的设备...")
+    for vid, plan in loading_plan.items():
+        current_count = len(plan["devices"])
+        if current_count >= MAX_DEVICES_PER_VEHICLE:
+            continue
         
-        if not assigned:
-            logger.warning(f"设备 {device_id} 无法分配到任何车辆")
+        vehicle_type = plan.get("vehicle_type", "")
+        vehicle_name = plan.get("vehicle_name", vid)
+        
+        # 计算所有未分配设备的适配分数
+        candidates: List[tuple[float, dict]] = []
+        for device_rec in recommended_devices:
+            device_id = device_rec.get("device_id")
+            
+            # 跳过已分配的设备
+            if device_id in assigned_device_ids:
+                continue
+            
+            # 跳过有专属车辆绑定（且不是当前车辆）的设备
+            bound_vid = device_to_vehicle.get(device_id)
+            if bound_vid and bound_vid != vid:
+                continue
+            
+            score = calc_device_score(device_rec, vehicle_type)
+            candidates.append((score, device_rec))
+        
+        # 按分数排序，选择最适配的设备
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        
+        assigned_to_vehicle = []
+        for score, device_rec in candidates:
+            if current_count >= MAX_DEVICES_PER_VEHICLE:
+                break
+            
+            device_id = device_rec.get("device_id")
+            device_info = device_details.get(device_id, {})
+            weight = device_info.get("weight_kg", 5)
+            volume = device_info.get("volume_m3", 0.1)
+            
+            if plan["_remaining_weight"] >= weight and plan["_remaining_volume"] >= volume:
+                plan["devices"].append(device_id)
+                plan["_remaining_weight"] -= weight
+                plan["_remaining_volume"] -= volume
+                assigned_device_ids.add(device_id)
+                current_count += 1
+                device_name = device_info.get("name", device_id[:8])
+                assigned_to_vehicle.append(f"{device_name}({device_rec.get('device_type')})")
+        
+        if assigned_to_vehicle:
+            logger.info(f"[装载分配] {vehicle_name}: 分配{len(assigned_to_vehicle)}个设备")
+    
+    # 统计未分配的设备
+    unassigned = [d for d in recommended_devices if d.get("device_id") not in assigned_device_ids]
+    if unassigned:
+        logger.info(f"[装载分配] 有{len(unassigned)}个设备未分配（容量不足或设备已分完）")
     
     # 分配物资到车辆
+    priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     sorted_supplies = sorted(
         recommended_supplies,
         key=lambda x: priority_order.get(x.get("priority", "low"), 3)
@@ -225,6 +299,7 @@ async def generate_loading_plan(state: EquipmentPreparationState) -> Dict[str, A
         max_volume = plan.pop("_max_volume")
         remaining_weight = plan.pop("_remaining_weight")
         remaining_volume = plan.pop("_remaining_volume")
+        plan.pop("vehicle_type", None)  # 移除内部使用的车辆类型字段
         
         plan["weight_usage"] = round(1 - remaining_weight / max_weight, 2) if max_weight > 0 else 0
         plan["volume_usage"] = round(1 - remaining_volume / max_volume, 2) if max_volume > 0 else 0
@@ -239,10 +314,24 @@ async def generate_loading_plan(state: EquipmentPreparationState) -> Dict[str, A
     trace = state.get("trace", {})
     trace["phases_executed"] = trace.get("phases_executed", []) + ["generate_loading_plan"]
     
-    logger.info(
-        "装载方案生成完成",
-        extra={"vehicles_used": len(loading_plan)}
-    )
+    # 打印最终分配结果
+    total_time = int((time.time() - start_time) * 1000)
+    total_devices = sum(len(p.get("devices", [])) for p in loading_plan.values())
+    total_supplies = sum(len(p.get("supplies", [])) for p in loading_plan.values())
+    
+    logger.info(f"[装载分配] ========== 装载方案生成完成 ==========")
+    logger.info(f"[装载分配] 耗时: {total_time}ms")
+    logger.info(f"[装载分配] 装载车辆: {len(loading_plan)}辆")
+    logger.info(f"[装载分配] 分配设备: {total_devices}个")
+    logger.info(f"[装载分配] 分配物资: {total_supplies}种")
+    
+    # 打印每辆车的分配情况
+    for vid, plan in loading_plan.items():
+        vehicle_name = plan.get("vehicle_name", vid)
+        device_count = len(plan.get("devices", []))
+        supply_count = len(plan.get("supplies", []))
+        weight_usage = plan.get("weight_usage", 0) * 100
+        logger.info(f"[装载分配]   {vehicle_name}: {device_count}设备, {supply_count}物资, 载重{weight_usage:.0f}%")
     
     return {
         "loading_plan": loading_plan,

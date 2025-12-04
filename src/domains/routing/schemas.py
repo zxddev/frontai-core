@@ -29,7 +29,7 @@ class RouteSegment:
 @dataclass
 class RouteResult:
     """路径规划结果"""
-    source: Literal["amap", "internal", "fallback"]
+    source: Literal["amap", "internal", "fallback", "air_direct"]
     success: bool
     origin: Point
     destination: Point

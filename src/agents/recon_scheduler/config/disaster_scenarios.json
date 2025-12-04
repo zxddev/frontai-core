@@ -1,0 +1,442 @@
+{
+  "scenarios": {
+    "earthquake_collapse": {
+      "id": "earthquake_collapse",
+      "name": "地震建筑倒塌",
+      "description": "地震导致建筑物倒塌，可能有人员被困",
+      "characteristics": {
+        "time_critical": true,
+        "golden_hour_hours": 72,
+        "secondary_risks": ["fire", "gas_leak", "secondary_collapse"],
+        "victim_distribution": "concentrated"
+      },
+      "phases": [
+        {
+          "phase": 1,
+          "name": "快速态势评估",
+          "trigger": {"type": "immediate"},
+          "objective": "建立灾区全貌，识别倒塌范围和严重程度",
+          "priority": "critical",
+          "time_budget_min": 30,
+          "tasks": [
+            {
+              "task_type": "area_survey",
+              "objective": "建立灾区全貌正射图",
+              "priority": "critical",
+              "device_requirements": {
+                "type_preference": ["vtol_fixed_wing", "large_fixed_wing", "multirotor"],
+                "capabilities_required": ["rgb_camera", "mapping"],
+                "min_endurance_min": 30
+              },
+              "scan_config": {
+                "pattern": "zigzag",
+                "altitude_m": 150,
+                "speed_ms": 15,
+                "overlap_percent": 20,
+                "gsd_cm": 5
+              },
+              "expected_outputs": ["orthomosaic", "collapse_zone_marking", "access_route_assessment"]
+            }
+          ],
+          "expected_outputs": ["灾区全貌正射图", "倒塌范围标注", "救援通道评估"]
+        },
+        {
+          "phase": 2,
+          "name": "热成像搜索",
+          "trigger": {"type": "phase_complete", "phase": 1},
+          "objective": "搜索被困人员热信号",
+          "priority": "critical",
+          "time_budget_min": 45,
+          "tasks": [
+            {
+              "task_type": "thermal_search",
+              "objective": "搜索被困人员热信号",
+              "priority": "critical",
+              "device_requirements": {
+                "type_preference": ["multirotor"],
+                "capabilities_required": ["thermal_camera"],
+                "min_endurance_min": 25
+              },
+              "scan_config": {
+                "pattern": "zigzag",
+                "altitude_m": 50,
+                "speed_ms": 8,
+                "overlap_percent": 30
+              },
+              "focus_area": "collapse_zones_from_phase1",
+              "expected_outputs": ["thermal_signal_points", "confidence_scores"]
+            }
+          ],
+          "expected_outputs": ["热信号标记点", "置信度评分"]
+        },
+        {
+          "phase": 3,
+          "name": "重点区域详查",
+          "trigger": {"type": "condition", "condition": "thermal_signal_found"},
+          "objective": "对发现热信号的区域精细侦察确认",
+          "priority": "critical",
+          "tasks": [
+            {
+              "task_type": "point_inspection",
+              "objective": "对热信号点精细侦察",
+              "priority": "critical",
+              "device_requirements": {
+                "type_preference": ["multirotor"],
+                "capabilities_required": ["zoom_camera"]
+              },
+              "scan_config": {
+                "pattern": "spiral_inward",
+                "altitude_m": 30,
+                "speed_ms": 5,
+                "radius_m": 50
+              },
+              "expected_outputs": ["detailed_video", "precise_location", "victim_count_estimate"]
+            }
+          ],
+          "expected_outputs": ["详细视频", "精确位置", "被困人数估计"]
+        },
+        {
+          "phase": 4,
+          "name": "室内深度搜索",
+          "trigger": {"type": "condition", "condition": "accessible_space_found"},
+          "objective": "进入废墟内部进行生命探测",
+          "priority": "high",
+          "tasks": [
+            {
+              "task_type": "indoor_search",
+              "objective": "废墟内部生命探测",
+              "priority": "critical",
+              "device_requirements": {
+                "type_preference": ["ugv_quadruped"],
+                "capabilities_required": ["life_detection", "camera"]
+              },
+              "expected_outputs": ["precise_victim_location", "structural_assessment"]
+            }
+          ],
+          "expected_outputs": ["被困人员精确位置", "结构安全评估"]
+        }
+      ],
+      "priority_rules": [
+        {"condition": "residential_area", "priority_boost": 2},
+        {"condition": "school_hospital", "priority_boost": 3},
+        {"condition": "reported_trapped", "priority_boost": 3}
+      ]
+    },
+    "flood": {
+      "id": "flood",
+      "name": "洪涝灾害",
+      "description": "洪水导致区域淹没，人员被困",
+      "characteristics": {
+        "time_critical": true,
+        "golden_hour_hours": 24,
+        "secondary_risks": ["drowning", "contamination", "structural_damage"],
+        "victim_distribution": "scattered_elevated"
+      },
+      "phases": [
+        {
+          "phase": 1,
+          "name": "淹没范围测绘",
+          "trigger": {"type": "immediate"},
+          "objective": "确定洪水淹没范围和深度",
+          "priority": "critical",
+          "time_budget_min": 30,
+          "tasks": [
+            {
+              "task_type": "flood_mapping",
+              "objective": "测绘洪水淹没范围",
+              "priority": "critical",
+              "device_requirements": {
+                "type_preference": ["vtol_fixed_wing", "multirotor"],
+                "capabilities_required": ["rgb_camera", "mapping"],
+                "min_endurance_min": 30
+              },
+              "scan_config": {
+                "pattern": "zigzag",
+                "altitude_m": 120,
+                "speed_ms": 12,
+                "heading_alignment": "along_waterway"
+              },
+              "expected_outputs": ["flood_extent_map", "water_depth_estimate", "safe_zones"]
+            }
+          ],
+          "expected_outputs": ["淹没范围图", "水深估计", "安全区域"]
+        },
+        {
+          "phase": 2,
+          "name": "被困人员搜索",
+          "trigger": {"type": "phase_complete", "phase": 1},
+          "objective": "搜索被困在房顶、树上、高地的人员",
+          "priority": "critical",
+          "time_budget_min": 60,
+          "tasks": [
+            {
+              "task_type": "victim_search",
+              "objective": "搜索被困人员",
+              "priority": "critical",
+              "device_requirements": {
+                "type_preference": ["multirotor"],
+                "capabilities_required": ["zoom_camera", "thermal_camera"]
+              },
+              "scan_config": {
+                "pattern": "grid",
+                "altitude_m": 80,
+                "speed_ms": 8,
+                "focus_areas": ["rooftops", "elevated_areas", "trees"]
+              },
+              "expected_outputs": ["victim_locations", "rescue_priority", "access_assessment"]
+            }
+          ],
+          "expected_outputs": ["被困人员位置", "救援优先级", "接近路线评估"]
+        }
+      ],
+      "priority_rules": [
+        {"condition": "isolated_building", "priority_boost": 2},
+        {"condition": "elderly_children", "priority_boost": 3},
+        {"condition": "water_rising", "priority_boost": 3}
+      ]
+    },
+    "fire": {
+      "id": "fire",
+      "name": "火灾",
+      "description": "火灾监测和人员搜索",
+      "characteristics": {
+        "time_critical": true,
+        "secondary_risks": ["explosion", "toxic_smoke", "collapse"],
+        "approach_constraint": "upwind_only",
+        "min_safe_distance_m": 100
+      },
+      "phases": [
+        {
+          "phase": 1,
+          "name": "火情态势监测",
+          "trigger": {"type": "immediate"},
+          "objective": "监测火势范围和蔓延方向",
+          "priority": "critical",
+          "time_budget_min": 20,
+          "tasks": [
+            {
+              "task_type": "fire_monitoring",
+              "objective": "监测火势和蔓延方向",
+              "priority": "critical",
+              "device_requirements": {
+                "type_preference": ["multirotor"],
+                "capabilities_required": ["thermal_camera", "rgb_camera"]
+              },
+              "safety_rules": {
+                "min_altitude_m": 200,
+                "approach_direction": "upwind",
+                "min_distance_from_fire_m": 100
+              },
+              "scan_config": {
+                "pattern": "circular",
+                "altitude_m": 200,
+                "radius_m": 300,
+                "center": "fire_center",
+                "approach_direction": "upwind"
+              },
+              "expected_outputs": ["fire_perimeter", "spread_direction", "intensity_map"]
+            }
+          ],
+          "expected_outputs": ["火场边界", "蔓延方向", "火势强度分布"]
+        },
+        {
+          "phase": 2,
+          "name": "蔓延路径监测",
+          "trigger": {"type": "phase_complete", "phase": 1},
+          "objective": "持续监测火势蔓延",
+          "priority": "high",
+          "tasks": [
+            {
+              "task_type": "fire_monitoring",
+              "objective": "监测蔓延路径",
+              "priority": "high",
+              "scan_config": {
+                "pattern": "circular",
+                "altitude_m": 200,
+                "focus_area": "downwind_sector"
+              },
+              "expected_outputs": ["spread_prediction", "evacuation_recommendations"]
+            }
+          ],
+          "expected_outputs": ["蔓延预测", "疏散建议"]
+        }
+      ],
+      "safety_rules": {
+        "mandatory_upwind_approach": true,
+        "min_altitude_m": 200,
+        "abort_on_smoke_ingestion": true
+      }
+    },
+    "hazmat": {
+      "id": "hazmat",
+      "name": "危化品泄漏",
+      "description": "危险化学品泄漏事故",
+      "characteristics": {
+        "approach_constraint": "upwind_only",
+        "min_safe_distance_m": 500,
+        "requires_specialized_equipment": true
+      },
+      "phases": [
+        {
+          "phase": 1,
+          "name": "远程侦察",
+          "trigger": {"type": "immediate"},
+          "objective": "远距离评估泄漏范围",
+          "priority": "critical",
+          "time_budget_min": 30,
+          "tasks": [
+            {
+              "task_type": "hazmat_survey",
+              "objective": "远程评估泄漏范围和扩散",
+              "priority": "critical",
+              "device_requirements": {
+                "type_preference": ["large_fixed_wing", "vtol_fixed_wing"],
+                "capabilities_required": ["rgb_camera"],
+                "min_endurance_min": 60
+              },
+              "safety_rules": {
+                "min_altitude_m": 300,
+                "approach_direction": "upwind",
+                "min_distance_m": 500
+              },
+              "scan_config": {
+                "pattern": "circular",
+                "altitude_m": 300,
+                "radius_m": 800,
+                "approach_direction": "upwind"
+              },
+              "expected_outputs": ["leak_extent", "wind_direction", "affected_area", "evacuation_zone"]
+            }
+          ],
+          "expected_outputs": ["泄漏范围", "风向", "影响区域", "疏散范围"]
+        }
+      ],
+      "safety_rules": {
+        "mandatory_upwind_approach": true,
+        "min_altitude_m": 300,
+        "no_low_altitude_flight": true,
+        "abort_on_sensor_detection": true
+      }
+    },
+    "landslide": {
+      "id": "landslide",
+      "name": "山体滑坡",
+      "description": "山体滑坡或泥石流",
+      "characteristics": {
+        "secondary_risks": ["secondary_slide", "debris_flow", "dam_formation"],
+        "terrain_constraint": "slope_aware",
+        "time_critical": true,
+        "golden_hour_hours": 48
+      },
+      "phases": [
+        {
+          "phase": 1,
+          "name": "滑坡范围测绘",
+          "trigger": {"type": "immediate"},
+          "objective": "测绘滑坡范围和堆积区",
+          "priority": "critical",
+          "time_budget_min": 30,
+          "tasks": [
+            {
+              "task_type": "landslide_mapping",
+              "objective": "测绘滑坡边界和堆积区",
+              "priority": "critical",
+              "device_requirements": {
+                "type_preference": ["vtol_fixed_wing", "multirotor"],
+                "capabilities_required": ["rgb_camera", "mapping"],
+                "min_endurance_min": 30
+              },
+              "scan_config": {
+                "pattern": "strip",
+                "altitude_m": 150,
+                "speed_ms": 12,
+                "heading_alignment": "along_slope"
+              },
+              "expected_outputs": ["slide_boundary", "deposit_zone", "secondary_risk_areas", "blocked_routes"]
+            }
+          ],
+          "expected_outputs": ["滑坡边界", "堆积区", "二次风险区域", "阻断道路"]
+        },
+        {
+          "phase": 2,
+          "name": "掩埋区搜索",
+          "trigger": {"type": "phase_complete", "phase": 1},
+          "objective": "搜索可能的掩埋点",
+          "priority": "critical",
+          "time_budget_min": 45,
+          "tasks": [
+            {
+              "task_type": "burial_search",
+              "objective": "搜索掩埋点",
+              "priority": "critical",
+              "device_requirements": {
+                "type_preference": ["multirotor"],
+                "capabilities_required": ["thermal_camera"]
+              },
+              "scan_config": {
+                "pattern": "grid",
+                "altitude_m": 50,
+                "speed_ms": 6,
+                "focus_area": "deposit_zone"
+              },
+              "expected_outputs": ["potential_burial_points", "access_routes"]
+            }
+          ],
+          "expected_outputs": ["可能掩埋点", "接近路线"]
+        },
+        {
+          "phase": 3,
+          "name": "二次滑坡风险评估",
+          "trigger": {"type": "phase_complete", "phase": 1},
+          "objective": "评估上游二次滑坡风险",
+          "priority": "high",
+          "tasks": [
+            {
+              "task_type": "risk_assessment",
+              "objective": "评估二次滑坡风险",
+              "priority": "high",
+              "device_requirements": {
+                "type_preference": ["vtol_fixed_wing", "multirotor"],
+                "capabilities_required": ["rgb_camera"]
+              },
+              "scan_config": {
+                "pattern": "strip",
+                "altitude_m": 200,
+                "focus_area": "upstream_slope"
+              },
+              "expected_outputs": ["secondary_risk_assessment", "warning_zones"]
+            }
+          ],
+          "expected_outputs": ["二次风险评估", "警戒区域"]
+        }
+      ],
+      "priority_rules": [
+        {"condition": "village_affected", "priority_boost": 3},
+        {"condition": "road_blocked", "priority_boost": 2},
+        {"condition": "dam_formation_risk", "priority_boost": 3}
+      ]
+    }
+  },
+  "device_type_mapping": {
+    "vtol_fixed_wing": ["傲势X-Chimera", "纵横CW-15"],
+    "large_fixed_wing": ["翼龙-2H", "彩虹-4"],
+    "multirotor": ["经纬M300", "经纬M350", "御3", "精灵4", "H20N"],
+    "multirotor_thermal": ["御3行业版热成像", "H20N夜视"],
+    "multirotor_mapping": ["经纬M350 RTK", "精灵4 RTK"],
+    "multirotor_zoom": ["经纬M300", "经纬M350", "御3"],
+    "ugv_quadruped": ["宇树B2", "绝影X30", "波士顿Spot"]
+  },
+  "capability_mapping": {
+    "rgb_camera": "可见光相机",
+    "thermal_camera": "热成像相机",
+    "mapping": "测绘建图",
+    "zoom_camera": "变焦相机",
+    "night_vision": "夜视能力",
+    "life_detection": "生命探测",
+    "gas_detection": "气体检测",
+    "relay": "通信中继",
+    "cargo_delivery": "物资投送",
+    "speaker": "喊话器",
+    "spotlight": "探照灯"
+  }
+}

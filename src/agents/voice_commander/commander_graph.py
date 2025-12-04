@@ -135,30 +135,69 @@ async def execute_command(state: CommanderAgentState) -> dict:
     """
     执行已确认的指令
     
-    仅在用户确认后执行，通过STOMP发送控制指令。
+    调用 adapter-hub 发送机器狗控制命令。
     
     输入: state.pending_command, state.confirmation_status
     输出: execution_result, stomp_message_id, response
     """
+    from src.infra.settings import load_settings
+    from src.infra.clients.adapter_hub import (
+        AdapterHubClient,
+        AdapterHubError,
+        build_robotdog_command,
+    )
+
     logger.info(f"执行控制指令: status={state.get('confirmation_status')}")
     
     confirmation_status = state.get("confirmation_status")
     
     if confirmation_status == "approved":
-        # TODO: Phase 3 实现
-        # 1. 构建STOMP消息
-        # 2. 发送到对应topic
-        # 3. 记录执行结果
+        settings = load_settings()
+        device_id = state.get("target_unit_id") or settings.default_robotdog_id
+        action = state.get("action_type") or "stop"
         
-        return {
-            "execution_result": {"status": "sent", "message": "指令已发送"},
-            "stomp_message_id": state.get("pending_command_id"),
-            "response": "指令已发送。",
-            "trace": {
-                **state.get("trace", {}),
-                "nodes_executed": state.get("trace", {}).get("nodes_executed", []) + ["execute_command"],
-            },
-        }
+        logger.info(
+            "adapter_hub_execute_start",
+            extra={"device_id": device_id, "action": action},
+        )
+        
+        try:
+            client = AdapterHubClient(settings.adapter_hub_base_url)
+            command = build_robotdog_command(device_id, action)
+            adapter_response = await client.send_command(command)
+            
+            logger.info(
+                "adapter_hub_execute_success",
+                extra={"device_id": device_id, "action": action, "response": adapter_response},
+            )
+            
+            return {
+                "execution_result": {
+                    "status": "sent",
+                    "message": "指令已发送",
+                    "adapter_response": adapter_response,
+                    "command": command,
+                },
+                "stomp_message_id": state.get("pending_command_id"),
+                "response": f"已向机器狗({device_id})发送动作：{action}。",
+                "trace": {
+                    **state.get("trace", {}),
+                    "nodes_executed": state.get("trace", {}).get("nodes_executed", []) + ["execute_command"],
+                },
+            }
+        except AdapterHubError as exc:
+            logger.error(
+                "adapter_hub_execute_failed",
+                extra={"device_id": device_id, "action": action, "error": str(exc)},
+            )
+            return {
+                "execution_result": {"status": "error", "message": str(exc)},
+                "response": f"机器狗指令发送失败：{exc}",
+                "trace": {
+                    **state.get("trace", {}),
+                    "nodes_executed": state.get("trace", {}).get("nodes_executed", []) + ["execute_command"],
+                },
+            }
     
     elif confirmation_status == "cancelled":
         return {

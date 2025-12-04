@@ -15,6 +15,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks
 import redis.asyncio as aioredis
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import AsyncSessionLocal
 from src.core.websocket import broadcast_event_update
@@ -40,7 +41,6 @@ router = APIRouter(prefix="/ai", tags=["ai"])
 _task_results: Dict[str, Dict[str, Any]] = {}
 
 # Redis配置
-REDIS_URL = "redis://192.168.31.50:6379/0"
 EMERGENCY_RESULT_PREFIX = "emergency_ai_result:"
 EMERGENCY_RESULT_TTL = 36000  # 结果保存10小时
 
@@ -50,8 +50,6 @@ EMERGENCY_RESULT_TTL = 36000  # 结果保存10小时
 async def _save_result_to_redis(task_id: str, result: Dict[str, Any]) -> bool:
     """保存结果到Redis"""
     try:
-        # redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
-        # 使用全局配置的Redis客户端，避免硬编码URL
         from src.core.redis import get_redis_client
         redis_client = await get_redis_client()
         
@@ -69,7 +67,6 @@ async def _save_result_to_redis(task_id: str, result: Dict[str, Any]) -> bool:
 async def _get_result_from_redis(task_id: str) -> Optional[Dict[str, Any]]:
     """从Redis获取结果"""
     try:
-        # redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
         from src.core.redis import get_redis_client
         redis_client = await get_redis_client()
         
@@ -823,6 +820,74 @@ async def confirm_emergency_scheme(
             
             logger.info(f"[EmergencyConfirm] 更新队伍状态 deployed={len(deployed_info)}")
             
+            # 刷新事务，确保任务记录对后续外键检查可见
+            await db.flush()
+            
+            # ========== 7.5 为每个队伍生成路径规划 ==========
+            logger.info(f"[EmergencyConfirm] 开始路径规划 deployed_info={deployed_info}, event_lng={event_lng}, event_lat={event_lat}")
+            route_results: List[Dict[str, Any]] = []
+            for team in deployed_info:
+                try:
+                    route_result = await _generate_team_route(
+                        db=db,
+                        team_id=UUID(team["id"]),
+                        task_id=new_task_id,
+                        scenario_id=scenario_id,
+                        destination_lng=event_lng,
+                        destination_lat=event_lat,
+                    )
+                    if route_result:
+                        route_results.append({
+                            "team_id": team["id"],
+                            "team_name": team["name"],
+                            **route_result,
+                        })
+                        logger.info(
+                            f"[EmergencyConfirm] 队伍路径规划成功: team={team['name']}, "
+                            f"route_id={route_result.get('route_id')}, "
+                            f"distance={route_result.get('distance_m', 0)/1000:.1f}km"
+                        )
+                except Exception as route_err:
+                    logger.warning(
+                        f"[EmergencyConfirm] 队伍路径规划失败: team={team['name']}, error={route_err}"
+                    )
+            
+            logger.info(f"[EmergencyConfirm] 路径规划完成 成功={len(route_results)}/{len(deployed_info)}")
+            
+            # ========== 7.6 启动队伍移动仿真 ==========
+            from src.domains.movement_simulation.team_dispatch_service import TeamDispatchService
+            from src.domains.movement_simulation.schemas import TeamDispatchRequest
+            
+            dispatch_service = TeamDispatchService(db)
+            movement_sessions = []
+            for route in route_results:
+                try:
+                    # 使用已规划的路径启动移动
+                    dispatch_request = TeamDispatchRequest(
+                        destination=[event_lng, event_lat],
+                        scenario_id=scenario_id,
+                        speed_mps=15.0,  # 救援车辆默认速度 54km/h
+                    )
+                    dispatch_response = await dispatch_service.dispatch_team(
+                        team_id=UUID(route["team_id"]),
+                        request=dispatch_request,
+                    )
+                    movement_sessions.append({
+                        "team_id": route["team_id"],
+                        "team_name": route["team_name"],
+                        "session_id": dispatch_response.session_id,
+                    })
+                    logger.info(
+                        f"[EmergencyConfirm] 队伍移动启动: team={route['team_name']}, "
+                        f"session={dispatch_response.session_id}"
+                    )
+                except Exception as move_err:
+                    logger.warning(
+                        f"[EmergencyConfirm] 队伍移动启动失败: team={route.get('team_name')}, error={move_err}"
+                    )
+            
+            logger.info(f"[EmergencyConfirm] 移动仿真启动完成 成功={len(movement_sessions)}/{len(route_results)}")
+            
             # ========== 8. 更新事件状态 ==========
             # 状态转换: confirmed → planning
             if event_status == "confirmed":
@@ -866,7 +931,8 @@ async def confirm_emergency_scheme(
                 "task_id": str(new_task_id),
                 "task_code": task_code,
                 "deployed_teams": deployed_info,
-                "message": f"成功创建任务 {task_code}，部署 {len(deployed_info)} 支队伍",
+                "route_results": route_results,
+                "message": f"成功创建任务 {task_code}，部署 {len(deployed_info)} 支队伍，生成 {len(route_results)} 条路径",
             }
             
         except Exception as e:
@@ -876,6 +942,207 @@ async def confirm_emergency_scheme(
                 "success": False,
                 "error": f"确认部署失败: {str(e)}",
             }
+
+
+async def _generate_team_route(
+    db: AsyncSession,
+    team_id: UUID,
+    task_id: UUID,
+    scenario_id: UUID,
+    destination_lng: float,
+    destination_lat: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    为队伍生成路径规划
+    
+    查询队伍驻地位置和关联设备，调用路径规划服务生成路径。
+    
+    Args:
+        db: 数据库会话
+        team_id: 队伍ID
+        task_id: 任务ID（用于关联路径）
+        scenario_id: 场景ID（用于风险检测）
+        destination_lng: 目的地经度
+        destination_lat: 目的地纬度
+        
+    Returns:
+        路径规划结果，包含 route_id, distance_m, has_risk 等
+    """
+    from sqlalchemy import text
+    from src.domains.routing.planned_route_service import PlannedRouteService
+    from src.domains.routing.schemas import Point
+    
+    logger.info(
+        f"[_generate_team_route] 开始规划: team_id={team_id}, "
+        f"task_id={task_id}, dest=({destination_lng},{destination_lat})"
+    )
+    
+    # 1. 查询队伍位置和关联设备（优先选择陆地设备用于路径规划）
+    team_query = text("""
+        SELECT 
+            t.id as team_id,
+            t.name as team_name,
+            ST_X(t.base_location::geometry) as base_lng,
+            ST_Y(t.base_location::geometry) as base_lat,
+            d.id as device_id,
+            d.env_type as device_env_type
+        FROM operational_v2.rescue_teams_v2 t
+        LEFT JOIN operational_v2.team_vehicles_v2 tv ON tv.team_id = t.id AND tv.is_primary = true
+        LEFT JOIN operational_v2.vehicles_v2 v ON tv.vehicle_id = v.id
+        LEFT JOIN operational_v2.devices_v2 d ON d.in_vehicle_id = v.id AND d.env_type = 'land'
+        WHERE t.id = :team_id
+        LIMIT 1
+    """)
+    
+    result = await db.execute(team_query, {"team_id": str(team_id)})
+    row = result.fetchone()
+    
+    if not row:
+        logger.warning(f"[_generate_team_route] 队伍不存在: team_id={team_id}")
+        return None
+    
+    logger.info(
+        f"[_generate_team_route] 查询结果: team={row.team_name}, "
+        f"origin=({row.base_lng},{row.base_lat}), device_id={row.device_id}"
+    )
+    
+    # 检查队伍位置
+    if row.base_lng is None or row.base_lat is None:
+        logger.warning(f"[_generate_team_route] 队伍无位置信息: team={row.team_name}")
+        return None
+    
+    origin_lng: float = row.base_lng
+    origin_lat: float = row.base_lat
+    device_id: Optional[UUID] = row.device_id
+    
+    # 如果没有关联设备，查询任意可用的陆地设备
+    if device_id is None:
+        logger.info(f"[_generate_team_route] 队伍无关联陆地设备，查询备用设备")
+        device_query = text("""
+            SELECT id FROM operational_v2.devices_v2
+            WHERE env_type = 'land' AND status = 'available'
+            LIMIT 1
+        """)
+        device_result = await db.execute(device_query)
+        device_row = device_result.fetchone()
+        if device_row:
+            device_id = device_row.id
+            logger.info(f"[_generate_team_route] 使用备用设备: device_id={device_id}")
+        else:
+            logger.warning(f"[_generate_team_route] 无可用设备: team={row.team_name}")
+            return None
+    
+    logger.info(f"[_generate_team_route] 最终使用设备: device_id={device_id}")
+    
+    # 2. 调用路径规划服务
+    route_service = PlannedRouteService(db)
+    
+    origin = Point(lon=origin_lng, lat=origin_lat)
+    destination = Point(lon=destination_lng, lat=destination_lat)
+    
+    logger.info(
+        f"[_generate_team_route] 调用 plan_and_save: "
+        f"origin=({origin.lon},{origin.lat}), dest=({destination.lon},{destination.lat})"
+    )
+    
+    try:
+        plan_result = await route_service.plan_and_save(
+            device_id=device_id,
+            origin=origin,
+            destination=destination,
+            task_id=task_id,
+            team_id=team_id,
+            scenario_id=scenario_id,
+        )
+        
+        logger.info(f"[_generate_team_route] plan_and_save 返回: success={plan_result.get('success')}, route_id={plan_result.get('route_id')}")
+        
+        if not plan_result.get("success"):
+            logger.warning(
+                f"[_generate_team_route] 路径规划失败: team={row.team_name}, "
+                f"error={plan_result.get('error')}"
+            )
+            return None
+    except Exception as e:
+        logger.exception(f"[_generate_team_route] plan_and_save 异常: team={row.team_name}, error={e}")
+        return None
+    
+    # 提取 polyline 用于前端渲染
+    polyline = plan_result.get("route", {}).get("polyline", [])
+    
+    # 3. 如果检测到风险，广播 STOMP 预警消息
+    broadcast_sent = False
+    if plan_result.get("has_risk") and plan_result.get("risk_areas"):
+        try:
+            from src.core.stomp.broker import stomp_broker
+            await stomp_broker.broadcast_alert(
+                alert_data={
+                    "event_type": "route_risk_warning",
+                    "task_id": str(task_id),
+                    "team_id": str(team_id),
+                    "team_name": row.team_name,
+                    "route_id": plan_result.get("route_id"),
+                    "risk_areas": plan_result.get("risk_areas"),
+                    "origin": {"lon": origin_lng, "lat": origin_lat},
+                    "destination": {"lon": destination_lng, "lat": destination_lat},
+                    "requires_decision": True,
+                    "available_actions": ["continue", "detour", "standby"],
+                },
+                scenario_id=scenario_id,
+            )
+            broadcast_sent = True
+            logger.info(
+                f"[_generate_team_route] 已广播风险预警: team={row.team_name}, "
+                f"风险区域数={len(plan_result.get('risk_areas', []))}"
+            )
+        except Exception as ws_err:
+            logger.warning(f"[_generate_team_route] 风险预警广播失败: {ws_err}")
+    
+    # 4. 记录风险检测日志到 ai_decision_logs_v2 表
+    try:
+        from src.domains.ai_decisions import AIDecisionLogRepository, CreateAIDecisionLogRequest
+        import time
+        
+        log_request = CreateAIDecisionLogRequest(
+            scenario_id=scenario_id,
+            event_id=None,
+            decision_type="risk_detection",
+            algorithm_used="PostGIS_ST_Intersects_UNION",
+            input_snapshot={
+                "team_id": str(team_id),
+                "team_name": row.team_name,
+                "task_id": str(task_id),
+                "origin": {"lon": origin_lng, "lat": origin_lat},
+                "destination": {"lon": destination_lng, "lat": destination_lat},
+                "polyline_points_count": len(polyline),
+                "route_id": plan_result.get("route_id"),
+            },
+            output_result={
+                "has_risk": plan_result.get("has_risk", False),
+                "risk_areas_count": len(plan_result.get("risk_areas", [])),
+                "risk_areas": plan_result.get("risk_areas", []),
+                "broadcast_sent": broadcast_sent,
+            },
+        )
+        
+        log_repo = AIDecisionLogRepository(db)
+        await log_repo.create(log_request)
+        await db.commit()
+        logger.info(
+            f"[_generate_team_route] 风险检测日志已记录: team={row.team_name}, "
+            f"has_risk={plan_result.get('has_risk')}, broadcast_sent={broadcast_sent}"
+        )
+    except Exception as log_err:
+        logger.warning(f"[_generate_team_route] 风险检测日志记录失败: {log_err}")
+    
+    return {
+        "route_id": plan_result.get("route_id"),
+        "distance_m": plan_result.get("route", {}).get("total_distance_m", 0),
+        "duration_s": plan_result.get("route", {}).get("total_duration_s", 0),
+        "has_risk": plan_result.get("has_risk", False),
+        "risk_areas": plan_result.get("risk_areas", []),
+        "polyline": polyline,  # 路径坐标点列表 [{lon, lat}, ...]
+    }
 
 
 # ============================================================================
@@ -890,10 +1157,10 @@ ROUTE_PLANNING_PREFIX = "route_planning_result:"
 async def _save_route_result_to_redis(task_id: str, result: Dict[str, Any]) -> bool:
     """保存路径规划结果到Redis"""
     try:
-        redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        from src.core.redis import get_redis_client
+        redis_client = await get_redis_client()
         key = f"{ROUTE_PLANNING_PREFIX}{task_id}"
         await redis_client.setex(key, EMERGENCY_RESULT_TTL, json.dumps(result, ensure_ascii=False, default=str))
-        await redis_client.close()
         logger.info(f"[RoutePlanning] 结果已保存到Redis: {key}")
         return True
     except Exception as e:
@@ -904,10 +1171,10 @@ async def _save_route_result_to_redis(task_id: str, result: Dict[str, Any]) -> b
 async def _get_route_result_from_redis(task_id: str) -> Optional[Dict[str, Any]]:
     """从Redis获取路径规划结果"""
     try:
-        redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
+        from src.core.redis import get_redis_client
+        redis_client = await get_redis_client()
         key = f"{ROUTE_PLANNING_PREFIX}{task_id}"
         data = await redis_client.get(key)
-        await redis_client.close()
         if data:
             return json.loads(data)
         return None

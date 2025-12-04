@@ -109,7 +109,7 @@ class CarItemSelectV2(BaseModel):
 
 class EquipmentDispatchRequest(BaseModel):
     """装备清单下发请求"""
-    eventId: str
+    eventId: Optional[str] = None  # 可选，不传则自动获取活动想定的主事件ID
     assignments: list[CarItemSelectV2]
 
 
@@ -150,7 +150,7 @@ class DispatchStatusResponse(BaseModel):
 
 class EventIdForm(BaseModel):
     """事件ID表单"""
-    eventId: str
+    eventId: Optional[str] = None  # 可选，不传则自动获取活动想定的主事件ID
 
 
 # ==================== 装备分配相关 Schema ====================

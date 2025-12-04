@@ -507,21 +507,63 @@ class MovementSimulationManager:
                 break
     
     async def _broadcast_location(self, session: MovementSession, position: Point) -> None:
-        """广播位置更新"""
+        """广播位置更新（适配前端 handleEntityItem 期望的格式）"""
         try:
             broker = _get_stomp_broker()
+            
+            # 映射 entity_type 到前端期望的 type
+            type_map = {
+                "team": "realTime_command_vhicle",  # 队伍用指挥车模型
+                "vehicle": "realTime_command_vhicle",
+                "uav": "realTime_uav",
+                "robotic_dog": "realTime_robotic_dog",
+                "usv": "realTime_usv",
+            }
+            frontend_type = type_map.get(session.entity_type.value, "realTime_command_vhicle")
+            
             await broker.broadcast_location({
                 "id": str(session.entity_id),
-                "type": session.entity_type.value,
-                "location": {
-                    "longitude": position.lon,
-                    "latitude": position.lat,
+                "type": frontend_type,
+                "layerCode": "layer.realTimeEquipment",
+                "geometry": {
+                    "coordinates": [position.lon, position.lat]
                 },
-                "speed_kmh": session.speed_mps * 3.6,
-                "heading": int(session.current_heading),
+                "properties": {
+                    "state": "moving",
+                    "name": "救援队伍",
+                    "heading": int(session.current_heading),
+                    "speed": f"{session.speed_mps * 3.6:.0f}km/h",
+                },
+                "styleOverrides": {}
             })
+            
+            # 同步更新数据库中的队伍位置，供风险检测使用
+            if session.entity_type.value == "team":
+                await self._update_team_location_in_db(session.entity_id, position)
+                
         except Exception as e:
             logger.warning(f"广播位置失败: {e}")
+    
+    async def _update_team_location_in_db(self, team_id: UUID, position: Point) -> None:
+        """更新数据库中的队伍当前位置（用于风险检测）"""
+        try:
+            from src.core.database import AsyncSessionLocal
+            from sqlalchemy import text
+            
+            async with AsyncSessionLocal() as db:
+                sql = text("""
+                    UPDATE operational_v2.rescue_teams_v2 
+                    SET current_location = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography
+                    WHERE id = :team_id
+                """)
+                await db.execute(sql, {
+                    "lon": position.lon,
+                    "lat": position.lat,
+                    "team_id": str(team_id),
+                })
+                await db.commit()
+        except Exception as e:
+            logger.debug(f"更新队伍数据库位置失败（不阻塞）: {e}")
     
     async def _broadcast_event(
         self, 

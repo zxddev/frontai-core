@@ -13,9 +13,10 @@ from uuid import UUID
 import uuid as uuid_lib
 
 from sqlalchemy import (
-    Column, String, Integer, DateTime, CheckConstraint
+    Column, String, Integer, DateTime, CheckConstraint, ForeignKey
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID, JSONB, ENUM
+from sqlalchemy.orm import relationship
 from geoalchemy2 import Geography
 
 from src.core.database import Base
@@ -155,6 +156,18 @@ class Team(Base):
     current_task_id: Optional[UUID] = Column(
         PG_UUID(as_uuid=True),
         comment="当前执行的任务ID"
+    )
+    
+    # ==================== 队伍来源与层级 ====================
+    team_source: str = Column(
+        String(20),
+        default='external',
+        comment="队伍来源: internal(前突车队内部小队), external(外部救援队伍), mobilized(动员生成的车辆队伍)"
+    )
+    parent_team_id: Optional[UUID] = Column(
+        PG_UUID(as_uuid=True),
+        ForeignKey('operational_v2.rescue_teams_v2.id', ondelete='SET NULL'),
+        comment="父级队伍ID，用于表示队伍层级（如车队→小队，大队→中队）"
     )
     
     # ==================== 扩展属性 ====================

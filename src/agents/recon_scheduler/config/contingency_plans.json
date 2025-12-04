@@ -1,0 +1,292 @@
+{
+  "plans": {
+    "device_failure": {
+      "id": "device_failure",
+      "name": "设备故障",
+      "trigger_conditions": [
+        "设备失联超过30秒",
+        "电池电压异常下降",
+        "电机/传感器故障报警",
+        "GPS信号丢失"
+      ],
+      "severity": "high",
+      "immediate_actions": [
+        "启动设备自动返航（如有能力）",
+        "记录最后已知位置",
+        "通知指挥中心",
+        "评估是否启动备用设备"
+      ],
+      "follow_up_actions": [
+        "派出人员回收设备（如需要）",
+        "启动备用设备接替任务",
+        "评估未完成区域",
+        "调整后续任务分配"
+      ],
+      "resource_reallocation": {
+        "strategy": "backup_device_takeover",
+        "priority": "maintain_coverage"
+      },
+      "notification_chain": ["操作员", "现场指挥", "指挥中心"],
+      "checklist": [
+        "确认设备最后位置",
+        "检查是否有备用设备",
+        "评估任务是否需要中断",
+        "记录故障信息"
+      ]
+    },
+    "weather_deteriorate": {
+      "id": "weather_deteriorate",
+      "name": "天气恶化",
+      "trigger_conditions": [
+        "风速超过12m/s",
+        "能见度低于1km",
+        "开始降雨且设备不防水",
+        "天气预报显示即将恶化"
+      ],
+      "severity": "high",
+      "immediate_actions": [
+        "召回所有多旋翼无人机",
+        "评估固定翼是否继续",
+        "通知所有操作员",
+        "记录当前任务进度"
+      ],
+      "follow_up_actions": [
+        "安全降落所有设备",
+        "等待天气好转",
+        "重新评估任务时间窗口",
+        "调整任务时间表"
+      ],
+      "thresholds": {
+        "multirotor_recall": {
+          "wind_ms": 12,
+          "visibility_m": 500,
+          "rain": "moderate"
+        },
+        "all_recall": {
+          "wind_ms": 17,
+          "visibility_m": 300,
+          "rain": "heavy"
+        }
+      },
+      "notification_chain": ["所有操作员", "现场指挥", "指挥中心"],
+      "checklist": [
+        "确认所有设备状态",
+        "发出召回指令",
+        "监控设备返航",
+        "准备着陆区域"
+      ]
+    },
+    "victim_found": {
+      "id": "victim_found",
+      "name": "发现被困人员",
+      "trigger_conditions": [
+        "热成像发现人体热信号",
+        "可见光确认人员存在",
+        "声音探测到呼救",
+        "地面报告有人被困"
+      ],
+      "severity": "critical",
+      "immediate_actions": [
+        "悬停并精确标记位置（GPS坐标）",
+        "启动精确定位模式",
+        "拍摄详细照片/视频",
+        "立即通知指挥中心和救援队"
+      ],
+      "follow_up_actions": [
+        "调配更多设备到发现区域进行详查",
+        "保持至少一架设备持续监视",
+        "引导地面救援队接近",
+        "评估周边是否有更多被困人员"
+      ],
+      "resource_reallocation": {
+        "strategy": "concentrate_on_discovery",
+        "pause_low_priority": true,
+        "assign_thermal_device": true
+      },
+      "notification_chain": ["救援队", "现场指挥", "指挥中心", "医疗队"],
+      "checklist": [
+        "确认位置精确度",
+        "记录被困人员状态（如可观察）",
+        "评估救援路线",
+        "准备引导救援队"
+      ],
+      "report_template": {
+        "required_fields": [
+          "精确坐标",
+          "发现时间",
+          "被困人数（估计）",
+          "被困状态",
+          "周边环境",
+          "建议救援路线"
+        ]
+      }
+    },
+    "secondary_hazard": {
+      "id": "secondary_hazard",
+      "name": "发现次生灾害",
+      "trigger_conditions": [
+        "发现火情",
+        "发现气体泄漏迹象",
+        "发现结构二次倒塌风险",
+        "发现堰塞湖/溃坝风险"
+      ],
+      "severity": "critical",
+      "immediate_actions": [
+        "标记危险区域",
+        "撤离危险区域内的所有设备",
+        "紧急通知指挥中心",
+        "拍摄详细记录"
+      ],
+      "follow_up_actions": [
+        "调整飞行区域避开危险",
+        "通知专业处置队伍",
+        "持续远程监测危险区域",
+        "更新救援方案"
+      ],
+      "hazard_specific_actions": {
+        "fire": {
+          "actions": ["通知消防队", "监测蔓延方向", "标记安全区域"],
+          "min_distance_m": 100,
+          "approach": "upwind"
+        },
+        "gas_leak": {
+          "actions": ["通知危化品处置队", "撤离所有人员", "禁止一切火源"],
+          "min_distance_m": 500,
+          "approach": "upwind"
+        },
+        "structural_risk": {
+          "actions": ["划定危险区域", "禁止人员进入", "持续监测"],
+          "min_distance_m": 50
+        },
+        "dam_formation": {
+          "actions": ["通知水利部门", "评估溃坝风险", "准备下游疏散"],
+          "monitoring": "continuous"
+        }
+      },
+      "notification_chain": ["现场指挥", "指挥中心", "专业处置队", "疏散组"],
+      "checklist": [
+        "确认危险类型",
+        "评估危险程度",
+        "划定危险区域",
+        "通知相关人员撤离"
+      ]
+    },
+    "communication_loss": {
+      "id": "communication_loss",
+      "name": "通信中断",
+      "trigger_conditions": [
+        "与设备通信中断超过30秒",
+        "图传信号丢失",
+        "遥控信号丢失"
+      ],
+      "severity": "medium",
+      "immediate_actions": [
+        "设备自动执行失联保护（悬停/返航）",
+        "尝试重新建立通信",
+        "记录最后位置",
+        "通知指挥中心"
+      ],
+      "follow_up_actions": [
+        "移动地面站尝试恢复通信",
+        "派出人员到最后位置区域",
+        "评估是否启动备用通信中继"
+      ],
+      "device_failsafe_settings": {
+        "signal_lost_action": "hover_then_return",
+        "hover_time_s": 30,
+        "return_altitude_m": 100,
+        "return_speed_ms": 10
+      },
+      "notification_chain": ["操作员", "现场指挥"],
+      "checklist": [
+        "检查地面站状态",
+        "检查天线方向",
+        "尝试切换频段",
+        "准备人员回收"
+      ]
+    },
+    "low_battery": {
+      "id": "low_battery",
+      "name": "电量不足",
+      "trigger_conditions": [
+        "电池电量低于30%",
+        "电池电量低于返航所需+10%",
+        "电池电压异常"
+      ],
+      "severity": "medium",
+      "thresholds": {
+        "warning_percent": 30,
+        "critical_percent": 20,
+        "emergency_percent": 15
+      },
+      "immediate_actions": [
+        "30%: 发出警告，准备返航",
+        "20%: 强制返航",
+        "15%: 就近降落"
+      ],
+      "follow_up_actions": [
+        "更换电池继续任务",
+        "或启动备用设备接替"
+      ],
+      "notification_chain": ["操作员"],
+      "checklist": [
+        "确认返航航程",
+        "计算剩余飞行时间",
+        "选择返航或就近降落",
+        "准备更换电池"
+      ]
+    },
+    "airspace_conflict": {
+      "id": "airspace_conflict",
+      "name": "空域冲突",
+      "trigger_conditions": [
+        "检测到其他飞行器接近",
+        "收到临时禁飞通知",
+        "发现载人飞行器进入区域"
+      ],
+      "severity": "high",
+      "immediate_actions": [
+        "立即降低高度或规避",
+        "与其他飞行器保持安全距离（>100m）",
+        "通知指挥中心"
+      ],
+      "follow_up_actions": [
+        "调整飞行区域",
+        "与空管协调",
+        "重新规划航线"
+      ],
+      "min_separation_m": {
+        "manned_aircraft": 500,
+        "other_uav": 100
+      },
+      "notification_chain": ["操作员", "现场指挥", "空管协调员"],
+      "checklist": [
+        "确认冲突飞行器类型",
+        "执行规避机动",
+        "报告冲突事件",
+        "调整任务计划"
+      ]
+    }
+  },
+  "priority_order": [
+    "victim_found",
+    "secondary_hazard",
+    "device_failure",
+    "weather_deteriorate",
+    "communication_loss",
+    "airspace_conflict",
+    "low_battery"
+  ],
+  "notification_templates": {
+    "victim_found": "【紧急】发现被困人员！位置：{location}，时间：{time}，请救援队立即响应。",
+    "secondary_hazard": "【警告】发现次生灾害（{hazard_type}）！位置：{location}，请立即撤离危险区域。",
+    "device_failure": "【通知】设备{device_name}故障，最后位置：{location}，正在启动备用方案。",
+    "weather_deteriorate": "【警告】天气恶化（{weather_condition}），正在召回设备，请注意安全。"
+  },
+  "checklist_categories": {
+    "pre_flight": "飞行前检查",
+    "in_flight": "飞行中监控",
+    "emergency": "应急处置",
+    "post_flight": "飞行后检查"
+  }
+}

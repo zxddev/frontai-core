@@ -354,10 +354,10 @@ class EventUpdate(Base):
         comment="变更说明"
     )
     source_type: str = Column(
-        String(50), 
+        EventSourceTypeEnum, 
         nullable=False, 
         default='manual_report',
-        comment="来源类型"
+        comment="来源类型枚举"
     )
     updated_by: Optional[UUID] = Column(
         PG_UUID(as_uuid=True),

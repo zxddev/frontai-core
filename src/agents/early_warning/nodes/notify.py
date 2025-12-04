@@ -134,31 +134,33 @@ async def _send_alert_async(scenario_id: str, notification: Dict[str, Any]) -> b
     """
     异步发送告警
     
-    使用现有的WebSocket管理器广播告警
+    使用 STOMP broker 广播告警到前端
     """
     try:
-        from core.websocket import broadcast_alert
+        from src.core.stomp.broker import stomp_broker
+        
+        alert_data = {
+            "event_type": "early_warning",
+            **notification,
+        }
         
         if scenario_id:
-            await broadcast_alert(
+            await stomp_broker.broadcast_alert(
+                alert_data=alert_data,
                 scenario_id=UUID(scenario_id),
-                alert_type="early_warning",
-                alert_data=notification,
             )
         else:
-            # 如果没有scenario_id，广播到所有订阅alerts的客户端
-            from core.websocket import ws_manager
-            await ws_manager.broadcast_to_channel(
-                channel="alerts",
-                event_type="early_warning",
-                payload=notification,
+            # 无 scenario_id 时广播到所有订阅者
+            await stomp_broker.broadcast_alert(
+                alert_data=alert_data,
+                scenario_id=None,
             )
         
         return True
         
-    except ImportError:
-        logger.warning("[notify] WebSocket module not available, skipping notification")
-        return True  # 不算失败，只是跳过
+    except ImportError as e:
+        logger.warning(f"[notify] STOMP broker not available, skipping notification: {e}")
+        return True
     except Exception as e:
-        logger.error(f"[notify] Error sending async alert: {e}")
+        logger.error(f"[notify] Error sending STOMP alert: {e}")
         return False
