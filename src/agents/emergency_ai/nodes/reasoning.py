@@ -9,10 +9,123 @@ import logging
 import time
 from typing import Dict, Any, List
 
-from ..state import EmergencyAIState, MatchedTRRRule, CapabilityRequirement
+from ..state import EmergencyAIState, MatchedTRRRule, CapabilityRequirement, RuleConflict
 from ..tools.kg_tools import query_trr_rules_async, query_capability_mapping_async
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# 标准能力编码参考（与 capability_codes_v2 数据库表统一）
+# ============================================================================
+# 搜索类(search): SEARCH_LIFE_DETECT, SEARCH_THERMAL, SEARCH_CANINE, SEARCH_SONAR
+# 救援类(rescue): RESCUE_STRUCTURAL, RESCUE_CONFINED, RESCUE_ROPE, RESCUE_WATER_SWIFT, RESCUE_WATER_FLOOD
+# 医疗类(medical): MEDICAL_TRIAGE, MEDICAL_FIRST_AID, MEDICAL_TRAUMA, MEDICAL_CPR, MEDICAL_TRANSPORT
+# 危化类(hazmat): HAZMAT_DETECT, HAZMAT_CONTAIN, HAZMAT_DECON, HAZMAT_FIRE
+# 消防类(fire): FIRE_SUPPRESS, FIRE_FOREST, FIRE_HIGH_RISE
+# 工程类(engineering): ENG_SHORING, ENG_DEMOLITION, ENG_LIFTING
+# 保障类(logistics): LOG_POWER, LOG_LIGHTING, LOG_COMM, LOG_SHELTER, LOG_SUPPLY
+
+
+# ============================================================================
+# 规则冲突检测
+# ============================================================================
+
+# 预定义的互斥规则对（任务级别）
+EXCLUSIVE_TASK_PAIRS = [
+    # 灭火 vs 禁止喷水（化学品泄漏场景）
+    ("TASK_WATER_SPRAY", "TASK_NO_WATER"),
+    # 通风 vs 密闭空间（有毒气体场景）  
+    ("TASK_VENTILATION", "TASK_SEAL_AREA"),
+    # 人员疏散 vs 就地避难
+    ("TASK_EVACUATION", "TASK_SHELTER_IN_PLACE"),
+    # 高压水枪 vs 低压雾化（特定火灾场景）
+    ("TASK_HIGH_PRESSURE", "TASK_LOW_PRESSURE_MIST"),
+]
+
+# 预定义的资源竞争对（同一资源不能同时执行冲突任务）
+RESOURCE_CONFLICT_GROUPS = {
+    "WATER_SUPPLY": ["TASK_WATER_SPRAY", "TASK_FOAM_SPRAY", "TASK_COOLING"],
+    "VENTILATION_EQUIP": ["TASK_VENTILATION", "TASK_SMOKE_EXHAUST"],
+}
+
+
+def detect_rule_conflicts(
+    matched_rules: List[MatchedTRRRule],
+    task_requirements: List[Dict[str, Any]],
+) -> List[RuleConflict]:
+    """
+    检测匹配规则之间的冲突
+    
+    Args:
+        matched_rules: 匹配的规则列表
+        task_requirements: 生成的任务需求列表
+        
+    Returns:
+        检测到的冲突列表
+    """
+    conflicts: List[RuleConflict] = []
+    all_tasks = {t["task_code"] for t in task_requirements}
+    
+    # 检查互斥任务对
+    for task1, task2 in EXCLUSIVE_TASK_PAIRS:
+        if task1 in all_tasks and task2 in all_tasks:
+            # 找到产生这两个任务的规则
+            source_rules = []
+            for rule in matched_rules:
+                if task1 in rule["triggered_tasks"] or task2 in rule["triggered_tasks"]:
+                    source_rules.append(rule["rule_id"])
+            
+            conflict: RuleConflict = {
+                "conflict_type": "action_conflict",
+                "conflicting_tasks": [task1, task2],
+                "conflicting_rules": list(set(source_rules)),
+                "description": f"任务{task1}与{task2}互斥，不能同时执行",
+                "resolution_options": [
+                    f"保留{task1}，移除{task2}",
+                    f"保留{task2}，移除{task1}",
+                    "由指挥官现场判断",
+                ],
+            }
+            conflicts.append(conflict)
+            logger.warning(
+                f"[冲突检测] 发现互斥任务: {task1} vs {task2}",
+                extra={"source_rules": source_rules}
+            )
+    
+    # 检查资源竞争
+    for resource, competing_tasks in RESOURCE_CONFLICT_GROUPS.items():
+        active_competing = [t for t in competing_tasks if t in all_tasks]
+        if len(active_competing) > 1:
+            source_rules = []
+            for rule in matched_rules:
+                for task in active_competing:
+                    if task in rule["triggered_tasks"]:
+                        source_rules.append(rule["rule_id"])
+            
+            conflict = {
+                "conflict_type": "resource_conflict",
+                "conflicting_tasks": active_competing,
+                "conflicting_rules": list(set(source_rules)),
+                "description": f"资源{resource}被多个任务竞争: {active_competing}",
+                "resolution_options": [
+                    "按优先级顺序执行",
+                    "分配更多资源",
+                    "由指挥官协调",
+                ],
+            }
+            conflicts.append(conflict)
+            logger.warning(
+                f"[冲突检测] 发现资源竞争: {resource} <- {active_competing}",
+                extra={"source_rules": source_rules}
+            )
+    
+    if conflicts:
+        logger.info(f"[冲突检测] 共发现{len(conflicts)}个冲突")
+    else:
+        logger.info("[冲突检测] 未发现规则冲突")
+    
+    return conflicts
 
 
 async def query_rules(state: EmergencyAIState) -> Dict[str, Any]:
@@ -105,9 +218,7 @@ async def apply_rules(state: EmergencyAIState) -> Dict[str, Any]:
     parsed_disaster = state.get("parsed_disaster", {})
     
     if not kg_rules:
-        logger.warning("无可用规则，使用默认规则")
-        # 使用默认规则
-        kg_rules = _get_default_rules(parsed_disaster)
+        raise RuntimeError(f"[规则匹配] Neo4j未返回匹配规则，disaster_type={parsed_disaster.get('disaster_type')}")
     
     # 规则匹配
     matched_rules: List[MatchedTRRRule] = []
@@ -169,24 +280,29 @@ async def apply_rules(state: EmergencyAIState) -> Dict[str, Any]:
     # 查询能力映射
     capability_requirements: List[CapabilityRequirement] = []
     if all_capabilities:
-        try:
-            cap_mappings = await query_capability_mapping_async(all_capabilities)
-            for mapping in cap_mappings:
-                cap_req: CapabilityRequirement = {
-                    "capability_code": mapping.get("capability_code", ""),
-                    "capability_name": mapping.get("capability_name", ""),
-                    "priority": "high",  # 从规则获取
-                    "source_rule": "",   # 可追溯
-                    "provided_by": [rt.get("resource_code", "") for rt in mapping.get("resource_types", [])],
-                }
-                capability_requirements.append(cap_req)
-        except Exception as e:
-            logger.warning("能力映射查询失败", extra={"error": str(e)})
+        cap_mappings = await query_capability_mapping_async(all_capabilities)
+        for mapping in cap_mappings:
+            cap_req: CapabilityRequirement = {
+                "capability_code": mapping.get("capability_code", ""),
+                "capability_name": mapping.get("capability_name", ""),
+                "priority": "high",  # 从规则获取
+                "source_rule": "",   # 可追溯
+                "provided_by": [rt.get("resource_code", "") for rt in mapping.get("resource_types", [])],
+            }
+            capability_requirements.append(cap_req)
+    
+    # 检测规则冲突
+    rule_conflicts = detect_rule_conflicts(matched_rules, unique_tasks)
+    
+    # 合并已有冲突和新检测到的冲突
+    existing_conflicts = list(state.get("rule_conflicts", []))
+    all_conflicts = existing_conflicts + rule_conflicts
     
     # 更新追踪信息
     trace = state.get("trace", {})
     trace["phases_executed"] = trace.get("phases_executed", []) + ["apply_rules"]
     trace["rules_matched"] = len(matched_rules)
+    trace["conflicts_detected"] = len(rule_conflicts)
     
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(
@@ -195,6 +311,7 @@ async def apply_rules(state: EmergencyAIState) -> Dict[str, Any]:
             "matched_rules": len(matched_rules),
             "tasks": len(unique_tasks),
             "capabilities": len(capability_requirements),
+            "conflicts": len(rule_conflicts),
             "elapsed_ms": elapsed_ms,
         }
     )
@@ -203,6 +320,7 @@ async def apply_rules(state: EmergencyAIState) -> Dict[str, Any]:
         "matched_rules": matched_rules,
         "task_requirements": unique_tasks,
         "capability_requirements": capability_requirements,
+        "rule_conflicts": all_conflicts,
         "trace": trace,
     }
 
@@ -269,153 +387,3 @@ def _evaluate_rule_conditions(
     
     match_reason = "条件满足: " + ", ".join(reasons) if reasons else "默认匹配"
     return is_matched, match_reason
-
-
-def _get_default_rules(disaster_info: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """
-    获取默认规则（知识图谱不可用时的降级）
-    
-    标准能力编码（与Neo4j和数据库统一）：
-    - LIFE_DETECTION: 生命探测
-    - STRUCTURAL_RESCUE: 结构救援
-    - MEDICAL_TRIAGE: 医疗分诊
-    - EMERGENCY_TREATMENT: 紧急救治
-    - FIRE_SUPPRESSION: 火灾扑救
-    - CONFINED_SPACE_RESCUE: 狭小空间救援
-    - WATER_RESCUE: 水上救援
-    - COMMUNICATION_SUPPORT: 通信保障
-    """
-    disaster_type = disaster_info.get("disaster_type", "earthquake")
-    
-    default_rules = []
-    
-    # 地震默认规则
-    if disaster_type == "earthquake":
-        if disaster_info.get("has_building_collapse") or disaster_info.get("has_trapped_persons"):
-            default_rules.append({
-                "rule_id": "DEFAULT-EQ-001",
-                "rule_name": "默认地震搜救规则",
-                "disaster_type": "earthquake",
-                "priority": "critical",
-                "weight": 0.9,
-                "trigger_conditions": [],
-                "triggered_tasks": [
-                    {"task_code": "SEARCH_RESCUE", "task_name": "搜索救援", "priority": "critical", "sequence": 1},
-                    {"task_code": "MEDICAL_EMERGENCY", "task_name": "医疗急救", "priority": "critical", "sequence": 2},
-                ],
-                "required_capabilities": [
-                    {"capability_code": "LIFE_DETECTION", "capability_name": "生命探测"},
-                    {"capability_code": "STRUCTURAL_RESCUE", "capability_name": "结构救援"},
-                    {"capability_code": "MEDICAL_TRIAGE", "capability_name": "医疗分诊"},
-                ],
-            })
-        
-        if disaster_info.get("has_secondary_fire"):
-            default_rules.append({
-                "rule_id": "DEFAULT-EQ-002",
-                "rule_name": "默认地震火灾规则",
-                "disaster_type": "earthquake",
-                "priority": "critical",
-                "weight": 0.85,
-                "trigger_conditions": [],
-                "triggered_tasks": [
-                    {"task_code": "FIRE_SUPPRESSION", "task_name": "火灾扑救", "priority": "critical", "sequence": 1},
-                ],
-                "required_capabilities": [
-                    {"capability_code": "FIRE_SUPPRESSION", "capability_name": "火灾扑救"},
-                ],
-            })
-    
-    # 火灾默认规则
-    elif disaster_type == "fire":
-        default_rules.append({
-            "rule_id": "DEFAULT-FIRE-001",
-            "rule_name": "默认火灾扑救规则",
-            "disaster_type": "fire",
-            "priority": "critical",
-            "weight": 0.95,
-            "trigger_conditions": [],
-            "triggered_tasks": [
-                {"task_code": "FIRE_SUPPRESSION", "task_name": "火灾扑救", "priority": "critical", "sequence": 1},
-                {"task_code": "SEARCH_RESCUE", "task_name": "搜索救援", "priority": "critical", "sequence": 2},
-                {"task_code": "MEDICAL_EMERGENCY", "task_name": "医疗急救", "priority": "high", "sequence": 3},
-            ],
-            "required_capabilities": [
-                {"capability_code": "FIRE_SUPPRESSION", "capability_name": "火灾扑救"},
-                {"capability_code": "STRUCTURAL_RESCUE", "capability_name": "结构救援"},
-                {"capability_code": "LIFE_DETECTION", "capability_name": "生命探测"},
-                {"capability_code": "MEDICAL_TRIAGE", "capability_name": "医疗分诊"},
-                {"capability_code": "EMERGENCY_TREATMENT", "capability_name": "紧急救治"},
-            ],
-        })
-    
-    # 危化品泄漏默认规则
-    elif disaster_type == "hazmat":
-        default_rules.append({
-            "rule_id": "DEFAULT-HAZMAT-001",
-            "rule_name": "默认危化品处置规则",
-            "disaster_type": "hazmat",
-            "priority": "critical",
-            "weight": 0.95,
-            "trigger_conditions": [],
-            "triggered_tasks": [
-                {"task_code": "HAZMAT_DETECTION", "task_name": "危化品侦检", "priority": "critical", "sequence": 1},
-                {"task_code": "HAZMAT_CONTAINMENT", "task_name": "危化品堵漏", "priority": "critical", "sequence": 2},
-                {"task_code": "EVACUATION", "task_name": "人员疏散", "priority": "critical", "sequence": 3},
-                {"task_code": "MEDICAL_EMERGENCY", "task_name": "医疗急救", "priority": "high", "sequence": 4},
-            ],
-            "required_capabilities": [
-                {"capability_code": "HAZMAT_DETECTION", "capability_name": "危化品侦检"},
-                {"capability_code": "HAZMAT_CONTAINMENT", "capability_name": "危化品堵漏"},
-                {"capability_code": "EVACUATION_COORDINATION", "capability_name": "疏散协调"},
-                {"capability_code": "MEDICAL_TRIAGE", "capability_name": "医疗分诊"},
-                {"capability_code": "EMERGENCY_TREATMENT", "capability_name": "紧急救治"},
-            ],
-        })
-    
-    # 洪水/泥石流默认规则
-    elif disaster_type in ("flood", "landslide"):
-        default_rules.append({
-            "rule_id": "DEFAULT-FLOOD-001",
-            "rule_name": "默认洪水/泥石流救援规则",
-            "disaster_type": disaster_type,
-            "priority": "critical",
-            "weight": 0.9,
-            "trigger_conditions": [],
-            "triggered_tasks": [
-                {"task_code": "WATER_RESCUE", "task_name": "水上救援", "priority": "critical", "sequence": 1},
-                {"task_code": "SEARCH_RESCUE", "task_name": "搜索救援", "priority": "critical", "sequence": 2},
-                {"task_code": "EVACUATION", "task_name": "人员疏散", "priority": "critical", "sequence": 3},
-                {"task_code": "MEDICAL_EMERGENCY", "task_name": "医疗急救", "priority": "high", "sequence": 4},
-            ],
-            "required_capabilities": [
-                {"capability_code": "WATER_RESCUE", "capability_name": "水上救援"},
-                {"capability_code": "STRUCTURAL_RESCUE", "capability_name": "结构救援"},
-                {"capability_code": "LIFE_DETECTION", "capability_name": "生命探测"},
-                {"capability_code": "EVACUATION_COORDINATION", "capability_name": "疏散协调"},
-                {"capability_code": "MEDICAL_TRIAGE", "capability_name": "医疗分诊"},
-            ],
-        })
-    
-    # 未知灾害类型：通用救援规则
-    else:
-        default_rules.append({
-            "rule_id": "DEFAULT-GENERAL-001",
-            "rule_name": "通用应急救援规则",
-            "disaster_type": disaster_type,
-            "priority": "high",
-            "weight": 0.8,
-            "trigger_conditions": [],
-            "triggered_tasks": [
-                {"task_code": "SEARCH_RESCUE", "task_name": "搜索救援", "priority": "critical", "sequence": 1},
-                {"task_code": "MEDICAL_EMERGENCY", "task_name": "医疗急救", "priority": "high", "sequence": 2},
-            ],
-            "required_capabilities": [
-                {"capability_code": "STRUCTURAL_RESCUE", "capability_name": "结构救援"},
-                {"capability_code": "LIFE_DETECTION", "capability_name": "生命探测"},
-                {"capability_code": "MEDICAL_TRIAGE", "capability_name": "医疗分诊"},
-                {"capability_code": "EMERGENCY_TREATMENT", "capability_name": "紧急救治"},
-            ],
-        })
-    
-    return default_rules

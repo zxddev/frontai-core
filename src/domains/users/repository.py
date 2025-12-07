@@ -50,6 +50,13 @@ class UserRepository:
         )
         return result.scalar_one_or_none()
     
+    async def get_by_phone(self, phone: str) -> Optional[User]:
+        """根据手机号获取用户"""
+        result = await self.session.execute(
+            select(User).where(User.phone == phone)
+        )
+        return result.scalar_one_or_none()
+    
     async def exists_username(self, username: str) -> bool:
         """检查用户名是否存在"""
         result = await self.session.execute(

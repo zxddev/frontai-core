@@ -97,6 +97,10 @@ class AllocationSolution(TypedDict):
     total_rescue_capacity: int            # 总救援容量（所有队伍容量之和）
     capacity_coverage_rate: float         # 容量覆盖率（总容量/被困人数）
     capacity_warning: Optional[str]       # 容量不足警告（覆盖率<80%时生成）
+    gra_actions: List[Dict[str, Any]]     # GRA 仲裁动作列表（抢占/延迟/替代）
+    gra_switching_cost: Optional[float]   # 仲裁过程中计算的切换成本（0-1）
+    safety_classification: Dict[str, List[Dict[str, Any]]]  # 安全规则分类结果 reject/break_glass/warn
+    break_glass_rules: List[Dict[str, Any]]                 # 需 Break Glass 的规则详情
 
 
 class SchemeScore(TypedDict):
@@ -107,6 +111,54 @@ class SchemeScore(TypedDict):
     soft_rule_scores: Dict[str, float]    # 软规则各维度得分
     weighted_score: float                 # 加权总分
     rank: int                             # 排名
+    risk_level: str                       # 风险等级: normal/high_risk/critical
+    requires_authorization: bool          # 是否需要指挥官授权（违反硬规则时为True）
+    safety_classification: Dict[str, List[Dict[str, Any]]]  # 分类的规则结果
+    break_glass_rules: List[Dict[str, Any]]                 # Break Glass 规则详情
+
+
+# ============================================================================
+# 人在回路(HITL)相关类型定义
+# ============================================================================
+
+class HumanApprovalRequest(TypedDict):
+    """人工审批请求 - 在关键决策点暂停流程等待指挥官确认"""
+    approval_type: str                    # 审批类型: understanding/strategy/scheme
+    summary: str                          # 待审批内容摘要
+    details: Dict[str, Any]               # 详细信息（灾情/战略/方案的完整数据）
+    options: List[str]                    # 可选操作: approve/reject/modify
+    warnings: List[str]                   # 验证器生成的警告信息
+    confidence_score: Optional[float]     # 置信度评分（0-1）
+    timestamp: str                        # 请求时间 ISO格式
+
+
+class HumanApprovalResponse(TypedDict):
+    """人工审批响应 - 指挥官的决策结果"""
+    decision: str                         # 决策: approved/rejected/modified
+    modifications: Optional[Dict[str, Any]]  # 修改内容（decision=modified时使用）
+    reason: str                           # 决策理由
+    approver: str                         # 审批人标识
+    timestamp: str                        # 响应时间 ISO格式
+
+
+class RuleConflict(TypedDict):
+    """规则冲突信息 - 检测到的互斥规则"""
+    conflict_type: str                    # 冲突类型: action_conflict/resource_conflict
+    conflicting_tasks: List[str]          # 冲突的任务代码
+    conflicting_rules: List[str]          # 冲突的规则ID
+    description: str                      # 冲突描述
+    resolution_options: List[str]         # 可能的解决方案
+
+
+class DecisionProvenanceEntry(TypedDict):
+    """决策溯源条目 - 记录算法决策过程，用于生成忠实的解释"""
+    stage: str                            # 决策阶段: nsga_optimization/hard_rule/soft_rule
+    input_summary: str                    # 输入数据摘要
+    algorithm: str                        # 使用的算法: NSGA-III/rule_engine
+    parameters: Dict[str, Any]            # 算法参数
+    scores: Dict[str, float]              # 各维度得分
+    ranking_reason: str                   # 排名原因说明
+    timestamp: str                        # 时间戳 ISO格式
 
 
 # ============================================================================
@@ -304,11 +356,22 @@ class EmergencyAIState(TypedDict):
     pareto_solutions: List[AllocationSolution]              # Pareto最优解
     equipment_allocations: List[Dict[str, Any]]             # 装备分配（人装物：装）
     supply_requirements: List[Dict[str, Any]]               # 物资需求（人装物：物）
+    supply_shortages: List[Dict[str, Any]]                  # 物资缺口列表
+    capability_gap_report: Optional[Dict[str, Any]]         # 能力缺口报告（供指挥员协调外部资源）
+    capacity_warning: Optional[str]                         # 救援容量警告（覆盖率不足时生成）
     
     # ========== 阶段4: 方案优化 ==========
     scheme_scores: List[SchemeScore]                        # 方案评分
     recommended_scheme: Optional[AllocationSolution]        # 推荐方案
     scheme_explanation: str                                 # LLM生成的方案解释
+    decision_provenance: List[DecisionProvenanceEntry]      # 决策溯源日志（用于生成忠实解释）
+    
+    # ========== 人在回路(HITL) ==========
+    validation_warnings: List[str]                          # 验证器生成的警告
+    data_gap_warnings: List[Dict[str, Any]]                 # 数据缺口警告（缺少关键输入参数）
+    rule_conflicts: List[RuleConflict]                      # 检测到的规则冲突
+    pending_approval: Optional[HumanApprovalRequest]        # 当前待审批请求
+    approval_history: List[HumanApprovalResponse]           # 审批历史记录
     
     # ========== 最终输出 ==========
     final_output: Dict[str, Any]                            # 最终输出结果
@@ -385,9 +448,19 @@ def create_initial_state(
         pareto_solutions=[],
         equipment_allocations=[],
         supply_requirements=[],
+        supply_shortages=[],
+        capability_gap_report=None,
+        capacity_warning=None,
         scheme_scores=[],
         recommended_scheme=None,
         scheme_explanation="",
+        decision_provenance=[],
+        # HITL字段初始化
+        validation_warnings=[],
+        data_gap_warnings=[],
+        rule_conflicts=[],
+        pending_approval=None,
+        approval_history=[],
         final_output={},
         trace={
             "phases_executed": [],

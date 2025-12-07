@@ -737,110 +737,140 @@ async def car_start(
     3. 广播出发消息
     4. 更新状态
     """
+    from sqlalchemy import text
+    from uuid import uuid5, NAMESPACE_DNS
+    from src.core.coord_transform import wgs84_to_gcj02
+    from src.domains.routing.service import RoutePlanningService
+    from src.domains.routing.schemas import Point as RoutingPoint
+    from src.domains.movement_simulation.service import get_movement_manager
+    from src.domains.movement_simulation.schemas import MovementStartRequest, EntityType
+    
     try:
         # 自动获取活动想定的主事件ID
         event_id = await _resolve_event_id(db, eventId)
         if not event_id:
             return ApiResponse.error(40001, "没有启动的想定或主事件，请先激活想定")
         
-        logger.info(f"车队出发, eventId={event_id}")
-        dispatch_repo = PreparationDispatchRepository(db)
+        logger.info(f"[car_start] 车队出发, eventId={event_id}")
         
-        # 获取所有已调度的车辆ID
-        dispatches = await dispatch_repo.get_by_event(event_id)
-        vehicle_ids = [str(d["vehicle_id"]) for d in dispatches]
+        # 1. 获取所有可用车辆
+        vehicle_result = await db.execute(text("""
+            SELECT id, name, code FROM operational_v2.vehicles_v2 
+            WHERE status = 'available' 
+            LIMIT 10
+        """))
+        vehicles = vehicle_result.fetchall()
+        logger.info(f"[car_start] 获取到 {len(vehicles)} 辆可用车辆")
         
-        # 将车辆动员为救援队伍
-        if vehicle_ids:
-            from src.domains.frontend_api.unit.service import UnitService
-            from src.domains.frontend_api.unit.schemas import MobilizeRequest
-            
-            unit_service = UnitService(db)
-            mobilize_request = MobilizeRequest(
-                event_id=str(event_id),
-                vehicle_ids=vehicle_ids,
-            )
-            mobilize_result = await unit_service.mobilize_vehicles(mobilize_request)
-            logger.info(
-                f"车辆动员完成: {mobilize_result.mobilized_count} 辆车转换为救援队伍"
-            )
+        if not vehicles:
+            return ApiResponse.error(40002, "没有可用车辆")
         
-        # ========== 启动队伍移动仿真 ==========
+        # 2. 获取目的地（主事件位置）
+        event_result = await db.execute(text("""
+            SELECT ST_X(location::geometry) as lng, ST_Y(location::geometry) as lat
+            FROM operational_v2.events_v2 WHERE id = :id
+        """), {"id": str(event_id)})
+        event_row = event_result.fetchone()
+        
+        if not event_row or not event_row.lng or not event_row.lat:
+            return ApiResponse.error(40003, "无法获取事件位置")
+        
+        # 转换为GCJ02（高德API使用）
+        dest_gcj = wgs84_to_gcj02(event_row.lng, event_row.lat)
+        logger.info(f"[car_start] 目的地: {dest_gcj}")
+        
+        # 3. 路径规划
+        routing_service = RoutePlanningService(db)
+        origin_gcj = wgs84_to_gcj02(104.0668, 30.5728)  # 起点：成都市中心
+        origin = RoutingPoint(lon=origin_gcj[0], lat=origin_gcj[1])
+        destination = RoutingPoint(lon=dest_gcj[0], lat=dest_gcj[1])
+        
+        route: List[List[float]] = []
+        polyline: List[Dict[str, float]] = []
+        try:
+            route_result = await routing_service.plan_route(origin, destination)
+            if route_result.success and route_result.polyline:
+                route = [[p.lon, p.lat] for p in route_result.polyline]
+                polyline = [{"lon": p.lon, "lat": p.lat} for p in route_result.polyline]
+                logger.info(f"[car_start] 路径规划成功: {len(route)} 点, {route_result.total_distance_m/1000:.1f}km")
+        except Exception as route_err:
+            logger.error(f"[car_start] 路径规划失败: {route_err}")
+            return ApiResponse.error(40004, f"路径规划失败: {route_err}")
+        
+        if not route or len(route) < 2:
+            return ApiResponse.error(40005, "路径规划返回空路径")
+        
+        # 3.5 创建路径实体（让前端显示路径线）
+        from src.domains.map_entities.service import EntityService
+        from src.domains.map_entities.schemas import EntityCreate as MapEntityCreate, GeoJsonGeometry, EntityType as MapEntityType, EntitySource
+        
+        # 获取活动想定ID
+        scenario_result = await db.execute(text("""
+            SELECT id FROM operational_v2.scenarios_v2 WHERE status = 'active' LIMIT 1
+        """))
+        scenario_row = scenario_result.fetchone()
+        scenario_id = scenario_row.id if scenario_row else None
+        
+        try:
+            entity_service = EntityService(db)
+            route_entity = await entity_service.create(MapEntityCreate(
+                type=MapEntityType.planned_route,
+                layer_code="layer.path",
+                geometry=GeoJsonGeometry(
+                    type="LineString",
+                    coordinates=route,
+                ),
+                properties={
+                    "name": "车队出发路径",
+                    "type": "rescue",
+                    "isSelect": "1",
+                    "deviceType": "car",
+                    "routeType": "rescue",
+                    "distance_m": route_result.total_distance_m,
+                    "event_id": str(event_id),
+                },
+                source=EntitySource.system,
+                visible_on_map=True,
+                scenario_id=scenario_id,
+            ))
+            logger.info(f"[car_start] 路径实体已创建: entity_id={route_entity.id}")
+        except Exception as entity_err:
+            logger.warning(f"[car_start] 创建路径实体失败（不影响移动）: {entity_err}")
+        
+        # 4. 直接启动移动仿真（跳过动员服务）
+        manager = await get_movement_manager()
         dispatch_results: List[Dict[str, Any]] = []
-        if vehicle_ids and mobilize_result.teams:
-            from src.domains.movement_simulation.team_dispatch_service import TeamDispatchService
-            from src.domains.movement_simulation.schemas import TeamDispatchRequest
-            from src.core.coord_transform import wgs84_to_gcj02
-            from sqlalchemy import text
-            
-            # 获取目的地（主事件位置，WGS84）
-            event_result = await db.execute(text("""
-                SELECT ST_X(location::geometry) as lng, ST_Y(location::geometry) as lat
-                FROM operational_v2.events_v2 WHERE id = :id
-            """), {"id": str(event_id)})
-            event_row = event_result.fetchone()
-            
-            if event_row and event_row.lng and event_row.lat:
-                # 转换为GCJ02（高德API使用）
-                dest_gcj = wgs84_to_gcj02(event_row.lng, event_row.lat)
-                
-                # 获取活动想定ID
-                scenario_result = await db.execute(text("""
-                    SELECT id FROM operational_v2.scenarios_v2 WHERE status = 'active' LIMIT 1
-                """))
-                scenario_row = scenario_result.fetchone()
-                scenario_id = scenario_row.id if scenario_row else None
-                
-                # 路径规划服务（用于获取 polyline）
-                from src.domains.routing.service import RoutePlanningService
-                from src.domains.routing.schemas import Point as RoutingPoint
-                routing_service = RoutePlanningService(db)
-                
-                # 起点：成都市中心（GCJ02）
-                origin_gcj = wgs84_to_gcj02(104.0668, 30.5728)
-                origin = RoutingPoint(lon=origin_gcj[0], lat=origin_gcj[1])
-                destination = RoutingPoint(lon=dest_gcj[0], lat=dest_gcj[1])
-                
-                # 先规划路径获取 polyline（所有队伍共用同一条路径）
-                polyline: List[Dict[str, float]] = []
-                try:
-                    route_result = await routing_service.plan_route(origin, destination)
-                    if route_result.success and route_result.polyline:
-                        polyline = [{"lon": p.lon, "lat": p.lat} for p in route_result.polyline]
-                        logger.info(f"[car_start] 路径规划成功: points={len(polyline)}, distance={route_result.total_distance_m/1000:.1f}km")
-                except Exception as route_err:
-                    logger.error(f"[car_start] 路径规划失败: {route_err}", exc_info=True)
-                
-                dispatch_service = TeamDispatchService(db)
-                
-                for team in mobilize_result.teams:
-                    try:
-                        response = await dispatch_service.dispatch_team(
-                            team_id=UUID(team.team_id),
-                            request=TeamDispatchRequest(
-                                destination=[dest_gcj[0], dest_gcj[1]],
-                                scenario_id=scenario_id,
-                                speed_mps=15.0,
-                            )
-                        )
-                        dispatch_results.append({
-                            "team_id": team.team_id,
-                            "team_name": team.name,
-                            "session_id": response.session_id,
-                            "distance_m": response.route_info.distance_m,
-                            "estimated_duration_s": response.estimated_duration_s,
-                            "polyline": polyline,
-                        })
-                        logger.info(f"[car_start] 队伍移动启动: {team.name}, session={response.session_id}")
-                    except Exception as e:
-                        logger.error(f"[car_start] 队伍移动启动失败: {team.name}, error={e}", exc_info=True)
-                
-                logger.info(f"[car_start] 移动仿真完成: 成功={len(dispatch_results)}/{len(mobilize_result.teams)}")
-            else:
-                logger.warning(f"[car_start] 无法获取事件位置，跳过移动仿真: event_id={event_id}")
         
-        # 标记已出发到数据库
-        await dispatch_repo.mark_departed(event_id)
+        for i, vehicle in enumerate(vehicles):
+            try:
+                # 为每辆车生成唯一实体ID
+                entity_id = uuid5(NAMESPACE_DNS, f"vehicle-{vehicle.id}")
+                
+                # 创建移动请求
+                request = MovementStartRequest(
+                    entity_id=entity_id,
+                    entity_type=EntityType.VEHICLE,
+                    resource_id=vehicle.id,
+                    route=route,
+                    speed_mps=15.0 + i * 0.5,  # 稍微错开速度，避免重叠
+                )
+                
+                response = await manager.start_movement(request, db)
+                
+                dispatch_results.append({
+                    "vehicle_id": str(vehicle.id),
+                    "vehicle_name": vehicle.name,
+                    "entity_id": str(entity_id),
+                    "session_id": response.session_id,
+                    "distance_m": response.total_distance_m,
+                    "estimated_duration_s": response.estimated_duration_s,
+                })
+                logger.info(f"[car_start] 车辆移动启动: {vehicle.name}, session={response.session_id}")
+                
+            except Exception as e:
+                logger.error(f"[car_start] 车辆移动启动失败: {vehicle.name}, error={e}", exc_info=True)
+        
+        logger.info(f"[car_start] 移动仿真完成: 成功={len(dispatch_results)}/{len(vehicles)}")
         
         # 广播出发消息
         await stomp_broker.broadcast_event(
@@ -849,17 +879,17 @@ async def car_start(
                 "eventId": str(event_id),
                 "message": "车队已出发",
                 "departedAt": datetime.now().isoformat(),
-                "mobilizedTeams": mobilize_result.mobilized_count if vehicle_ids else 0,
+                "vehicleCount": len(dispatch_results),
             },
             scenario_id=None,
         )
         
         return ApiResponse.success({
-            "mobilizedTeams": mobilize_result.mobilized_count if vehicle_ids else 0,
-            "teams": [t.model_dump() for t in mobilize_result.teams] if vehicle_ids else [],
+            "vehicleCount": len(dispatch_results),
             "movementStarted": len(dispatch_results),
             "dispatchResults": dispatch_results,
-        }, "车队已出发，已转换为救援队伍")
+            "polyline": polyline,
+        }, f"车队已出发，{len(dispatch_results)} 辆车开始移动")
         
     except Exception as e:
         logger.exception(f"出发指令失败: {e}")

@@ -194,53 +194,63 @@ class DatabaseRouteEngine:
         """
         logger.info(
             f"[路径规划] 开始 vehicle={vehicle.vehicle_code} "
-            f"start=({start.lon:.4f},{start.lat:.4f}) end=({end.lon:.4f},{end.lat:.4f})"
+            f"start=({start.lon:.4f},{start.lat:.4f}) end=({end.lon:.4f},{end.lat:.4f}) "
+            f"搜索半径={search_radius_km}km"
         )
         start_time = time.perf_counter()
+        phase_times = {}  # 记录各阶段耗时
         
         # 计算搜索范围（起终点外扩）
         center_lon = (start.lon + end.lon) / 2
         center_lat = (start.lat + end.lat) / 2
         
-        # 加载路网
+        # 阶段1: 加载路网
+        phase_start = time.perf_counter()
         edges = await self._load_road_network(
             center_lon=center_lon,
             center_lat=center_lat,
             radius_m=search_radius_km * 1000,
         )
-        logger.info(f"[路径规划] 加载路网: {len(edges)}条边")
+        phase_times["load_network"] = (time.perf_counter() - phase_start) * 1000
+        logger.info(f"[路径规划] 阶段1-加载路网: {len(edges)}条边, 耗时{phase_times['load_network']:.0f}ms")
         
         if not edges:
             raise InfeasiblePathError(f"搜索范围{search_radius_km}km内无路网数据")
         
-        # 加载灾害区域
+        # 阶段2: 加载灾害区域
         disaster_areas: List[DisasterArea] = []
         blocked_edge_ids: Set[UUID] = set()
         if scenario_id:
+            phase_start = time.perf_counter()
             disaster_areas = await self._load_disaster_areas(scenario_id)
             if disaster_areas:
                 blocked_edge_ids = await self._get_blocked_edges(
                     scenario_id=scenario_id,
                     vehicle_type=vehicle.vehicle_code,
                 )
-                logger.info(
-                    f"[路径规划] 灾害区域: {len(disaster_areas)}个, "
-                    f"封锁边: {len(blocked_edge_ids)}条"
-                )
+            phase_times["load_disaster"] = (time.perf_counter() - phase_start) * 1000
+            logger.info(
+                f"[路径规划] 阶段2-灾害区域: {len(disaster_areas)}个, "
+                f"封锁边: {len(blocked_edge_ids)}条, 耗时{phase_times['load_disaster']:.0f}ms"
+            )
         
-        # 构建图并过滤
+        # 阶段3: 构建图并过滤
+        phase_start = time.perf_counter()
         graph, node_coords = self._build_graph(
             edges=edges,
             vehicle=vehicle,
             blocked_edge_ids=blocked_edge_ids,
         )
+        phase_times["build_graph"] = (time.perf_counter() - phase_start) * 1000
         
         if graph.number_of_edges() == 0:
             raise InfeasiblePathError("所有路段均不可通行（车辆能力不足或灾害封锁）")
         
-        # 找到最近的起终点节点
+        # 阶段4: 找到最近的起终点节点
+        phase_start = time.perf_counter()
         start_node = self._find_nearest_node(node_coords, start)
         end_node = self._find_nearest_node(node_coords, end)
+        phase_times["find_nodes"] = (time.perf_counter() - phase_start) * 1000
         
         if start_node is None:
             raise InfeasiblePathError(f"起点({start.lon:.4f},{start.lat:.4f})附近无可达路网节点")
@@ -248,12 +258,12 @@ class DatabaseRouteEngine:
             raise InfeasiblePathError(f"终点({end.lon:.4f},{end.lat:.4f})附近无可达路网节点")
         
         logger.info(
-            f"[路径规划] 图构建完成: {graph.number_of_nodes()}节点, "
-            f"{graph.number_of_edges()}边, 起点节点={start_node}, 终点节点={end_node}"
+            f"[路径规划] 阶段3+4-图构建: {graph.number_of_nodes()}节点, {graph.number_of_edges()}边, "
+            f"构建耗时{phase_times['build_graph']:.0f}ms, 节点查找耗时{phase_times['find_nodes']:.0f}ms"
         )
         
-        # A*搜索
-        search_start = time.perf_counter()
+        # 阶段5: A*搜索
+        phase_start = time.perf_counter()
         try:
             path_nodes = nx.astar_path(
                 graph,
@@ -268,10 +278,11 @@ class DatabaseRouteEngine:
         except nx.NetworkXNoPath:
             raise InfeasiblePathError("无法找到从起点到终点的可行路径")
         
-        search_time = time.perf_counter() - search_start
-        logger.info(f"[路径规划] A*搜索完成: {len(path_nodes)}个节点, 耗时{search_time*1000:.1f}ms")
+        phase_times["astar_search"] = (time.perf_counter() - phase_start) * 1000
+        logger.info(f"[路径规划] 阶段5-A*搜索: {len(path_nodes)}个节点, 耗时{phase_times['astar_search']:.0f}ms")
         
-        # 构建结果
+        # 阶段6: 构建结果
+        phase_start = time.perf_counter()
         result = self._build_result(
             path_nodes=path_nodes,
             node_coords=node_coords,
@@ -279,11 +290,13 @@ class DatabaseRouteEngine:
             start=start,
             end=end,
         )
+        phase_times["build_result"] = (time.perf_counter() - phase_start) * 1000
         
         total_time = time.perf_counter() - start_time
         logger.info(
-            f"[路径规划] 完成: 距离{result.distance_m/1000:.2f}km, "
-            f"时间{result.duration_seconds/60:.1f}分钟, 总耗时{total_time*1000:.1f}ms"
+            f"[路径规划] 完成: 距离{result.distance_m/1000:.2f}km, 时间{result.duration_seconds/60:.1f}分钟, "
+            f"总耗时{total_time*1000:.0f}ms (路网{phase_times['load_network']:.0f}ms + "
+            f"图构建{phase_times['build_graph']:.0f}ms + A*{phase_times['astar_search']:.0f}ms)"
         )
         
         return result

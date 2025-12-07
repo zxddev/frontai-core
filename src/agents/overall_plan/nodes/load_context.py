@@ -204,16 +204,25 @@ async def _load_scenario_data(session: AsyncSession, scenario_id: str) -> dict[s
 
 
 async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> list[dict[str, Any]]:
-    """从events_v2加载所有事件（暂不按想定过滤）
+    """从events_v2按scenario_id加载事件
+    
+    必须按scenario_id过滤，否则会混入其他想定的灾情数据导致救援计算错误
 
     Args:
         session: 数据库会话
-        scenario_id: 想定ID（暂未使用）
+        scenario_id: 想定ID
 
     Returns:
-        事件列表
+        该想定下的事件列表
+        
+    Raises:
+        ContextLoadError: scenario_id无效时抛出
     """
-    # 暂时加载所有事件，不按scenario_id过滤
+    try:
+        scenario_uuid = UUID(scenario_id)
+    except ValueError:
+        raise ContextLoadError(f"Invalid scenario_id format: {scenario_id}")
+
     result = await session.execute(
         text("""
             SELECT id, event_code, event_type, source_type, source_detail,
@@ -221,14 +230,26 @@ async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> 
                    estimated_victims, casualty_count, reported_at,
                    ST_X(location::geometry) as lon, ST_Y(location::geometry) as lat
             FROM operational_v2.events_v2
+            WHERE scenario_id = :scenario_id
             ORDER BY reported_at, event_code
-        """)
+        """),
+        {"scenario_id": scenario_uuid}
     )
     rows = result.fetchall()
 
     events = []
+    missing_source_detail_count = 0
+    
     for row in rows:
         source_detail = row[4] or {}
+        
+        # 检查source_detail是否缺少关键灾情字段
+        if not source_detail or not any(
+            key in source_detail 
+            for key in ["injuries", "missing", "buildings_collapsed", "buildings_damaged"]
+        ):
+            missing_source_detail_count += 1
+        
         events.append({
             "id": str(row[0]),
             "event_code": row[1],
@@ -243,35 +264,53 @@ async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> 
             "casualties": row[11] or 0,
             "reported_at": row[12].isoformat() if row[12] else None,
             "location": {"longitude": row[13], "latitude": row[14]} if row[13] else None,
-            # 从source_detail扩展字段
+            # 从source_detail扩展字段（数据库主字段不含injuries/missing/buildings等）
             "injuries": source_detail.get("injuries", 0),
             "missing": source_detail.get("missing", 0),
             "buildings_collapsed": source_detail.get("buildings_collapsed", 0),
             "buildings_damaged": source_detail.get("buildings_damaged", 0),
         })
 
-    logger.info(f"Loaded {len(events)} events for scenario {scenario_id}")
+    # 记录数据完整性警告
+    if missing_source_detail_count > 0:
+        logger.warning(
+            f"[数据完整性] {missing_source_detail_count}/{len(events)}个事件缺少source_detail灾情字段"
+            f"(injuries/missing/buildings_*)，可能影响救援资源计算准确性"
+        )
+
+    logger.info(f"[load_context] 加载{len(events)}个事件 scenario_id={scenario_id}")
     return events
 
 
 async def _load_disaster_situations(session: AsyncSession, scenario_id: str) -> list[dict[str, Any]]:
-    """从disaster_situations加载灾情态势（暂不按想定过滤）
+    """从disaster_situations按scenario_id加载灾情态势
+    
+    必须按scenario_id过滤，否则会混入其他想定的灾情范围导致救援区域判断错误
 
     Args:
         session: 数据库会话
-        scenario_id: 想定ID（暂未使用）
+        scenario_id: 想定ID
 
     Returns:
-        灾情态势列表
+        该想定下的灾情态势列表
+        
+    Raises:
+        ContextLoadError: scenario_id无效时抛出
     """
-    # 暂时加载所有灾情态势，不按scenario_id过滤
+    try:
+        scenario_uuid = UUID(scenario_id)
+    except ValueError:
+        raise ContextLoadError(f"Invalid scenario_id format: {scenario_id}")
+
     result = await session.execute(
         text("""
             SELECT id, disaster_type, disaster_name, severity_level,
                    spread_direction, spread_speed_mps, buffer_distance_m,
                    ST_X(center_point::geometry) as lon, ST_Y(center_point::geometry) as lat
             FROM operational_v2.disaster_situations
-        """)
+            WHERE scenario_id = :scenario_id
+        """),
+        {"scenario_id": scenario_uuid}
     )
     rows = result.fetchall()
 
@@ -288,7 +327,7 @@ async def _load_disaster_situations(session: AsyncSession, scenario_id: str) -> 
             "center_point": {"longitude": row[7], "latitude": row[8]} if row[7] else None,
         })
 
-    logger.info(f"Loaded {len(situations)} disaster situations for scenario {scenario_id}")
+    logger.info(f"[load_context] 加载{len(situations)}个灾情态势 scenario_id={scenario_id}")
     return situations
 
 

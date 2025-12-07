@@ -305,24 +305,24 @@ class IntegratedResourceSchedulingCore:
             supply_types=supply_types,
         )
 
-    # Capability枚举到数据库字段的映射
+    # Capability枚举到数据库字段的映射（对应 capability_codes_v2 表）
     _CAPABILITY_TO_CODE: Dict[Capability, str] = {
-        Capability.LIFE_DETECTION: "LIFE_DETECTION",
-        Capability.HEAVY_RESCUE: "STRUCTURAL_RESCUE",
-        Capability.LIGHT_RESCUE: "STRUCTURAL_RESCUE",
-        Capability.SWIFT_WATER: "WATER_RESCUE",
-        Capability.DIVE_RESCUE: "WATER_RESCUE",
-        Capability.ROPE_RESCUE: "STRUCTURAL_RESCUE",
-        Capability.TRENCH_RESCUE: "STRUCTURAL_RESCUE",
+        Capability.LIFE_DETECTION: "SEARCH_LIFE_DETECT",
+        Capability.HEAVY_RESCUE: "RESCUE_STRUCTURAL",
+        Capability.LIGHT_RESCUE: "RESCUE_STRUCTURAL",
+        Capability.SWIFT_WATER: "RESCUE_WATER_SWIFT",
+        Capability.DIVE_RESCUE: "SEARCH_SONAR",
+        Capability.ROPE_RESCUE: "RESCUE_ROPE",
+        Capability.TRENCH_RESCUE: "RESCUE_TRENCH",
         Capability.TRAUMA_CARE: "MEDICAL_TRIAGE",
-        Capability.MASS_CASUALTY: "EMERGENCY_TREATMENT",
-        Capability.MEDICAL_EVAC: "EMERGENCY_TREATMENT",
-        Capability.SHELTER_MANAGEMENT: "EVACUATION_COORDINATION",
-        Capability.WASH: "LOGISTICS",
-        Capability.FOOD_DISTRIBUTION: "LOGISTICS",
-        Capability.HAZMAT_RESPONSE: "HAZMAT_RESPONSE",
-        Capability.DECON: "HAZMAT_RESPONSE",
-        Capability.FIRE_SUPPRESSION: "FIRE_SUPPRESSION",
+        Capability.MASS_CASUALTY: "MEDICAL_FIRST_AID",
+        Capability.MEDICAL_EVAC: "MEDICAL_TRANSPORT",
+        Capability.SHELTER_MANAGEMENT: "LOG_SHELTER",
+        Capability.WASH: "LOG_SUPPLY",
+        Capability.FOOD_DISTRIBUTION: "LOG_SUPPLY",
+        Capability.HAZMAT_RESPONSE: "HAZMAT_DETECT",
+        Capability.DECON: "HAZMAT_DECON",
+        Capability.FIRE_SUPPRESSION: "FIRE_SUPPRESS",
     }
 
     def _infer_capability_requirements(
@@ -344,10 +344,10 @@ class IntegratedResourceSchedulingCore:
         reqs = get_phase_requirements(dt, ResponsePhase.IMMEDIATE)
         
         if not reqs:
-            # fallback默认值
+            # fallback默认值（使用 capability_codes_v2 正确代码）
             return [
                 CapabilityRequirement(
-                    capability_code="STRUCTURAL_RESCUE",
+                    capability_code="RESCUE_STRUCTURAL",
                     min_count=2,
                     priority=PriorityLevel.CRITICAL,
                 ),

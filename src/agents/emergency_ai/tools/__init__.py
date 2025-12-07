@@ -1,7 +1,7 @@
 """
 应急AI工具集
 
-包含LLM、RAG、KG三类工具。
+包含LLM、RAG、KG、路径规划四类工具。
 """
 from __future__ import annotations
 
@@ -17,6 +17,13 @@ from .kg_tools import (
     query_trr_rules,
     query_capability_mapping,
 )
+from .routing_tools import (
+    calculate_team_eta_with_routing,
+    batch_calculate_team_etas,
+    get_disaster_avoid_areas,
+    get_danger_area_avoid_areas,
+    ETAResult,
+)
 
 __all__ = [
     # LLM工具
@@ -28,4 +35,10 @@ __all__ = [
     # KG工具
     "query_trr_rules",
     "query_capability_mapping",
+    # 路径规划工具
+    "calculate_team_eta_with_routing",
+    "batch_calculate_team_etas",
+    "get_disaster_avoid_areas",
+    "get_danger_area_avoid_areas",
+    "ETAResult",
 ]

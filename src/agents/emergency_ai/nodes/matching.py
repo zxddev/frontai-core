@@ -36,6 +36,10 @@ from src.domains.resource_scheduling import (
 from src.domains.resource_scheduling.sphere_demand_calculator import SphereDemandCalculator
 from src.domains.supplies.inventory_service import SupplyInventoryService
 from src.infra.config.algorithm_config_service import AlgorithmConfigService
+from src.planning.algorithms.arbitration import ConflictResolver, GRAConfigLoader
+from src.planning.algorithms.arbitration.conflict_resolver import (
+    Conflict, ConflictType, ResourceState, GRA_PRIORITY_MAP, GRA_DEFAULT_PRIORITY
+)
 from src.domains.disaster import (
     ResponsePhase,
     ClimateType,
@@ -44,10 +48,20 @@ from src.domains.disaster import (
 )
 from src.domains.disaster.casualty_estimator import CasualtyEstimate
 from ..state import EmergencyAIState, ResourceCandidate, AllocationSolution
+from ..tools.routing_tools import (
+    batch_calculate_team_etas,
+    get_disaster_avoid_areas,
+    get_danger_area_avoid_areas,
+)
 from src.planning.algorithms.optimization.pymoo_optimizer import PymooOptimizer
 from src.planning.algorithms.base import AlgorithmStatus
 
 logger = logging.getLogger(__name__)
+
+# 是否启用真实路径规划（可通过环境变量或配置控制）
+ENABLE_REAL_ROUTING = True
+# 路径规划最大并发数
+ROUTING_MAX_CONCURRENT = 10
 
 
 # ============================================================================
@@ -174,6 +188,268 @@ DISASTER_SCALE_LIMITS: Dict[str, int] = {
     "large": 200,     # 大型灾害（城市级）
     "catastrophic": 500,  # 特大灾害（地震级）
 }
+
+
+# ============================================================================
+# 能力缺口协调建议（指挥员应急协调用）
+# 能力代码严格对应 capability_codes_v2 数据库表
+# ============================================================================
+
+CAPABILITY_COORDINATION_ADVICE: Dict[str, Dict[str, str]] = {
+    # 搜索类 (search)
+    "SEARCH_LIFE_DETECT": {
+        "name": "生命探测",
+        "agency": "消防救援支队特勤站、USAR城市搜救队",
+        "hotline": "119",
+    },
+    "SEARCH_THERMAL": {
+        "name": "热成像搜索",
+        "agency": "消防救援支队特勤站",
+        "hotline": "119",
+    },
+    "SEARCH_CANINE": {
+        "name": "搜救犬搜索",
+        "agency": "消防救援支队搜救犬分队、公安警犬基地",
+        "hotline": "119/110",
+    },
+    "SEARCH_SONAR": {
+        "name": "声纳探测",
+        "agency": "海事局、专业潜水救援队",
+        "hotline": "12395（海上搜救）",
+    },
+    # 救援类 (rescue)
+    "RESCUE_STRUCTURAL": {
+        "name": "建筑物救援",
+        "agency": "消防救援支队、USAR城市搜救队",
+        "hotline": "119",
+    },
+    "RESCUE_CONFINED": {
+        "name": "狭小空间救援",
+        "agency": "消防特勤站、矿山救援队",
+        "hotline": "119/12350",
+    },
+    "RESCUE_TRENCH": {
+        "name": "沟渠救援",
+        "agency": "消防特勤站、市政工程应急队",
+        "hotline": "119",
+    },
+    "RESCUE_ROPE": {
+        "name": "绳索救援",
+        "agency": "消防特勤站、山地救援队",
+        "hotline": "119",
+    },
+    "RESCUE_WATER_SWIFT": {
+        "name": "急流水域救援",
+        "agency": "水上救援队、消防特勤站",
+        "hotline": "119",
+    },
+    "RESCUE_WATER_FLOOD": {
+        "name": "洪水救援",
+        "agency": "消防救援支队、武警部队、民兵预备役",
+        "hotline": "119/市防汛指挥部",
+    },
+    "RESCUE_VEHICLE": {
+        "name": "车辆救援",
+        "agency": "消防救援支队、交通事故救援队",
+        "hotline": "119/122",
+    },
+    # 医疗类 (medical)
+    "MEDICAL_TRIAGE": {
+        "name": "伤员分诊",
+        "agency": "市级医院急救中心、红十字会急救队",
+        "hotline": "120",
+    },
+    "MEDICAL_FIRST_AID": {
+        "name": "现场急救",
+        "agency": "市级医院急救中心、红十字会急救队",
+        "hotline": "120/999",
+    },
+    "MEDICAL_TRAUMA": {
+        "name": "创伤处理",
+        "agency": "市级三甲医院创伤中心",
+        "hotline": "120",
+    },
+    "MEDICAL_CPR": {
+        "name": "心肺复苏",
+        "agency": "急救中心、红十字会",
+        "hotline": "120",
+    },
+    "MEDICAL_TRANSPORT": {
+        "name": "伤员转运",
+        "agency": "急救中心、医院救护车队",
+        "hotline": "120",
+    },
+    # 危化品类 (hazmat)
+    "HAZMAT_DETECT": {
+        "name": "危化品检测",
+        "agency": "环境监测站、危化品检测机构",
+        "hotline": "12369",
+    },
+    "HAZMAT_CONTAIN": {
+        "name": "泄漏控制",
+        "agency": "危化品应急救援中心、消防特勤站",
+        "hotline": "119/12119",
+    },
+    "HAZMAT_DECON": {
+        "name": "洗消",
+        "agency": "环保部门、专业洗消队伍、疾控中心",
+        "hotline": "12369（环保投诉热线）",
+    },
+    "HAZMAT_FIRE": {
+        "name": "化学火灾扑救",
+        "agency": "消防特勤站、危化品专职消防队",
+        "hotline": "119",
+    },
+    # 消防类 (fire)
+    "FIRE_SUPPRESS": {
+        "name": "火灾扑救",
+        "agency": "消防救援支队、企业专职消防队",
+        "hotline": "119",
+    },
+    "FIRE_FOREST": {
+        "name": "森林灭火",
+        "agency": "森林消防队、航空护林站",
+        "hotline": "119/12119",
+    },
+    "FIRE_HIGH_RISE": {
+        "name": "高层灭火",
+        "agency": "消防救援支队、云梯车中队",
+        "hotline": "119",
+    },
+    # 工程类 (engineering)
+    "ENG_SHORING": {
+        "name": "支撑加固",
+        "agency": "建工集团、消防救援支队",
+        "hotline": "119/市应急局调度热线",
+    },
+    "ENG_DEMOLITION": {
+        "name": "破拆清障",
+        "agency": "消防救援支队、武警交通部队",
+        "hotline": "119",
+    },
+    "ENG_LIFTING": {
+        "name": "重物起吊",
+        "agency": "建工集团、大型吊装公司",
+        "hotline": "市应急局调度热线",
+    },
+    # 保障类 (logistics)
+    "LOG_POWER": {
+        "name": "电力保障",
+        "agency": "供电公司应急抢修队",
+        "hotline": "95598",
+    },
+    "LOG_LIGHTING": {
+        "name": "照明保障",
+        "agency": "消防救援支队、供电公司",
+        "hotline": "119/95598",
+    },
+    "LOG_COMM": {
+        "name": "通信保障",
+        "agency": "无线电管理局、通信管理局",
+        "hotline": "市应急通信保障热线",
+    },
+    "LOG_SHELTER": {
+        "name": "安置保障",
+        "agency": "民政局、红十字会",
+        "hotline": "12345/市民政局",
+    },
+    "LOG_SUPPLY": {
+        "name": "物资保障",
+        "agency": "应急物资储备中心、红十字会",
+        "hotline": "市应急局物资调度",
+    },
+}
+
+
+def _get_capability_name(cap_code: str) -> str:
+    """获取能力代码对应的中文名称"""
+    if cap_code in CAPABILITY_COORDINATION_ADVICE:
+        return CAPABILITY_COORDINATION_ADVICE[cap_code]["name"]
+    return cap_code
+
+
+def _generate_coordination_advice(missing_caps: set) -> str:
+    """
+    根据缺失能力生成协调建议
+    
+    Args:
+        missing_caps: 缺失的能力代码集合
+        
+    Returns:
+        格式化的协调建议文本
+    """
+    advices = []
+    for cap_code in missing_caps:
+        info = CAPABILITY_COORDINATION_ADVICE.get(cap_code)
+        if info:
+            advices.append(
+                f"  【{info['name']}】\n"
+                f"    ↳ 建议联络: {info['agency']}\n"
+                f"    ↳ 参考热线: {info['hotline']}"
+            )
+        else:
+            advices.append(
+                f"  【{cap_code}】\n"
+                f"    ↳ 建议联络上级指挥部协调外部资源"
+            )
+    return "\n".join(advices)
+
+
+def _build_capability_gap_report(
+    missing_caps: set,
+    search_distance_km: float,
+    event_location: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    构建结构化的能力缺口报告
+    
+    Args:
+        missing_caps: 缺失的能力代码集合
+        search_distance_km: 搜索半径（km）
+        event_location: 事件位置描述
+        
+    Returns:
+        能力缺口报告字典
+    """
+    if not missing_caps:
+        return {
+            "has_gap": False,
+            "message": "所有需求能力均有队伍可覆盖",
+        }
+    
+    severity = "critical" if len(missing_caps) > 2 else "warning"
+    
+    cap_details = []
+    for cap_code in missing_caps:
+        info = CAPABILITY_COORDINATION_ADVICE.get(cap_code, {})
+        cap_details.append({
+            "capability_code": cap_code,
+            "capability_name": info.get("name", cap_code),
+            "suggested_agency": info.get("agency", "上级指挥部"),
+            "hotline": info.get("hotline", "N/A"),
+        })
+    
+    coordination_advice = _generate_coordination_advice(missing_caps)
+    
+    # 构建可读的告警消息
+    cap_names = [_get_capability_name(c) for c in missing_caps]
+    message = (
+        f"⚠️ 【能力缺口告警】系统内 {search_distance_km}km 范围内缺少以下救援能力，"
+        f"请指挥员紧急协调外部资源：\n\n"
+        f"缺失能力：{', '.join(cap_names)}\n\n"
+        f"协调建议：\n{coordination_advice}"
+    )
+    
+    return {
+        "has_gap": True,
+        "severity": severity,  # "warning" | "critical"
+        "missing_capabilities": list(missing_caps),
+        "capability_details": cap_details,
+        "search_radius_km": search_distance_km,
+        "event_location": event_location,
+        "coordination_advice": coordination_advice,
+        "message": message,
+    }
 
 
 async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
@@ -303,12 +579,21 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
         trace["initial_distance_km"] = initial_max_distance
         trace["final_distance_km"] = search_distance
 
-    # 检查最终能力覆盖
+    # 检查最终能力覆盖，并生成能力缺口报告
+    event_loc_desc = state.get("structured_input", {}).get("location", {}).get("address")
+    capability_gap_report = _build_capability_gap_report(
+        missing_caps=missing_caps,
+        search_distance_km=search_distance,
+        event_location=event_loc_desc,
+    )
+    
     if missing_caps:
         missing_msg = f"以下能力在{search_distance}km范围内无队伍具备: {missing_caps}"
         logger.warning(f"[资源匹配] {missing_msg}")
         errors.append(missing_msg)
         trace["missing_capabilities"] = list(missing_caps)
+        # 严重告警日志（指挥员必须看到）
+        logger.warning(f"[能力缺口告警] {capability_gap_report['message']}")
 
     # 获取道路损坏信息用于动态调整ETA
     parsed_disaster_for_road = state.get("parsed_disaster", {})
@@ -336,6 +621,75 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
         damaged_road_factor=damaged_road_factor,
     )
 
+    # ========================================================================
+    # 真实路径规划：更新 ETA（考虑避障）
+    # ========================================================================
+    if ENABLE_REAL_ROUTING and candidates:
+        routing_start = time.time()
+        try:
+            # 先查询避让区域（使用独立会话）
+            avoid_areas = []
+            scenario_uuid = None
+            scenario_id_raw = state.get("scenario_id")
+            
+            async with AsyncSessionLocal() as area_db:
+                if scenario_id_raw:
+                    try:
+                        scenario_uuid = UUID(str(scenario_id_raw))
+                        disaster_areas = await get_disaster_avoid_areas(area_db, scenario_uuid)
+                        avoid_areas.extend(disaster_areas)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # 获取前端绘制的危险区域
+                danger_areas = await get_danger_area_avoid_areas(area_db)
+                avoid_areas.extend(danger_areas)
+            
+            if avoid_areas:
+                logger.info(f"[路径规划] 加载 {len(avoid_areas)} 个避让区域")
+            
+            # 批量计算真实 ETA（每个子任务会创建独立的数据库会话）
+            eta_results = await batch_calculate_team_etas(
+                teams=teams,
+                event_lat=event_lat,
+                event_lng=event_lng,
+                scenario_id=scenario_uuid,
+                avoid_areas=avoid_areas if avoid_areas else None,
+                max_concurrent=ROUTING_MAX_CONCURRENT,
+            )
+            # 更新候选列表的 ETA
+            routing_success = 0
+            routing_fallback = 0
+            for candidate in candidates:
+                team_id = candidate.get("resource_id")
+                if team_id and team_id in eta_results:
+                    eta_result = eta_results[team_id]
+                    candidate["response_time_minutes"] = eta_result.response_time_minutes
+                    candidate["travel_time_minutes"] = eta_result.travel_time_minutes
+                    candidate["eta_minutes"] = eta_result.eta_minutes
+                    candidate["route_distance_km"] = eta_result.route_distance_km
+                    candidate["route_source"] = eta_result.route_source
+                    if eta_result.route_source != "estimate":
+                        routing_success += 1
+                    else:
+                        routing_fallback += 1
+            
+            routing_elapsed = int((time.time() - routing_start) * 1000)
+            logger.info(
+                f"[路径规划] 批量 ETA 更新完成: 成功={routing_success}, "
+                f"估算={routing_fallback}, 避让区域={len(avoid_areas)}, 耗时={routing_elapsed}ms"
+            )
+            trace["real_routing"] = {
+                "enabled": True,
+                "success_count": routing_success,
+                "fallback_count": routing_fallback,
+                "avoid_areas_count": len(avoid_areas),
+                "elapsed_ms": routing_elapsed,
+            }
+        except Exception as e:
+            logger.warning(f"[路径规划] 批量 ETA 计算失败，保留估算值: {e}")
+            trace["real_routing"] = {"enabled": True, "error": str(e)}
+
     # 按匹配分数排序
     candidates.sort(key=lambda x: x["match_score"], reverse=True)
 
@@ -351,10 +705,7 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
     disaster_type = parsed_disaster.get("disaster_type", "earthquake") if parsed_disaster else "earthquake"
     estimated_trapped = parsed_disaster.get("estimated_trapped", 0) if parsed_disaster else 0
     affected_population = parsed_disaster.get("affected_population", 0) if parsed_disaster else 0
-    
-    # 如果没有受影响人口数据，基于被困人数估算
-    if affected_population == 0 and estimated_trapped > 0:
-        affected_population = estimated_trapped * 5  # 假设受灾人口是被困人数的5倍
+    # 不再使用猜测逻辑（被困人数*5），只使用用户提供或物理模型计算的数据
     
     try:
         async with AsyncSessionLocal() as db:
@@ -468,6 +819,8 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
                     "source": "SphereDemandCalculator",
                     "elapsed_ms": supply_result.elapsed_ms,
                 }
+            else:
+                logger.info("[资源匹配] 跳过伤亡估算和物资需求计算：缺少受灾人口数据")
             
             # 3. 查询前线可用库存并计算缺口
             scenario_id_raw = state.get("scenario_id")
@@ -515,11 +868,9 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
                         shortage["transfer_suggestion"] = (
                             f"前线缺口{shortage['shortage']}，建议从后方仓库调拨"
                         )
-                
     except Exception as e:
-        logger.error(f"[资源匹配] 整合调度失败: {e}")
-        errors.append(f"整合调度失败: {e}")
-        supply_shortages = []
+        logger.error(f"[资源匹配] 综合调度异常: {e}")
+        errors.append(f"综合调度异常: {e}")
 
     # 更新追踪信息
     trace["phases_executed"] = trace.get("phases_executed", []) + ["match_resources"]
@@ -542,6 +893,7 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
         "equipment_allocations": equipment_allocations,
         "supply_requirements": supply_requirements,
         "supply_shortages": supply_shortages,
+        "capability_gap_report": capability_gap_report,  # 能力缺口报告（供指挥员协调外部资源）
         "trace": trace,
         "errors": errors,
         "current_phase": "matching",
@@ -570,6 +922,14 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
     constraints = state.get("constraints", {})
     trace: Dict[str, Any] = dict(state.get("trace", {}))
     errors: List[str] = list(state.get("errors", []))
+    
+    # 提取事件坐标（用于GRA仲裁）
+    event_location = _extract_event_location(state)
+    if event_location:
+        event_lat, event_lng = event_location
+    else:
+        event_lat, event_lng = 0.0, 0.0
+        logger.warning("[分配优化] 无法提取事件坐标，GRA仲裁可能受影响")
     
     # 合并能力需求：规则推理阶段 + 任务实际需求
     # 确保NSGA-II优化时考虑所有任务需要的能力
@@ -618,22 +978,21 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
     algorithm_used = "greedy"  # 默认贪心
 
     # 尝试使用NSGA-II（候选资源>10时效果更好）
+    # 候选资源>10时使用NSGA-III多目标优化
     if len(candidates) > 10:
-        try:
-            nsga_solutions = _run_nsga2_optimization(
-                candidates=candidates,
-                capability_requirements=capability_requirements,
-                task_sequence=task_sequence,
-                n_solutions=n_alternatives,
-                estimated_trapped=estimated_trapped,
-            )
-            if nsga_solutions:
-                solutions = nsga_solutions
-                algorithm_used = "NSGA-II"
-                logger.info(f"[分配优化] NSGA-II生成{len(solutions)}个Pareto解")
-        except Exception as e:
-            logger.warning(f"[分配优化] NSGA-II失败，退化为贪心策略: {e}")
-            errors.append(f"NSGA-II优化失败: {e}")
+        nsga_solutions = _run_nsga2_optimization(
+            candidates=candidates,
+            capability_requirements=capability_requirements,
+            task_sequence=task_sequence,
+            n_solutions=n_alternatives,
+            estimated_trapped=estimated_trapped,
+            event_lat=event_lat,
+            event_lng=event_lng,
+        )
+        if nsga_solutions:
+            solutions = nsga_solutions
+            algorithm_used = "NSGA-II"
+            logger.info(f"[分配优化] NSGA-II生成{len(solutions)}个Pareto解")
 
     # 如果NSGA-II未生成方案，使用贪心策略
     if not solutions:
@@ -645,6 +1004,8 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
             solution_id=f"solution-{uuid.uuid4().hex[:8]}",
             estimated_trapped=estimated_trapped,
             capacity_safety_factor=capacity_safety_factor,
+            event_lat=event_lat,
+            event_lng=event_lng,
         )
         if solution1:
             solutions.append(solution1)
@@ -657,6 +1018,8 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
             solution_id=f"solution-{uuid.uuid4().hex[:8]}",
             estimated_trapped=estimated_trapped,
             capacity_safety_factor=capacity_safety_factor,
+            event_lat=event_lat,
+            event_lng=event_lng,
         )
         if solution2:
             solutions.append(solution2)
@@ -669,6 +1032,8 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
             solution_id=f"solution-{uuid.uuid4().hex[:8]}",
             estimated_trapped=estimated_trapped,
             capacity_safety_factor=capacity_safety_factor,
+            event_lat=event_lat,
+            event_lng=event_lng,
         )
         if solution3:
             solutions.append(solution3)
@@ -681,6 +1046,8 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
             solution_id=f"solution-{uuid.uuid4().hex[:8]}",
             estimated_trapped=estimated_trapped,
             capacity_safety_factor=capacity_safety_factor,
+            event_lat=event_lat,
+            event_lng=event_lng,
         )
         if solution4:
             solutions.append(solution4)
@@ -695,6 +1062,9 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
             )
             solution["task_assignments"] = task_assignments
             solution["execution_path"] = execution_path
+            
+            # 为每个队伍生成任务描述（基于task_assignments反向汇总）
+            _enrich_allocations_with_task_descriptions(solution, task_assignments)
     else:
         # 无任务序列时，填充空值
         for solution in solutions:
@@ -703,6 +1073,42 @@ async def optimize_allocation(state: EmergencyAIState) -> Dict[str, Any]:
 
     # Pareto最优解
     pareto_solutions = _deduplicate_solutions(solutions)[:n_alternatives]
+
+    # =============================
+    # GRA 仲裁（对资源冲突进行全局抢占判定）
+    # =============================
+    gra_inputs = _build_gra_inputs(pareto_solutions, event_lat=event_lat, event_lng=event_lng)
+    if gra_inputs["conflicts"]:
+        async with AsyncSessionLocal() as gra_db:
+            config_service = AlgorithmConfigService(gra_db)
+            gra_loader = GRAConfigLoader(config_service)
+            gra_params = await gra_loader.load_params()
+        resolver = ConflictResolver(params=gra_params)
+
+        for sol in pareto_solutions:
+            sol.setdefault("gra_actions", [])
+            sol.setdefault("gra_switching_cost", None)
+            sol.setdefault("safety_classification", {"reject": [], "break_glass": [], "warn": []})
+            sol.setdefault("break_glass_rules", [])
+
+        for conflict in gra_inputs["conflicts"]:
+            res_id = conflict["resource_id"]
+            resource_state = gra_inputs["resources"].get(res_id)
+            claims = resolver._parse_claims(conflict["claims"])
+            conflict_obj = Conflict(
+                id=conflict["id"],
+                conflict_type=ConflictType.EXCLUSIVE,
+                resource_id=res_id,
+                claims=claims,
+                severity=1.0,
+            )
+            resolution = resolver.gra_resolve_conflict(conflict_obj, gra_inputs["resources"])
+            if resolution:
+                for sol in pareto_solutions:
+                    if sol.get("solution_id") == conflict["id"]:
+                        sol["gra_actions"].extend(resolution.actions)
+                        sol["gra_switching_cost"] = resolution.cost
+                        break
 
     # 更新追踪信息
     trace["phases_executed"] = trace.get("phases_executed", []) + ["optimize_allocation"]
@@ -729,6 +1135,8 @@ def _run_nsga2_optimization(
     task_sequence: List[Dict[str, Any]],
     n_solutions: int = 5,
     estimated_trapped: int = 0,
+    event_lat: float = 0.0,
+    event_lng: float = 0.0,
 ) -> List[AllocationSolution]:
     """
     使用NSGA-II进行多目标优化 (调用统一算法库)
@@ -754,18 +1162,14 @@ def _run_nsga2_optimization(
     # 检查候选资源
     n_resources = len(candidates)
     if n_resources == 0:
-        return []
+        raise RuntimeError("[NSGA-III] 候选资源为空，无法执行优化")
         
     required_caps = {cap["capability_code"] for cap in capability_requirements}
     
     # 定义问题类 (继承自pymoo ElementwiseProblem)
     # 注意：这里我们需要在运行时定义，因为依赖闭包变量(candidates)
-    try:
-        from pymoo.core.problem import ElementwiseProblem
-        import numpy as np
-    except ImportError:
-        logger.warning("[NSGA-II] pymoo未安装，无法执行优化")
-        return []
+    from pymoo.core.problem import ElementwiseProblem
+    import numpy as np
 
     class EmergencyAllocationProblem(ElementwiseProblem):
         def __init__(self):
@@ -831,11 +1235,13 @@ def _run_nsga2_optimization(
             out["G"] = [0.95 - coverage]
 
     # 调用统一算法优化器（5目标使用NSGA-III）
+    # 时间预算30秒，紧急情况下可以更快得到结果
     optimizer = PymooOptimizer()
     result = optimizer.run({
         "problem": EmergencyAllocationProblem(),
         "pop_size": 100,
-        "n_generations": 80,
+        "n_generations": 80,  # 备用：无时间预算时使用
+        "time_budget_seconds": 30,  # 优先使用时间预算
         "algorithm": "nsga3",  # 5维目标使用NSGA-III
         "objective_names": ["success_rate", "response_time", "coverage_rate", "risk", "redundancy"],
         "verbose": False,
@@ -844,8 +1250,8 @@ def _run_nsga2_optimization(
     logger.info(f"[NSGA-III] 5维优化完成: 成功率、响应时间、覆盖率、风险、冗余性")
     
     if result.status != AlgorithmStatus.SUCCESS or not result.solution:
-        logger.warning(f"[NSGA-II] 优化未找到可行解: {result.message}")
-        return []
+        logger.warning(f"[NSGA-III] 优化未找到可行解: {result.message}，降级到贪心算法")
+        return []  # 返回空列表，外层会使用贪心算法生成方案
         
     # 解析结果并构建 AllocationSolution
     solutions: List[AllocationSolution] = []
@@ -888,6 +1294,14 @@ def _run_nsga2_optimization(
                 "distance_km": cand["distance_km"],
                 "eta_minutes": cand.get("eta_minutes", 0),
                 "rescue_capacity": cand_capacity,
+                "task_start": (event_lng, event_lat),
+                "resource_state": {
+                    "current_position": (cand.get("base_lng", 0), cand.get("base_lat", 0)),
+                    "home_position": (cand.get("base_lng", 0), cand.get("base_lat", 0)),
+                    "remaining_capacity": float(cand_capacity),
+                    "max_range": 100.0,
+                    "current_task_progress": 0.0,
+                },
             })
             covered_caps.update(cand["capabilities"])
             max_eta = max(max_eta, cand.get("eta_minutes", 0))
@@ -1194,20 +1608,25 @@ async def _query_teams_from_db(
             if db_capacity > 0:
                 rescue_capacity = int(db_capacity)
             else:
+                # 数据库缺失max_capacity，记录严重警告
                 # 按队伍类型估算救援容量（72小时内可救援人数）
-                capacity_multipliers = {
-                    "fire_rescue": 2.0,       # 消防队每人可救2人
-                    "search_rescue": 1.5,     # 搜救队每人可救1.5人
-                    "medical": 5.0,           # 医疗队每人可处理5伤员
-                    "hazmat": 0.5,            # 危化品队不直接救人
-                    "engineering": 0.0,       # 工程队不直接救人
-                    "volunteer": 1.0,         # 志愿者每人可救1人
+                capacity_multipliers: Dict[str, float] = {
+                    "fire_rescue": 2.0,
+                    "search_rescue": 1.5,
+                    "medical": 5.0,
+                    "hazmat": 0.5,
+                    "engineering": 0.0,
+                    "volunteer": 1.0,
                 }
                 multiplier = capacity_multipliers.get(team_type, 1.0)
                 rescue_capacity = int(available * multiplier)
                 if rescue_capacity == 0 and available > 0:
-                    rescue_capacity = available  # 兜底：至少等于可用人数
-                logger.debug(f"[救援容量估算] {row_dict['name']} 无max_capacity，按类型{team_type}估算: {available}人×{multiplier}={rescue_capacity}")
+                    rescue_capacity = available
+                # 严重警告：数据库缺失关键字段，估算值可能不准确
+                logger.warning(
+                    f"[救援容量] 队伍 {row_dict['name']} 数据库缺失max_capacity，"
+                    f"使用估算值: {available}人×{multiplier}={rescue_capacity}，请尽快补充数据库数据"
+                )
             
             # 车辆速度：优先使用数据库值，否则使用默认配置
             vehicle_speed: int = row_dict.get("vehicle_speed_kmh") or 0
@@ -1360,8 +1779,14 @@ def _calculate_match_scores(
         # 最低速度保护（防止除零和不合理值）
         actual_speed_kmh = max(actual_speed_kmh, 10.0)
         
-        # 计算响应时间（分钟）= 道路距离 / 实际速度 × 60
-        eta_minutes: float = (road_distance_km / actual_speed_kmh) * 60 if road_distance_km > 0 else 0
+        # 队伍响应/集结时间（从数据库字段读取，默认5分钟）
+        team_response_time: float = float(team.get("response_time_minutes") or 5)
+        
+        # 行驶时间（分钟）= 道路距离 / 实际速度 × 60
+        travel_time_minutes: float = (road_distance_km / actual_speed_kmh) * 60 if road_distance_km > 0 else 0
+        
+        # 总到达时间 = 响应时间 + 行驶时间
+        eta_minutes: float = team_response_time + travel_time_minutes
 
         # 综合得分
         match_score = (
@@ -1385,8 +1810,12 @@ def _calculate_match_scores(
             "availability_score": 1.0,
             "match_score": round(match_score, 3),
             "rescue_capacity": team.get("rescue_capacity", 0),
-            # ETA相关
-            "eta_minutes": round(eta_minutes, 1),
+            # ETA相关（时间拆分）
+            "response_time_minutes": round(team_response_time, 1),  # 队伍集结时间
+            "travel_time_minutes": round(travel_time_minutes, 1),   # 行驶时间
+            "eta_minutes": round(eta_minutes, 1),                   # 总到达时间
+            "route_distance_km": round(road_distance_km, 2),        # 路径距离（初始为估算值）
+            "route_source": "estimate",                              # 路径来源（初始为估算）
             "vehicle_speed_kmh": vehicle_speed_kmh,
             "actual_speed_kmh": round(actual_speed_kmh, 1),
             "vehicle_is_all_terrain": vehicle_is_all_terrain,
@@ -1570,6 +1999,53 @@ def _assign_tasks_to_resources(
     return task_assignments, execution_path
 
 
+def _enrich_allocations_with_task_descriptions(
+    solution: AllocationSolution,
+    task_assignments: List[Dict[str, Any]],
+) -> None:
+    """
+    为方案中的每个队伍添加任务描述
+    
+    基于 task_assignments 反向汇总，为 allocations 中的每个队伍
+    生成 task_description 字段，描述该队伍负责的具体任务。
+    
+    Args:
+        solution: 分配方案（会被原地修改）
+        task_assignments: 任务-资源分配列表
+    """
+    if not task_assignments:
+        return
+    
+    # 构建资源ID→任务列表映射
+    resource_tasks: Dict[str, List[Dict[str, Any]]] = {}
+    for assignment in task_assignments:
+        resource_id = assignment.get("resource_id", "")
+        if resource_id:
+            if resource_id not in resource_tasks:
+                resource_tasks[resource_id] = []
+            resource_tasks[resource_id].append(assignment)
+    
+    # 为每个allocation添加task_description
+    allocations = solution.get("allocations", [])
+    for alloc in allocations:
+        resource_id = alloc.get("resource_id", "")
+        tasks = resource_tasks.get(resource_id, [])
+        
+        if tasks:
+            # 生成任务描述：如 "负责危化品泄漏侦检(EM20)、堵漏处置(EM21)"
+            task_parts = [f"{t['task_name']}({t['task_id']})" for t in tasks]
+            alloc["task_description"] = "负责" + "、".join(task_parts)
+            alloc["assigned_tasks"] = [{"task_id": t["task_id"], "task_name": t["task_name"]} for t in tasks]
+        else:
+            # 没有分配任务的队伍（可能是能力冗余备份）
+            caps = alloc.get("assigned_capabilities", [])
+            if caps:
+                alloc["task_description"] = f"提供{caps[0]}等能力支援"
+            else:
+                alloc["task_description"] = "综合救援支援"
+            alloc["assigned_tasks"] = []
+
+
 def _generate_greedy_solution(
     candidates: List[ResourceCandidate],
     capability_requirements: List[Dict[str, Any]],
@@ -1577,6 +2053,8 @@ def _generate_greedy_solution(
     solution_id: str,
     estimated_trapped: int = 0,
     capacity_safety_factor: float = 1.2,
+    event_lat: float = 0.0,
+    event_lng: float = 0.0,
 ) -> Optional[AllocationSolution]:
     """
     使用贪心策略生成分配方案
@@ -1657,6 +2135,14 @@ def _generate_greedy_solution(
                 "distance_km": candidate["distance_km"],
                 "eta_minutes": candidate.get("eta_minutes", 0),
                 "rescue_capacity": candidate_capacity,
+                "task_start": (event_lng, event_lat),
+                "resource_state": {
+                    "current_position": (candidate.get("base_lng", 0), candidate.get("base_lat", 0)),
+                    "home_position": (candidate.get("base_lng", 0), candidate.get("base_lat", 0)),
+                    "remaining_capacity": float(candidate_capacity),
+                    "max_range": 100.0,
+                    "current_task_progress": 0.0,
+                },
             })
             selected_ids.add(candidate["resource_id"])
             covered_caps.update(assignable_caps)
@@ -1709,6 +2195,7 @@ def _generate_greedy_solution(
             can_backup = candidate_caps.intersection(low_redundancy_caps)
             
             if can_backup:
+                candidate_capacity = candidate.get("rescue_capacity", 0)
                 allocations.append({
                     "resource_id": candidate["resource_id"],
                     "resource_name": candidate["resource_name"],
@@ -1717,7 +2204,15 @@ def _generate_greedy_solution(
                     "match_score": candidate["match_score"],
                     "distance_km": candidate["distance_km"],
                     "eta_minutes": candidate.get("eta_minutes", 0),
-                    "rescue_capacity": candidate.get("rescue_capacity", 0),
+                    "rescue_capacity": candidate_capacity,
+                    "task_start": (event_lng, event_lat),
+                    "resource_state": {
+                        "current_position": (candidate.get("base_lng", 0), candidate.get("base_lat", 0)),
+                        "home_position": (candidate.get("base_lng", 0), candidate.get("base_lat", 0)),
+                        "remaining_capacity": float(candidate_capacity),
+                        "max_range": 100.0,
+                        "current_task_progress": 0.0,
+                    },
                 })
                 selected_ids.add(candidate["resource_id"])
                 total_capacity += candidate.get("rescue_capacity", 0)
@@ -1834,3 +2329,62 @@ def _deduplicate_solutions(solutions: List[AllocationSolution]) -> List[Allocati
             unique.append(sol)
 
     return unique
+
+
+def _build_gra_inputs(
+    solutions: List[AllocationSolution],
+    event_lat: float,
+    event_lng: float,
+) -> Dict[str, Any]:
+    """为 GRA 构造 ResourceState 和 ResourceClaim 输入（基于方案内容）。"""
+    # 这里假设 solutions 中的 allocations 包含资源位置与任务起点；若缺失则无法计算成本。
+    resources: Dict[str, ResourceState] = {}
+    conflicts: List[Dict[str, Any]] = []
+
+    for sol in solutions:
+        claims: List[Dict[str, Any]] = []
+        for alloc in sol.get("allocations", []):
+            task_type = alloc.get("task_type") or alloc.get("task_code") or ""
+            # 根据任务类型从优先级映射表获取GRA优先级，未知类型使用默认优先级(3)
+            gra_priority: int = GRA_PRIORITY_MAP.get(task_type, GRA_DEFAULT_PRIORITY)
+            if not alloc.get("task_start"):
+                raise ValueError("缺少任务起点坐标，无法执行GRA仲裁")
+            start_position = alloc.get("task_start")
+            claims.append({
+                "task_id": alloc.get("task_id", alloc.get("task_code", "")),
+                "task_name": alloc.get("task_name", ""),
+                "resource_id": alloc.get("resource_id"),
+                "quantity": 1,
+                "start_time": 0,
+                "end_time": 999999,
+                "priority": alloc.get("priority", 3),
+                "is_preemptible": alloc.get("is_preemptible", True),
+                "task_type": task_type,
+                "gra_priority": gra_priority,
+                "start_position": start_position,
+            })
+
+            if not alloc.get("resource_id") or not alloc.get("resource_state"):
+                raise ValueError("缺少资源状态，无法执行GRA仲裁")
+
+            rs = alloc["resource_state"]
+            if "current_position" not in rs or "home_position" not in rs:
+                raise ValueError("资源状态缺少位置信息，无法执行GRA仲裁")
+
+            resources[alloc["resource_id"]] = ResourceState(
+                resource_id=alloc["resource_id"],
+                current_position=tuple(rs.get("current_position")),
+                home_position=tuple(rs.get("home_position")),
+                remaining_capacity=float(rs.get("remaining_capacity", 0.0)),
+                max_range=float(rs.get("max_range", 0.0)),
+                current_task_progress=float(rs.get("current_task_progress", 0.0)),
+            )
+
+        if len(claims) > 1:
+            conflicts.append({
+                "id": sol.get("solution_id", ""),
+                "resource_id": claims[0].get("resource_id"),
+                "claims": claims,
+            })
+
+    return {"resources": resources, "conflicts": conflicts}

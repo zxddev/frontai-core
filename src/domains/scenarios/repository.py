@@ -63,7 +63,10 @@ class ScenarioRepository:
     async def get_active(self) -> Optional[Scenario]:
         """获取当前活动的想定（同一时间只有一个）"""
         result = await self._db.execute(
-            select(Scenario).where(Scenario.status == 'active')
+            select(Scenario)
+            .where(Scenario.status == 'active')
+            .order_by(Scenario.updated_at.desc())
+            .limit(1)
         )
         return result.scalar_one_or_none()
     

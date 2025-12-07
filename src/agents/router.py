@@ -21,7 +21,7 @@ from src.core.database import AsyncSessionLocal
 from src.core.websocket import broadcast_event_update
 from src.domains.ai_decisions import AIDecisionLogRepository, CreateAIDecisionLogRequest
 from .exceptions import AITaskNotFoundError, AISchemeNotFoundError
-from .schemas import (
+from src.agents.schemas import (
     EmergencyAnalyzeRequest,
     EmergencyAnalyzeTaskResponse,
     EmergencyAnalyzeResult,
@@ -30,15 +30,30 @@ from .schemas import (
     RoutePlanningTaskResponse,
     RoutePlanningResult,
 )
-from .emergency_ai import EmergencyAIAgent, get_emergency_ai_agent
+from src.domains.audit import AuditService, OperatorInfo, ActionInfo
 from .route_planning import invoke as route_planning_invoke
+from .emergency_ai.agent import get_emergency_ai_agent
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 
-# 任务结果缓存（内存备份）
+# 任务结果缓存（内存L1缓存，Redis为主存储）
+# 注意：多实例部署时内存缓存可能不一致，但不影响正确性（Redis为准）
+# 缓存大小限制防止内存泄漏
 _task_results: Dict[str, Dict[str, Any]] = {}
+_TASK_CACHE_MAX_SIZE = 100  # 最多缓存100个任务结果
+
+
+def _cleanup_task_cache() -> None:
+    """清理内存缓存，保留最近的任务结果"""
+    global _task_results
+    if len(_task_results) > _TASK_CACHE_MAX_SIZE:
+        # 删除最老的一半条目（简单策略，无需复杂LRU）
+        items = list(_task_results.items())
+        _task_results = dict(items[len(items) // 2:])
+        logger.info(f"[缓存清理] 内存缓存已清理，剩余 {len(_task_results)} 条")
+
 
 # Redis配置
 EMERGENCY_RESULT_PREFIX = "emergency_ai_result:"
@@ -321,6 +336,7 @@ async def _run_emergency_analysis(
         
         # 保存到内存和Redis
         _task_results[task_id] = result
+        _cleanup_task_cache()
         await _save_result_to_redis(task_id, result)
         
         logger.info(
@@ -358,6 +374,7 @@ async def _run_emergency_analysis(
         }
         # 保存到内存和Redis
         _task_results[task_id] = error_result
+        _cleanup_task_cache()
         await _save_result_to_redis(task_id, error_result)
         logger.info(f"[EmergencyAI] 错误结果已保存 task_id={task_id}")
 
@@ -496,8 +513,18 @@ async def get_analysis_by_event_id(event_id: str) -> Dict[str, Any]:
         if result:
              # 同步到内存缓存
             _task_results[task_id] = result
+            _cleanup_task_cache()
             
     if result:
+        # 调试：检查 resource_gaps 数据
+        resource_gaps = result.get("resource_gaps", {})
+        supply_shortages_count = len(resource_gaps.get("supply_shortages", []))
+        logger.info(
+            f"[API] 返回分析结果 event_id={event_id}, "
+            f"物资缺口={supply_shortages_count}种, "
+            f"status={result.get('status')}"
+        )
+        
         return {
             "found": True,
             "task_id": task_id,
@@ -540,6 +567,7 @@ async def get_emergency_analyze_result(task_id: str) -> EmergencyAnalyzeResult:
         if result:
             # 同步到内存缓存
             _task_results[task_id] = result
+            _cleanup_task_cache()
     
     if result is None:
         raise AITaskNotFoundError(task_id)
@@ -649,7 +677,74 @@ async def confirm_emergency_scheme(
     
     logger.info(f"[EmergencyConfirm] 校验通过 event_id={event_id}, 队伍数={len(validated_team_ids)}")
     
-    # ========== 3-8. 在事务中执行所有数据库操作 ==========
+    # ========== 3. Break Glass 审计检查并记录（如需） ==========
+    if not ai_result.get("recommended_scheme"):
+        return {
+            "success": False,
+            "error": "缺少推荐方案，无法确认执行",
+        }
+
+    recommended_scheme = ai_result["recommended_scheme"]
+    bg_rules = recommended_scheme.get("break_glass_rules") or recommended_scheme.get("safety_classification", {}).get("break_glass", [])
+
+    audit_override_ids: List[str] = []
+
+    if bg_rules:
+        # 演示环境：若未提供操作者信息，仅记录警告，不阻断。正式环境应从token获取并强制审计。
+        if not (request.operator_id and request.operator_name and request.operator_role and request.auth_method):
+            logger.warning("[EmergencyConfirm] 缺少操作者信息，跳过 Break Glass 审计(演示模式)")
+        else:
+            allocations = recommended_scheme.get("allocations", [])
+            selected_allocations = [a for a in allocations if a.get("resource_id") in validated_team_ids]
+            if not selected_allocations:
+                logger.warning("[EmergencyConfirm] 无匹配分配，跳过 Break Glass 审计(演示模式)")
+            else:
+                operator = OperatorInfo(
+                    operator_id=request.operator_id,
+                    operator_name=request.operator_name,
+                    operator_role=request.operator_role,
+                    auth_method=request.auth_method,
+                )
+
+                action = ActionInfo(
+                    action_type="execute_scheme",
+                    target_resource={
+                        "team_ids": validated_team_ids,
+                        "allocations": selected_allocations,
+                    },
+                    target_event={
+                        "event_id": str(event_id),
+                        "scenario_id": str(scenario_id),
+                    },
+                )
+
+                async with AsyncSessionLocal() as audit_db:
+                    audit_service = AuditService(audit_db)
+                    for rule in bg_rules:
+                        rule_id = rule.get("rule_id") or rule.get("id")
+                        rule_name = rule.get("rule_name") or rule.get("name") or ""
+                        risk_desc = rule.get("risk_description") or rule.get("message") or ""
+                        if not rule_id or not rule_name or not risk_desc:
+                            logger.warning("[EmergencyConfirm] Break Glass 规则信息不完整，跳过审计记录")
+                            continue
+                        record = await audit_service.record_break_glass(
+                            operator=operator,
+                            rule_id=rule_id,
+                            rule_name=rule_name,
+                            risk_overridden=risk_desc,
+                            action=action,
+                            ai_recommendation=None,
+                            context={
+                                "scheme_id": recommended_scheme.get("solution_id"),
+                                "event_id": str(event_id),
+                                "scenario_id": str(scenario_id),
+                                "task_id": task_id,
+                            },
+                            was_adopted=False,
+                        )
+                        audit_override_ids.append(str(record.id))
+
+    # ========== 4-8. 在事务中执行所有数据库操作 ==========
     async with AsyncSessionLocal() as db:
         try:
             # 3. 查询事件详情
@@ -932,6 +1027,7 @@ async def confirm_emergency_scheme(
                 "task_code": task_code,
                 "deployed_teams": deployed_info,
                 "route_results": route_results,
+                "audit_overrides": audit_override_ids,
                 "message": f"成功创建任务 {task_code}，部署 {len(deployed_info)} 支队伍，生成 {len(route_results)} 条路径",
             }
             
@@ -1355,6 +1451,10 @@ async def get_route_planning_result(task_id: str) -> RoutePlanningResult:
 from .early_warning.router import router as early_warning_router
 router.include_router(early_warning_router)
 
+# ============ 应急监控路由 ============
+from .early_warning.monitor_router import router as emergency_monitor_router
+router.include_router(emergency_monitor_router)
+
 # ============ 驻扎点选址智能体路由 ============
 from .staging_area.router import router as staging_area_agent_router
 router.include_router(staging_area_agent_router)
@@ -1471,4 +1571,318 @@ async def situation_plot_dialog(request: SituationPlotRequest) -> SituationPlotR
     return SituationPlotResponse(
         success=True,
         response=ai_message.content,
+    )
+
+
+# ============================================================================
+# 侦察调度接口 (ReconScheduler V2.1)
+# ============================================================================
+
+from .schemas import (
+    ReconScheduleRequest,
+    ReconScheduleTaskResponse,
+    ReconScheduleResult,
+    ReconApproveRequest,
+    ReconCheckpointResponse,
+    ReconResumeRequest,
+)
+
+# 侦察任务结果缓存
+RECON_RESULT_PREFIX = "recon_schedule_result:"
+RECON_RESULT_TTL = 36000  # 10小时
+_recon_task_results: Dict[str, Dict[str, Any]] = {}
+
+
+async def _save_recon_result_to_redis(task_id: str, result: Dict[str, Any]) -> bool:
+    """保存侦察任务结果到Redis"""
+    try:
+        from src.core.redis import get_redis_client
+        redis_client = await get_redis_client()
+        key = f"{RECON_RESULT_PREFIX}{task_id}"
+        await redis_client.setex(key, RECON_RESULT_TTL, json.dumps(result, ensure_ascii=False, default=str))
+        logger.info(f"[ReconScheduler] 结果已保存到Redis: {key}")
+        return True
+    except Exception as e:
+        logger.warning(f"[ReconScheduler] Redis保存失败: {e}")
+        return False
+
+
+async def _get_recon_result_from_redis(task_id: str) -> Optional[Dict[str, Any]]:
+    """从Redis获取侦察任务结果"""
+    try:
+        from src.core.redis import get_redis_client
+        redis_client = await get_redis_client()
+        key = f"{RECON_RESULT_PREFIX}{task_id}"
+        data = await redis_client.get(key)
+        if data:
+            return json.loads(data)
+        return None
+    except Exception as e:
+        logger.warning(f"[ReconScheduler] Redis读取失败: {e}")
+        return None
+
+
+async def _run_recon_schedule_task(
+    task_id: str,
+    request: ReconScheduleRequest,
+) -> None:
+    """后台执行侦察调度任务"""
+    from .recon_scheduler import get_recon_scheduler_agent
+    
+    logger.info(f"[ReconScheduler] 开始执行任务: {task_id}")
+    
+    try:
+        agent = get_recon_scheduler_agent()
+        
+        # 执行调度
+        result = await agent.schedule(
+            event_id=request.event_id,
+            scenario_id=request.scenario_id,
+            recon_request=request.recon_request,
+            target_area=request.target_area,
+            disaster_context=request.disaster_context,
+        )
+        
+        # 构建结果
+        task_result = {
+            "task_id": task_id,
+            "status": "completed" if result.get("success", False) else "failed",
+            "success": result.get("success", False),
+            "flight_plans": result.get("flight_plans", []),
+            "execution_package": result.get("execution_package"),
+            "validation_results": {
+                "l1_result": result.get("l1_result"),
+                "l2_result": result.get("l2_result"),
+            },
+            "breaker_state": result.get("breaker_state", "closed"),
+            "approval_status": result.get("approval_status"),
+            "degradation_options": result.get("degradation_options", []),
+            "progress_percent": 100.0 if result.get("success") else result.get("progress_percent", 0),
+            "current_phase": result.get("current_phase"),
+            "retry_count": result.get("retry_count", 0),
+            "warnings": result.get("warnings", []),
+            "errors": result.get("errors", []),
+            "completed_at": datetime.now().isoformat(),
+        }
+        
+        # 检查是否需要审批
+        if result.get("approval_status") == "pending":
+            task_result["status"] = "awaiting_approval"
+        
+    except Exception as e:
+        logger.error(f"[ReconScheduler] 任务执行失败: {task_id}, error={e}")
+        task_result = {
+            "task_id": task_id,
+            "status": "failed",
+            "success": False,
+            "flight_plans": [],
+            "errors": [str(e)],
+            "completed_at": datetime.now().isoformat(),
+        }
+    
+    # 保存结果
+    _recon_task_results[task_id] = task_result
+    await _save_recon_result_to_redis(task_id, task_result)
+    
+    logger.info(f"[ReconScheduler] 任务完成: {task_id}, status={task_result['status']}")
+
+
+@router.post("/recon-schedule", response_model=ReconScheduleTaskResponse, status_code=202)
+async def submit_recon_schedule(
+    request: ReconScheduleRequest,
+    background_tasks: BackgroundTasks,
+) -> ReconScheduleTaskResponse:
+    """
+    提交侦察调度任务
+    
+    异步执行，返回task_id用于后续查询结果。
+    
+    支持配置项:
+    - max_retries: 最大重试次数 (默认3)
+    - initial_battery_percent: 初始电量 (默认95)
+    """
+    import uuid
+    task_id = f"recon-{uuid.uuid4().hex[:12]}"
+    
+    logger.info(f"[ReconScheduler] 提交任务: {task_id}, event_id={request.event_id}")
+    
+    # 初始化任务状态
+    _recon_task_results[task_id] = {
+        "task_id": task_id,
+        "status": "processing",
+        "success": False,
+        "created_at": datetime.now().isoformat(),
+    }
+    
+    # 后台执行
+    background_tasks.add_task(_run_recon_schedule_task, task_id, request)
+    
+    return ReconScheduleTaskResponse(
+        success=True,
+        task_id=task_id,
+        status="processing",
+        message="侦察调度任务已提交，正在处理中",
+    )
+
+
+@router.get("/recon-schedule/{task_id}", response_model=ReconScheduleResult)
+async def get_recon_schedule_result(task_id: str) -> ReconScheduleResult:
+    """
+    获取侦察调度任务结果
+    
+    轮询此接口直到status变为completed/failed/awaiting_approval
+    """
+    # 先查内存缓存
+    if task_id in _recon_task_results:
+        result = _recon_task_results[task_id]
+    else:
+        # 查Redis
+        result = await _get_recon_result_from_redis(task_id)
+        if result:
+            _recon_task_results[task_id] = result
+    
+    if not result:
+        raise AITaskNotFoundError(f"任务不存在: {task_id}")
+    
+    return ReconScheduleResult(**result)
+
+
+@router.post("/recon-schedule/{task_id}/checkpoint", response_model=ReconCheckpointResponse)
+async def save_recon_checkpoint(task_id: str) -> ReconCheckpointResponse:
+    """
+    保存任务检查点
+    
+    用于中断后恢复任务
+    """
+    from .recon_scheduler.checkpoint import save_checkpoint, CheckpointPayload
+    
+    # 获取当前任务状态
+    if task_id not in _recon_task_results:
+        result = await _get_recon_result_from_redis(task_id)
+        if not result:
+            raise AITaskNotFoundError(f"任务不存在: {task_id}")
+        _recon_task_results[task_id] = result
+    else:
+        result = _recon_task_results[task_id]
+    
+    # 保存检查点
+    checkpoint_id = await save_checkpoint(result)
+    
+    return ReconCheckpointResponse(
+        success=True,
+        checkpoint_id=checkpoint_id,
+        mission_id=task_id,
+        progress_percent=result.get("progress_percent", 0),
+        timestamp=datetime.now().isoformat(),
+    )
+
+
+@router.post("/recon-schedule/{task_id}/resume")
+async def resume_recon_task(
+    task_id: str,
+    request: ReconResumeRequest,
+    background_tasks: BackgroundTasks,
+) -> ReconScheduleTaskResponse:
+    """
+    从检查点恢复任务
+    
+    恢复后会重新规划剩余部分
+    """
+    from .recon_scheduler.checkpoint import resume_mission, MissionLockedError
+    
+    try:
+        # 恢复任务
+        resumed_state = await resume_mission(task_id)
+        
+        # 更新任务状态
+        _recon_task_results[task_id] = {
+            **resumed_state,
+            "task_id": task_id,
+            "status": "processing",
+            "resumed_at": datetime.now().isoformat(),
+        }
+        
+        # TODO: 重新启动后台任务
+        
+        return ReconScheduleTaskResponse(
+            success=True,
+            task_id=task_id,
+            status="processing",
+            message=f"任务已从检查点恢复，进度={resumed_state.get('progress_percent', 0):.1f}%",
+        )
+        
+    except MissionLockedError as e:
+        return ReconScheduleTaskResponse(
+            success=False,
+            task_id=task_id,
+            status="locked",
+            message=f"任务被锁定: {e}",
+        )
+    except Exception as e:
+        return ReconScheduleTaskResponse(
+            success=False,
+            task_id=task_id,
+            status="failed",
+            message=f"恢复失败: {e}",
+        )
+
+
+@router.post("/recon-schedule/{task_id}/approve")
+async def approve_recon_degradation(
+    task_id: str,
+    request: ReconApproveRequest,
+    background_tasks: BackgroundTasks,
+) -> ReconScheduleTaskResponse:
+    """
+    人工审批降级方案
+    
+    当任务进入awaiting_approval状态时，需要人工选择降级方案
+    """
+    from .recon_scheduler.nodes.approval_flow import execute_degradation_node
+    
+    # 获取当前任务状态
+    if task_id not in _recon_task_results:
+        result = await _get_recon_result_from_redis(task_id)
+        if not result:
+            raise AITaskNotFoundError(f"任务不存在: {task_id}")
+        _recon_task_results[task_id] = result
+    else:
+        result = _recon_task_results[task_id]
+    
+    # 检查状态
+    if result.get("status") != "awaiting_approval":
+        return ReconScheduleTaskResponse(
+            success=False,
+            task_id=task_id,
+            status=result.get("status", "unknown"),
+            message=f"任务状态不是awaiting_approval，当前状态: {result.get('status')}",
+        )
+    
+    # 验证降级选项
+    valid_options = result.get("degradation_options", [])
+    if request.approved_degradation not in valid_options:
+        return ReconScheduleTaskResponse(
+            success=False,
+            task_id=task_id,
+            status="awaiting_approval",
+            message=f"无效的降级选项: {request.approved_degradation}，可用选项: {valid_options}",
+        )
+    
+    # 执行降级
+    result["approved_degradation"] = request.approved_degradation
+    result["approval_comment"] = request.comment
+    result["approval_status"] = "approved"
+    result["status"] = "processing"
+    
+    # 更新缓存
+    _recon_task_results[task_id] = result
+    await _save_recon_result_to_redis(task_id, result)
+    
+    logger.info(f"[ReconScheduler] 审批通过: {task_id}, degradation={request.approved_degradation}")
+    
+    return ReconScheduleTaskResponse(
+        success=True,
+        task_id=task_id,
+        status="processing",
+        message=f"已批准降级方案: {request.approved_degradation}，任务继续执行",
     )

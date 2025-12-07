@@ -170,20 +170,23 @@ class AlgorithmConfigService:
         """
         获取某类别的所有配置
         
+        返回的params字典会自动合并表的独立列（name, name_cn, reference, description）
+        
         Args:
             category: 参数类别
             region_code: 地区代码 (可选)
             department_code: 部门代码 (可选)
             
         Returns:
-            {code: params} 字典
+            {code: params} 字典，params包含JSONB字段和表的独立列
             
         Raises:
             ConfigurationMissingError: 该类别没有任何配置时抛出
         """
         # 构建查询，按优先级去重（使用DISTINCT ON）
+        # 同时返回name_cn等独立列，调用方可能需要
         sql = text("""
-            SELECT DISTINCT ON (code) code, params
+            SELECT DISTINCT ON (code) code, name, name_cn, params, reference, description
             FROM config.algorithm_parameters
             WHERE category = :category AND is_active = TRUE
             ORDER BY code, 
@@ -212,7 +215,22 @@ class AlgorithmConfigService:
                 department_code=department_code,
             )
         
-        return {row.code: row.params for row in rows}
+        # 合并params和独立列，独立列覆盖params中的同名字段
+        configs: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            merged = dict(row.params) if row.params else {}
+            # 独立列合并到params中（供调用方使用）
+            if row.name:
+                merged["name"] = row.name
+            if row.name_cn:
+                merged["name_cn"] = row.name_cn
+            if row.reference:
+                merged["reference"] = row.reference
+            if row.description:
+                merged["description"] = row.description
+            configs[row.code] = merged
+        
+        return configs
     
     async def exists(self, category: str, code: str) -> bool:
         """

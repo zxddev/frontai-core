@@ -259,6 +259,9 @@ async def plan_route_with_risk_check(
                     "team_id": str(request.team_id),
                     "device_id": str(request.device_id),
                     "env_type": env_type,
+                    "origin": {"lon": origin.lon, "lat": origin.lat},
+                    "destination": {"lon": destination.lon, "lat": destination.lat},
+                    "risk_area_ids": [str(ra.id) for ra in risk_areas_info],
                     "fastest_route": {
                         "distance_m": fastest_route.total_distance_m,
                         "duration_s": fastest_route.total_duration_s,

@@ -49,18 +49,35 @@ class RescuePriorityResult(BaseModel):
 
 
 class SchemeExplanation(BaseModel):
-    """方案解释 - 给指挥员的详细说明"""
+    """方案解释 - 给指挥员的详细说明
+    
+    注意：时间线(timeline)字段已移除，改为使用结构化的 TimelineEvent 数据，
+    基于队伍真实 ETA 生成，不再由 LLM 生成。
+    """
     summary: str = Field(description="方案摘要（100-200字，概述整体救援策略）")
     situation_assessment: str = Field(description="态势评估（当前灾情严重程度、紧迫性、主要威胁分析）")
     selection_reason: str = Field(description="方案选择理由（为什么推荐此方案，与备选方案对比）")
     key_advantages: List[str] = Field(description="关键优势（至少5条，每条详细说明）")
     resource_deployment: List[str] = Field(description="资源部署说明（每支队伍的具体任务、到达时间、负责区域）")
-    timeline: List[str] = Field(description="时间线规划（按小时划分的行动计划）")
+    # timeline 字段已移除：时间线改为基于队伍 ETA 的结构化数据生成（见 TimelineEvent）
     coordination_points: List[str] = Field(description="协调要点（各队伍之间如何配合、通信频率）")
     potential_risks: List[str] = Field(description="潜在风险（至少3条，包括环境风险、人员风险、设备风险）")
     mitigation_measures: List[str] = Field(description="风险缓解措施（对应每个风险的具体应对方案）")
     execution_suggestions: List[str] = Field(description="执行建议（至少5条具体可操作的建议）")
     commander_notes: str = Field(description="指挥员注意事项（特别提醒、决策要点、应急预案触发条件）")
+
+
+class TimelineEvent(BaseModel):
+    """
+    结构化时间线事件
+    
+    用于替代 LLM 生成的纯文本时间线，基于真实 ETA 数据构建，
+    确保时间准确性和格式一致性。
+    """
+    offset_minutes: int = Field(description="相对接报时间的偏移(分钟)，如15表示T+15分钟")
+    action: str = Field(description="动作描述，如'无人机侦察起飞'、'搜救队到达现场'")
+    responsible_team: Optional[str] = Field(default=None, description="负责队伍名称，可选")
+    phase: str = Field(description="阶段：接报/侦察/响应/处置/收尾")
 
 
 # ============================================================================
@@ -353,6 +370,14 @@ async def parse_disaster_description_async(
             timeout=180.0  # 3分钟超时
         )
         elapsed = int((time.time() - start_time) * 1000)
+        
+        # 验证LLM响应完整性
+        required_fields = ["disaster_type", "severity", "has_trapped_persons", "estimated_trapped"]
+        missing_fields = [f for f in required_fields if f not in result or result[f] is None]
+        if missing_fields:
+            logger.error(f"[LLM] 响应缺失关键字段: {missing_fields}")
+            raise RuntimeError(f"LLM响应不完整，缺失字段: {missing_fields}")
+        
         logger.info(f"异步LLM灾情解析完成 ({elapsed}ms)", extra={"disaster_type": result.get("disaster_type")})
         return result
     except asyncio.TimeoutError:
@@ -404,12 +429,13 @@ async def explain_scheme_async(
 3. selection_reason: 解释为什么选择此方案，与其他方案的对比优势
 4. key_advantages: 至少5条优势，每条要具体说明
 5. resource_deployment: 每支队伍的详细部署，包括任务、到达时间、负责区域、联系方式
-6. timeline: 按小时划分的详细行动计划（T+0到T+24小时）
-7. coordination_points: 各队伍协调配合要点，通信频率，指挥关系
-8. potential_risks: 至少3条风险，包括环境、人员、设备等方面
-9. mitigation_measures: 每个风险对应的具体缓解措施
-10. execution_suggestions: 至少5条可操作的具体建议
-11. commander_notes: 指挥员特别注意事项，包括决策要点、应急预案触发条件
+6. coordination_points: 各队伍协调配合要点，通信频率，指挥关系
+7. potential_risks: 至少3条风险，包括环境、人员、设备等方面
+8. mitigation_measures: 每个风险对应的具体缓解措施
+9. execution_suggestions: 至少5条可操作的具体建议
+10. commander_notes: 指挥员特别注意事项，包括决策要点、应急预案触发条件
+
+【重要提示】时间线(timeline)由系统根据队伍真实ETA自动生成，无需在此输出。
 
 {format_instructions}"""
 

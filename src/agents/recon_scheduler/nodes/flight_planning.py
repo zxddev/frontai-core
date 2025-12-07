@@ -6,6 +6,7 @@ Phase 6: 航线规划节点
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
@@ -24,6 +25,7 @@ from ..algorithms.coverage import (
     generate_spiral_waypoints,
     generate_circular_waypoints,
 )
+from ..mock_data import get_device_provider
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +56,9 @@ async def flight_planning_node(state: ReconSchedulerState) -> Dict[str, Any]:
     
     flight_plans = []
     warnings = state.get("warnings", [])
+    errors = state.get("errors", [])
+    
+    device_provider = get_device_provider()
     
     for allocation in allocations:
         if allocation.get("is_backup"):
@@ -69,6 +74,29 @@ async def flight_planning_node(state: ReconSchedulerState) -> Dict[str, Any]:
             logger.warning(f"找不到任务: {task_id}")
             continue
         
+        # 获取设备配置以进行能力预检查
+        device_profile = await device_provider.get_device_profile(device_id)
+        if not device_profile:
+            logger.warning(f"找不到设备配置: {device_id}")
+            warnings.append(f"设备 {device_id} 配置未找到")
+            continue
+        
+        # 预检查：计算区域面积和预估飞行距离
+        polygon = _parse_target_area(target_area, task.get("target_area"))
+        if polygon:
+            area_check = _check_area_feasibility(
+                polygon=polygon,
+                device_profile=device_profile,
+                scan_config=task.get("scan_config", {}),
+            )
+            if not area_check["feasible"]:
+                error_msg = (f"任务 {task_id} 区域过大无法单次覆盖: "
+                           f"预估飞行{area_check['estimated_distance_km']:.1f}km, "
+                           f"设备{device_name}最大可飞{area_check['max_distance_km']:.1f}km")
+                logger.error(error_msg)
+                errors.append(error_msg)
+                continue
+        
         # 生成航线
         try:
             flight_plan = _generate_flight_plan(
@@ -80,10 +108,21 @@ async def flight_planning_node(state: ReconSchedulerState) -> Dict[str, Any]:
             )
             
             if flight_plan:
+                # 二次检查：验证生成的航线是否在能力范围内
+                actual_distance = flight_plan.get("statistics", {}).get("total_distance_m", 0)
+                max_distance = device_profile.max_endurance_min * device_profile.energy_params.cruise_speed_ms * 60 * 0.9
+                
+                if actual_distance > max_distance:
+                    error_msg = (f"航线 {task_id} 超出设备能力: "
+                               f"距离{actual_distance/1000:.1f}km > 最大{max_distance/1000:.1f}km")
+                    logger.error(error_msg)
+                    errors.append(error_msg)
+                    continue
+                
                 flight_plans.append(flight_plan)
                 logger.info(f"生成航线: {task_id} -> {device_name}, "
                            f"航点数={len(flight_plan.get('waypoints', []))}, "
-                           f"距离={flight_plan.get('statistics', {}).get('total_distance_m', 0):.0f}m")
+                           f"距离={actual_distance:.0f}m")
             else:
                 warnings.append(f"任务 {task_id} 航线生成失败")
                 
@@ -91,16 +130,18 @@ async def flight_planning_node(state: ReconSchedulerState) -> Dict[str, Any]:
             logger.error(f"生成航线失败: {task_id}, 错误: {e}")
             warnings.append(f"任务 {task_id} 航线生成异常: {str(e)}")
     
-    logger.info(f"航线规划完成: 生成{len(flight_plans)}条航线")
+    logger.info(f"航线规划完成: 生成{len(flight_plans)}条航线, 错误{len(errors)}个")
     
     return {
         "flight_plans": flight_plans,
         "warnings": warnings,
+        "errors": errors,
         "current_phase": "flight_planning",
         "phase_history": state.get("phase_history", []) + [{
             "phase": "flight_planning",
             "timestamp": datetime.now().isoformat(),
             "plans_count": len(flight_plans),
+            "errors_count": len(errors),
         }],
     }
 
@@ -390,3 +431,85 @@ def _perform_safety_checks(
         })
     
     return checks
+
+
+def _check_area_feasibility(
+    polygon: List[Tuple[float, float]],
+    device_profile: Any,
+    scan_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    检查区域是否在设备能力范围内
+    
+    根据区域面积、扫描参数和设备续航能力，预估飞行距离并判断可行性。
+    
+    Args:
+        polygon: 区域多边形坐标 [(lat, lng), ...]
+        device_profile: 设备配置
+        scan_config: 扫描配置
+    
+    Returns:
+        包含feasible、estimated_distance_km、max_distance_km的字典
+    """
+    if not polygon or len(polygon) < 3:
+        return {"feasible": True, "estimated_distance_km": 0, "max_distance_km": 0}
+    
+    # 计算区域边界
+    min_lat = min(p[0] for p in polygon)
+    max_lat = max(p[0] for p in polygon)
+    min_lng = min(p[1] for p in polygon)
+    max_lng = max(p[1] for p in polygon)
+    
+    # 计算区域尺寸（米）
+    lat_span_m = (max_lat - min_lat) * 111000
+    avg_lat = (min_lat + max_lat) / 2
+    lng_span_m = (max_lng - min_lng) * 111000 * math.cos(math.radians(avg_lat))
+    
+    # 获取扫描参数
+    altitude_m = scan_config.get("altitude_m", 100)
+    sensor_fov_deg = scan_config.get("sensor_fov_deg", 84)
+    overlap_percent = scan_config.get("overlap_percent", 20)
+    
+    # 计算航线间距
+    swath_width_m = 2 * altitude_m * math.tan(math.radians(sensor_fov_deg / 2))
+    line_spacing_m = swath_width_m * (1 - overlap_percent / 100)
+    
+    if line_spacing_m <= 0:
+        line_spacing_m = 50  # 安全默认值
+    
+    # 预估航线数量（取较短边作为扫描方向）
+    if lat_span_m > lng_span_m:
+        num_lines = max(1, int(lng_span_m / line_spacing_m) + 1)
+        line_length_m = lat_span_m
+    else:
+        num_lines = max(1, int(lat_span_m / line_spacing_m) + 1)
+        line_length_m = lng_span_m
+    
+    # 预估总飞行距离（扫描距离 + 转弯 + 往返）
+    scan_distance_m = num_lines * line_length_m
+    turn_distance_m = (num_lines - 1) * line_spacing_m
+    # 假设起降点在区域边缘，往返距离约为对角线
+    return_distance_m = math.sqrt(lat_span_m**2 + lng_span_m**2) * 2
+    
+    estimated_distance_m = scan_distance_m + turn_distance_m + return_distance_m
+    estimated_distance_km = estimated_distance_m / 1000
+    
+    # 计算设备最大可飞距离（90%安全系数）
+    max_endurance_min = device_profile.max_endurance_min
+    cruise_speed_ms = device_profile.energy_params.cruise_speed_ms
+    max_distance_m = max_endurance_min * cruise_speed_ms * 60 * 0.9
+    max_distance_km = max_distance_m / 1000
+    
+    feasible = estimated_distance_m <= max_distance_m
+    
+    # 关键日志：区域可行性检查结果
+    logger.info(f"[FlightPlanning] 区域检查: {lat_span_m:.0f}m × {lng_span_m:.0f}m = {lat_span_m * lng_span_m / 1e6:.2f}km²")
+    logger.info(f"[FlightPlanning] 预检查: feasible={feasible}, est={estimated_distance_km:.1f}km, max={max_distance_km:.1f}km, lines={num_lines}")
+    
+    return {
+        "feasible": feasible,
+        "estimated_distance_km": estimated_distance_km,
+        "max_distance_km": max_distance_km,
+        "area_size_m2": lat_span_m * lng_span_m,
+        "num_lines": num_lines,
+    }

@@ -268,33 +268,38 @@ class OverallPlanAgent:
     def _extract_modules(self, values: dict[str, Any]) -> list[PlanModuleItem]:
         """提取模块数据，按Word模板8章结构。
         
-        注意：CrewAI返回的是字符串文本，不是dict。
+        改进：模块0返回前端期望的结构化数据格式，其他模块返回Markdown文本。
         """
         modules = []
 
-        # 第0章：总体描述 - 直接使用module_0_basic_disaster文本
-        basic_disaster = values.get("module_0_basic_disaster", "")
+        # 第0章：基本灾情（结构化数据，供前端表单编辑）
+        # 前端期望格式：{description, people: {deaths, injured, ...}, buildingDamage: {...}, ...}
+        basic_disaster_structured = self._build_frontend_disaster_format(values)
         modules.append(PlanModuleItem(
             index=0,
             title=MODULE_TITLES[0],
-            value=self._ensure_string(basic_disaster),
+            value=basic_disaster_structured,
         ))
 
-        # 第一章：当前灾情初步评估 - 同样使用module_0文本
+        # 第一章：当前灾情初步评估（Markdown文本）
+        overview_text = values.get("module_0_overview", "")
+        if not overview_text:
+            overview_text = self._generate_overview_from_structured(basic_disaster_structured)
         modules.append(PlanModuleItem(
             index=1,
             title=MODULE_TITLES[1],
-            value=self._ensure_string(basic_disaster),
+            value=overview_text,
         ))
 
-        # 第二章：组织指挥 - 目前未生成
+        # 第二章：组织指挥（从command_groups生成）
+        command_text = values.get("module_2_command", "")
         modules.append(PlanModuleItem(
             index=2,
             title=MODULE_TITLES[2],
-            value="（待完善：组织指挥结构）",
+            value=command_text if command_text else "（待生成：组织指挥结构）",
         ))
 
-        # 第三章：救援力量部署与任务分工 - 合并module_1到module_4
+        # 第三章：救援力量部署与任务分工
         chapter_3_value = self._merge_chapter_3(values)
         modules.append(PlanModuleItem(
             index=3,
@@ -303,34 +308,147 @@ class OverallPlanAgent:
         ))
 
         # 第四章：次生灾害预防与安全措施
+        secondary_value = values.get("module_4_secondary_disaster", values.get("module_5_secondary_disaster", ""))
         modules.append(PlanModuleItem(
             index=4,
             title=MODULE_TITLES[4],
-            value=self._ensure_string(values.get("module_5_secondary_disaster", "")),
+            value=self._ensure_string(secondary_value),
         ))
 
         # 第五章：通信与信息保障
+        comm_value = values.get("module_5_communication", values.get("module_6_communication", ""))
         modules.append(PlanModuleItem(
             index=5,
             title=MODULE_TITLES[5],
-            value=self._ensure_string(values.get("module_6_communication", "")),
+            value=self._ensure_string(comm_value),
         ))
 
         # 第六章：物资调配与运输保障
+        logistics_value = values.get("module_6_logistics", values.get("module_7_logistics", ""))
         modules.append(PlanModuleItem(
             index=6,
             title=MODULE_TITLES[6],
-            value=self._ensure_string(values.get("module_7_logistics", "")),
+            value=self._ensure_string(logistics_value),
         ))
 
         # 第七章：救援力量自身保障
+        support_value = values.get("module_7_self_support", values.get("module_8_self_support", ""))
         modules.append(PlanModuleItem(
             index=7,
             title=MODULE_TITLES[7],
-            value=self._ensure_string(values.get("module_8_self_support", "")),
+            value=self._ensure_string(support_value),
         ))
 
         return modules
+
+    def _build_frontend_disaster_format(self, values: dict[str, Any]) -> dict[str, Any]:
+        """构建前端期望的灾情数据格式
+        
+        前端BasicDisasterSituation组件期望格式：
+        {
+            description: string,
+            people: { deaths, injured, seriousInjury, missing },
+            buildingDamage: { damage, moderateDamage },
+            roadInfo: { damageRoads, accessibleRoads },
+            additionalInfo: string
+        }
+        """
+        # 从新的结构化数据获取（优先）
+        assessment = values.get("module_1_disaster_assessment", {})
+        
+        # 兼容旧字段
+        if not assessment:
+            assessment = values.get("module_0_basic_disaster", {})
+        
+        # 如果是字符串，返回默认结构
+        if isinstance(assessment, str):
+            return {
+                "description": assessment if assessment else "",
+                "people": {"deaths": 0, "injured": 0, "seriousInjury": 0, "missing": 0},
+                "buildingDamage": {"damage": 0, "moderateDamage": 0},
+                "roadInfo": {"damageRoads": 0, "accessibleRoads": 0},
+                "additionalInfo": "",
+            }
+        
+        # 构建前端期望的格式
+        deaths = assessment.get("deaths", 0)
+        injuries = assessment.get("injuries", 0)
+        missing = assessment.get("missing", 0)
+        trapped = assessment.get("trapped", 0)
+        buildings_collapsed = assessment.get("buildings_collapsed", 0)
+        buildings_damaged = assessment.get("buildings_damaged", 0)
+        
+        # 生成描述
+        disaster_name = assessment.get("disaster_name", "")
+        disaster_type = assessment.get("disaster_type", "")
+        occurrence_time = assessment.get("occurrence_time", "")
+        affected_area = assessment.get("affected_area", "")
+        
+        description_parts = []
+        if disaster_name:
+            description_parts.append(disaster_name)
+        if disaster_type:
+            description_parts.append(f"灾害类型：{disaster_type}")
+        if occurrence_time:
+            description_parts.append(f"发生时间：{occurrence_time}")
+        if affected_area:
+            description_parts.append(f"受灾区域：{affected_area}")
+        
+        description = "；".join(description_parts) if description_parts else ""
+        
+        return {
+            "description": description,
+            "people": {
+                "deaths": deaths,
+                "injured": injuries,
+                "seriousInjury": int(injuries * 0.25) if injuries > 0 else 0,
+                "missing": missing,
+                "trapped": trapped,
+            },
+            "buildingDamage": {
+                "damage": buildings_collapsed,
+                "moderateDamage": buildings_damaged,
+            },
+            "roadInfo": {
+                "damageRoads": 0,
+                "accessibleRoads": 0,
+            },
+            "additionalInfo": assessment.get("infrastructure_damage", ""),
+        }
+
+    def _generate_overview_from_structured(self, structured: dict[str, Any]) -> str:
+        """从结构化数据生成概述文本"""
+        lines = []
+        
+        description = structured.get("description", "")
+        if description:
+            lines.append(f"## 灾情概述\n\n{description}")
+        
+        people = structured.get("people", {})
+        if any(people.values()):
+            lines.append("\n### 人员伤亡情况")
+            if people.get("deaths", 0) > 0:
+                lines.append(f"- 死亡：{people['deaths']}人")
+            if people.get("injured", 0) > 0:
+                lines.append(f"- 受伤：{people['injured']}人")
+            if people.get("missing", 0) > 0:
+                lines.append(f"- 失联：{people['missing']}人")
+            if people.get("trapped", 0) > 0:
+                lines.append(f"- 被困：{people['trapped']}人")
+        
+        building = structured.get("buildingDamage", {})
+        if any(building.values()):
+            lines.append("\n### 建筑损毁情况")
+            if building.get("damage", 0) > 0:
+                lines.append(f"- 倒塌：{building['damage']}栋")
+            if building.get("moderateDamage", 0) > 0:
+                lines.append(f"- 受损：{building['moderateDamage']}栋")
+        
+        additional = structured.get("additionalInfo", "")
+        if additional:
+            lines.append(f"\n### 其他情况\n{additional}")
+        
+        return "\n".join(lines) if lines else "（待生成：灾情概述）"
 
     def _ensure_string(self, value: Any) -> str:
         """确保值是字符串，处理dict和其他类型"""

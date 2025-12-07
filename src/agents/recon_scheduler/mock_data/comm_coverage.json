@@ -1,0 +1,124 @@
+{
+  "version": "1.0.0",
+  "description": "四川茂县区域通信覆盖模拟数据",
+  "base_stations": [
+    {
+      "id": "bs_maoxian_01",
+      "name": "茂县主基站",
+      "location": {"lat": 31.68, "lng": 103.85, "alt": 1600},
+      "power_dbm": 43,
+      "frequency_mhz": 1800,
+      "coverage_radius_km": 5
+    },
+    {
+      "id": "bs_maoxian_02",
+      "name": "茂县北基站",
+      "location": {"lat": 31.75, "lng": 103.88, "alt": 1800},
+      "power_dbm": 40,
+      "frequency_mhz": 1800,
+      "coverage_radius_km": 4
+    },
+    {
+      "id": "bs_maoxian_03",
+      "name": "茂县南基站",
+      "location": {"lat": 31.62, "lng": 103.82, "alt": 1550},
+      "power_dbm": 40,
+      "frequency_mhz": 1800,
+      "coverage_radius_km": 4
+    },
+    {
+      "id": "bs_maoxian_emergency",
+      "name": "应急通信车",
+      "location": {"lat": 31.70, "lng": 103.87, "alt": 1650},
+      "power_dbm": 36,
+      "frequency_mhz": 1800,
+      "coverage_radius_km": 2,
+      "mobile": true
+    }
+  ],
+  "coverage_grid": {
+    "bounds": {
+      "min_lat": 31.5,
+      "max_lat": 31.9,
+      "min_lng": 103.6,
+      "max_lng": 104.1
+    },
+    "resolution_m": 100,
+    "note": "实际覆盖栅格数据较大，此处省略，使用实时计算"
+  },
+  "blind_zones": [
+    {
+      "id": "bz_valley_01",
+      "name": "山谷盲区1",
+      "reason": "山体遮挡",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [103.78, 31.72],
+            [103.80, 31.72],
+            [103.80, 31.74],
+            [103.78, 31.74],
+            [103.78, 31.72]
+          ]
+        ]
+      }
+    },
+    {
+      "id": "bz_valley_02",
+      "name": "山谷盲区2",
+      "reason": "地形复杂",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [103.90, 31.65],
+            [103.92, 31.65],
+            [103.92, 31.67],
+            [103.90, 31.67],
+            [103.90, 31.65]
+          ]
+        ]
+      }
+    },
+    {
+      "id": "bz_tunnel_01",
+      "name": "隧道区域",
+      "reason": "隧道无信号",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [103.86, 31.69],
+            [103.865, 31.69],
+            [103.865, 31.695],
+            [103.86, 31.695],
+            [103.86, 31.69]
+          ]
+        ]
+      }
+    }
+  ],
+  "relay_points": [
+    {
+      "id": "relay_01",
+      "name": "山顶中继点1",
+      "location": {"lat": 31.73, "lng": 103.79, "alt": 2200},
+      "expected_signal_dbm": -75,
+      "notes": "可用于覆盖bz_valley_01"
+    },
+    {
+      "id": "relay_02",
+      "name": "山脊中继点",
+      "location": {"lat": 31.66, "lng": 103.91, "alt": 2000},
+      "expected_signal_dbm": -78,
+      "notes": "可用于覆盖bz_valley_02"
+    }
+  ],
+  "signal_threshold_dbm": -90,
+  "metadata": {
+    "created_at": "2024-12-06T00:00:00Z",
+    "source": "模拟数据",
+    "accuracy_note": "基于简化自由空间路径损耗模型，实际部署需接入真实测量数据"
+  }
+}

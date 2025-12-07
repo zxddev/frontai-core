@@ -18,6 +18,12 @@ class LoginRequest(BaseModel):
     password: str = Field(..., min_length=1, description="密码")
 
 
+class PhoneLoginRequest(BaseModel):
+    """手机号验证码登录请求（外部救援队伍）"""
+    phone: str = Field(..., pattern=r"^1[3-9]\d{9}$", description="手机号")
+    code: str = Field(..., min_length=4, max_length=6, description="验证码")
+
+
 class TokenResponse(BaseModel):
     """Token响应"""
     access_token: str = Field(..., description="访问令牌")
@@ -55,8 +61,13 @@ class UserInfo(BaseModel):
     id: UUID
     username: str
     real_name: str
+    phone: Optional[str] = None
+    user_type: Optional[str] = None
     roles: list[RoleInfo]
     permissions: list[str]
+    # 所属队伍信息（通过手机号匹配team_members_v2.contact_phone）
+    team_id: Optional[UUID] = Field(None, description="所属队伍ID")
+    team_name: Optional[str] = Field(None, description="所属队伍名称")
 
 
 class RoleCategory(str, Enum):

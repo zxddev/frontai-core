@@ -168,7 +168,7 @@ class PlanAndSaveResponse(BaseModel):
 
 class GenerateAlternativesRequest(BaseModel):
     """生成绕行方案请求"""
-    task_id: UUID = Field(..., description="任务ID")
+    task_id: Optional[UUID] = Field(default=None, description="任务ID（可选，不传则不存储到数据库）")
     origin: PointRequest = Field(..., description="起点坐标")
     destination: PointRequest = Field(..., description="终点坐标")
     risk_area_ids: List[UUID] = Field(..., description="需要避让的风险区域ID列表")

@@ -82,6 +82,7 @@ class PymooOptimizer(AlgorithmBase):
         return {
             "pop_size": 100,
             "n_generations": 100,
+            "time_budget_seconds": None,  # 时间预算（秒），优先于n_generations
             "algorithm": "auto",  # auto/nsga2/nsga3
             "n_partitions": 12,   # NSGA-III 参考点划分
             "seed": None,
@@ -132,11 +133,20 @@ class PymooOptimizer(AlgorithmBase):
         else:
             algorithm = NSGA2(pop_size=pop_size)
         
+        # 终止条件：优先使用时间预算，否则使用代数
+        time_budget = problem.get("time_budget_seconds", self.params.get("time_budget_seconds"))
+        if time_budget is not None and time_budget > 0:
+            termination = ("time", time_budget)
+            logger.info(f"[PymooOptimizer] 使用时间预算终止条件: {time_budget}秒")
+        else:
+            termination = ("n_gen", n_gen)
+            logger.info(f"[PymooOptimizer] 使用代数终止条件: {n_gen}代")
+        
         # 执行优化
         res = minimize(
             pymoo_problem,
             algorithm,
-            ("n_gen", n_gen),
+            termination,
             seed=problem.get("seed", self.params["seed"]),
             verbose=problem.get("verbose", self.params["verbose"])
         )

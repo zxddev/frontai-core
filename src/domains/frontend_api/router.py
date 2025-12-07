@@ -22,6 +22,7 @@ from .overall_plan import router as overall_plan_router
 from .pending_action import pending_action_router
 from .recon_plan.router import router as recon_plan_router
 from .staging_area import router as staging_area_router
+from .team_location import team_location_router
 from .websocket import frontend_ws_router
 
 
@@ -35,9 +36,10 @@ frontend_router.include_router(user_router)
 # 方案/任务
 frontend_router.include_router(task_router)
 
-# 资源/车辆
+# 资源/车辆/队伍位置
 frontend_router.include_router(unit_router)
 frontend_router.include_router(car_router)
+frontend_router.include_router(team_location_router)
 
 # 图层/实体
 frontend_router.include_router(layers_router)

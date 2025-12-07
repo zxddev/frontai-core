@@ -35,90 +35,83 @@ async def run_simulation(state: EmergencyAIState) -> Dict[str, Any]:
     recommended_scheme = state.get("recommended_scheme")
     
     if not recommended_scheme:
-        logger.warning("无推荐方案，跳过仿真闭环", extra={"event_id": event_id})
-        return {}
+        raise RuntimeError(f"[仿真闭环] 无推荐方案，event_id={event_id}")
         
     logger.info("执行仿真闭环节点", extra={"event_id": event_id})
     start_time = time.time()
     
-    try:
-        # 1. 准备仿真输入数据
-        sim_tasks = _prepare_sim_tasks(state)
-        sim_resources = _prepare_sim_resources(recommended_scheme, state)
-        sim_scenario = _prepare_sim_scenario(state)
-        
-        problem = {
-            "tasks": sim_tasks,
-            "resources": sim_resources,
-            "scenario": sim_scenario,
-            "simulation_time": 48 * 60, # 48小时
-            "monte_carlo_runs": 30      # 30次蒙特卡洛
+    # 1. 准备仿真输入数据
+    sim_tasks = _prepare_sim_tasks(state)
+    sim_resources = _prepare_sim_resources(recommended_scheme, state)
+    sim_scenario = _prepare_sim_scenario(state)
+    
+    problem = {
+        "tasks": sim_tasks,
+        "resources": sim_resources,
+        "scenario": sim_scenario,
+        "simulation_time": 48 * 60, # 48小时
+        "monte_carlo_runs": 30      # 30次蒙特卡洛
+    }
+    
+    # 2. 执行仿真
+    simulator = DiscreteEventSimulator()
+    result = simulator.run(problem)
+    
+    if result.status != AlgorithmStatus.SUCCESS:
+        raise RuntimeError(f"[仿真闭环] 仿真执行失败: {result.message}")
+    
+    solution = result.solution
+    summary = solution.get("summary", {})
+    
+    logger.info(
+        "仿真完成",
+        extra={
+            "survival_rate": summary.get("avg_survival_rate"),
+            "preventable_deaths": summary.get("avg_preventable_deaths"),
+            "completion_time": summary.get("avg_completion_time_min")
         }
-        
-        # 2. 执行仿真
-        simulator = DiscreteEventSimulator()
-        result = simulator.run(problem)
-        
-        if result.status == AlgorithmStatus.SUCCESS:
-            solution = result.solution
-            summary = solution.get("summary", {})
-            
-            logger.info(
-                "仿真完成",
-                extra={
-                    "survival_rate": summary.get("avg_survival_rate"),
-                    "preventable_deaths": summary.get("avg_preventable_deaths"),
-                    "completion_time": summary.get("avg_completion_time_min")
-                }
-            )
-            
-            # 3. 更新方案评分和解释
-            # 将仿真得出的生存率作为"置信度"或"预期效果"的补充
-            simulation_result = {
-                "survival_rate": summary.get("avg_survival_rate"),
-                "preventable_deaths": summary.get("avg_preventable_deaths"),
-                "survival_quality": summary.get("avg_survival_quality"),
-                "completion_time_hours": round(summary.get("avg_completion_time_min", 0) / 60, 1)
-            }
-            
-            # 更新最终输出
-            final_output = state.get("final_output", {})
-            final_output["simulation_result"] = simulation_result
-            
-            # 如果有方案解释，追加仿真结论
-            scheme_explanation = state.get("scheme_explanation", "")
-            if scheme_explanation:
-                sim_text = (
-                    f"\n\n## 十二、数字孪生推演结论\n"
-                    f"经多智能体生命仿真（ABM）验证，本方案预期效果如下：\n"
-                    f"- **预期生存率**: {simulation_result['survival_rate']*100:.1f}%\n"
-                    f"- **可预防死亡**: {simulation_result['preventable_deaths']:.1f}人 (需重点关注)\n"
-                    f"- **平均生存质量**: {simulation_result['survival_quality']:.1f}/100\n"
-                    f"- **预计完工时间**: {simulation_result['completion_time_hours']}小时\n"
-                )
-                scheme_explanation += sim_text
-            
-            # 更新追踪信息
-            trace = state.get("trace", {})
-            trace["phases_executed"] = trace.get("phases_executed", []) + ["run_simulation"]
-            trace["simulation_metrics"] = simulation_result
-            
-            elapsed_ms = int((time.time() - start_time) * 1000)
-            
-            return {
-                "final_output": final_output,
-                "scheme_explanation": scheme_explanation,
-                "trace": trace,
-                "current_phase": "simulation_completed"
-            }
-            
-        else:
-            logger.warning(f"仿真执行失败: {result.message}")
-            return {}
-            
-    except Exception as e:
-        logger.error(f"仿真闭环异常: {e}", exc_info=True)
-        return {}
+    )
+    
+    # 3. 更新方案评分和解释
+    # 将仿真得出的生存率作为"置信度"或"预期效果"的补充
+    simulation_result = {
+        "survival_rate": summary.get("avg_survival_rate"),
+        "preventable_deaths": summary.get("avg_preventable_deaths"),
+        "survival_quality": summary.get("avg_survival_quality"),
+        "completion_time_hours": round(summary.get("avg_completion_time_min", 0) / 60, 1)
+    }
+    
+    # 更新最终输出
+    final_output = state.get("final_output", {})
+    final_output["simulation_result"] = simulation_result
+    
+    # 如果有方案解释，追加仿真结论
+    scheme_explanation = state.get("scheme_explanation", "")
+    if scheme_explanation:
+        sim_text = (
+            f"\n\n## 十二、数字孪生推演结论\n"
+            f"经多智能体生命仿真（ABM）验证，本方案预期效果如下：\n"
+            f"- **预期生存率**: {simulation_result['survival_rate']*100:.1f}%\n"
+            f"- **可预防死亡**: {simulation_result['preventable_deaths']:.1f}人 (需重点关注)\n"
+            f"- **平均生存质量**: {simulation_result['survival_quality']:.1f}/100\n"
+            f"- **预计完工时间**: {simulation_result['completion_time_hours']}小时\n"
+        )
+        scheme_explanation += sim_text
+    
+    # 更新追踪信息
+    trace = state.get("trace", {})
+    trace["phases_executed"] = trace.get("phases_executed", []) + ["run_simulation"]
+    trace["simulation_metrics"] = simulation_result
+    
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    logger.info(f"[仿真闭环] 执行完成，耗时{elapsed_ms}ms")
+    
+    return {
+        "final_output": final_output,
+        "scheme_explanation": scheme_explanation,
+        "trace": trace,
+        "current_phase": "simulation_completed"
+    }
 
 
 def _prepare_sim_tasks(state: EmergencyAIState) -> List[Dict[str, Any]]:

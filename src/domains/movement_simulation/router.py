@@ -39,7 +39,7 @@ async def get_batch_svc() -> BatchMovementService:
 
 
 # =============================================================================
-# 单实体移动API
+# 单实体移动API（固定路径必须在动态路径 /{session_id} 之前）
 # =============================================================================
 
 @router.post("/start", response_model=MovementStartResponse, status_code=status.HTTP_201_CREATED)
@@ -67,6 +67,51 @@ async def start_movement(
     except ValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
 
+
+@router.get("/active", response_model=ActiveSessionsResponse)
+async def list_active_sessions(
+    manager: MovementSimulationManager = Depends(get_manager),
+) -> ActiveSessionsResponse:
+    """
+    获取所有活跃会话
+    
+    返回所有正在进行中的移动会话列表。
+    """
+    sessions = await manager.get_active_sessions()
+    return ActiveSessionsResponse(total=len(sessions), sessions=sessions)
+
+
+@router.post("/cancel-all")
+async def cancel_all_movements(
+    manager: MovementSimulationManager = Depends(get_manager),
+):
+    """
+    取消所有活跃的移动会话
+    
+    一次性取消所有正在进行的移动仿真，下次启动不会恢复这些会话。
+    """
+    sessions = await manager.get_active_sessions()
+    cancelled = []
+    failed = []
+    
+    for session in sessions:
+        try:
+            await manager.cancel_movement(session.session_id)
+            cancelled.append(session.session_id)
+        except Exception as e:
+            failed.append({"session_id": session.session_id, "error": str(e)})
+    
+    return {
+        "cancelled_count": len(cancelled),
+        "failed_count": len(failed),
+        "cancelled_sessions": cancelled,
+        "failed_sessions": failed,
+    }
+
+
+# =============================================================================
+# 动态路径（/{session_id}）
+# =============================================================================
 
 @router.post("/{session_id}/pause", response_model=MovementStatusResponse)
 async def pause_movement(
@@ -136,19 +181,6 @@ async def get_movement_status(
         return await manager.get_status(session_id)
     except NotFoundError as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=e.detail)
-
-
-@router.get("/active", response_model=ActiveSessionsResponse)
-async def list_active_sessions(
-    manager: MovementSimulationManager = Depends(get_manager),
-) -> ActiveSessionsResponse:
-    """
-    获取所有活跃会话
-    
-    返回所有正在进行中的移动会话列表。
-    """
-    sessions = await manager.get_active_sessions()
-    return ActiveSessionsResponse(total=len(sessions), sessions=sessions)
 
 
 # =============================================================================

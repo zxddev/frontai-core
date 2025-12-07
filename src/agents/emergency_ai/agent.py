@@ -2,17 +2,24 @@
 EmergencyAIAgent主类
 
 封装LangGraph流程，提供统一的分析接口。
+支持人在回路(HITL)机制，关键决策点需指挥官审批后继续执行。
 """
 from __future__ import annotations
 
 import logging
 import threading
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Union
 from uuid import UUID
 from decimal import Decimal
 
-from .state import create_initial_state, EmergencyAIState
+from langgraph.types import Command
+
+from .state import (
+    create_initial_state,
+    EmergencyAIState,
+    HumanApprovalResponse,
+)
 from .graph import get_emergency_ai_graph
 
 logger = logging.getLogger(__name__)
@@ -60,9 +67,13 @@ class EmergencyAIAgent:
         structured_input: Optional[Dict[str, Any]] = None,
         constraints: Optional[Dict[str, Any]] = None,
         optimization_weights: Optional[Dict[str, float]] = None,
+        thread_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         执行应急分析
+        
+        支持HITL(人在回路)机制，在关键决策点会暂停等待指挥官审批。
+        返回结果中如果包含__interrupt__字段，表示流程被暂停等待人工审批。
         
         Args:
             event_id: 事件ID
@@ -71,25 +82,31 @@ class EmergencyAIAgent:
             structured_input: 结构化输入（位置、时间等）
             constraints: 约束条件
             optimization_weights: 优化权重配置
+            thread_id: 线程ID（用于状态持久化和HITL恢复，不传则使用event_id）
             
         Returns:
             分析结果，包含：
-            - success: 是否成功
+            - success: 是否成功（如果被interrupt则为None）
+            - status: 状态 (completed/interrupted/failed)
+            - __interrupt__: 如果被暂停，包含审批请求信息
             - understanding: 灾情理解结果
             - reasoning: 规则推理结果
-            - htn_decomposition: HTN任务分解结果（scene_codes, task_sequence, parallel_tasks）
+            - htn_decomposition: HTN任务分解结果
             - matching: 资源匹配结果
-            - optimization: 方案优化结果（5维评估得分）
+            - optimization: 方案优化结果
             - recommended_scheme: 推荐方案
             - scheme_explanation: 方案解释
             - trace: 执行追踪
             - errors: 错误列表
         """
+        actual_thread_id = thread_id or event_id
+        
         logger.info(
             "开始应急AI分析",
             extra={
                 "event_id": event_id,
                 "scenario_id": scenario_id,
+                "thread_id": actual_thread_id,
                 "description_length": len(disaster_description),
             }
         )
@@ -105,24 +122,56 @@ class EmergencyAIAgent:
             optimization_weights=optimization_weights,
         )
         
+        # 配置thread_id用于状态持久化和HITL
+        config = {"configurable": {"thread_id": actual_thread_id}}
+        
         # 执行图
         try:
-            final_state = await self._graph.ainvoke(initial_state)
+            final_state = await self._graph.ainvoke(initial_state, config)
         except Exception as e:
             logger.exception("EmergencyAI执行失败", extra={"error": str(e)})
             return {
                 "success": False,
                 "event_id": event_id,
                 "scenario_id": scenario_id,
+                "thread_id": actual_thread_id,
                 "status": "failed",
                 "errors": [str(e)],
                 "execution_time_ms": int((time.time() - start_time) * 1000),
             }
         
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        
+        # 检查是否被interrupt暂停
+        interrupt_info = final_state.get("__interrupt__")
+        if interrupt_info:
+            logger.info(
+                "[HITL] 流程被暂停等待审批",
+                extra={
+                    "event_id": event_id,
+                    "thread_id": actual_thread_id,
+                    "interrupt_type": interrupt_info[0].value.get("approval_type") if interrupt_info else None,
+                }
+            )
+            return {
+                "success": None,
+                "event_id": event_id,
+                "scenario_id": scenario_id,
+                "thread_id": actual_thread_id,
+                "status": "interrupted",
+                "__interrupt__": [
+                    {
+                        "value": i.value,
+                        "interrupt_id": getattr(i, "interrupt_id", None),
+                    }
+                    for i in interrupt_info
+                ],
+                "execution_time_ms": elapsed_ms,
+            }
+        
         # 获取最终输出
         result = final_state.get("final_output", {})
         
-        elapsed_ms = int((time.time() - start_time) * 1000)
         logger.info(
             "应急AI分析完成",
             extra={
@@ -134,6 +183,93 @@ class EmergencyAIAgent:
         
         # 确保执行时间正确
         result["execution_time_ms"] = elapsed_ms
+        result["thread_id"] = actual_thread_id
+        result["status"] = "completed"
+        
+        return result
+    
+    async def resume(
+        self,
+        thread_id: str,
+        response: HumanApprovalResponse,
+    ) -> Dict[str, Any]:
+        """
+        恢复被interrupt暂停的流程
+        
+        在指挥官完成审批后，调用此方法传入审批结果继续执行。
+        
+        Args:
+            thread_id: 线程ID（必须与analyze时使用的thread_id一致）
+            response: 指挥官的审批响应
+            
+        Returns:
+            继续执行后的分析结果（可能再次被interrupt或最终完成）
+        """
+        logger.info(
+            "[HITL] 恢复被暂停的流程",
+            extra={
+                "thread_id": thread_id,
+                "decision": response.get("decision"),
+            }
+        )
+        start_time = time.time()
+        
+        config = {"configurable": {"thread_id": thread_id}}
+        
+        try:
+            final_state = await self._graph.ainvoke(
+                Command(resume=response),
+                config,
+            )
+        except Exception as e:
+            logger.exception("[HITL] 恢复执行失败", extra={"error": str(e)})
+            return {
+                "success": False,
+                "thread_id": thread_id,
+                "status": "failed",
+                "errors": [str(e)],
+                "execution_time_ms": int((time.time() - start_time) * 1000),
+            }
+        
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        
+        # 检查是否再次被interrupt
+        interrupt_info = final_state.get("__interrupt__")
+        if interrupt_info:
+            logger.info(
+                "[HITL] 流程再次被暂停等待审批",
+                extra={
+                    "thread_id": thread_id,
+                    "interrupt_type": interrupt_info[0].value.get("approval_type") if interrupt_info else None,
+                }
+            )
+            return {
+                "success": None,
+                "thread_id": thread_id,
+                "status": "interrupted",
+                "__interrupt__": [
+                    {
+                        "value": i.value,
+                        "interrupt_id": getattr(i, "interrupt_id", None),
+                    }
+                    for i in interrupt_info
+                ],
+                "execution_time_ms": elapsed_ms,
+            }
+        
+        # 获取最终输出
+        result = final_state.get("final_output", {})
+        result["execution_time_ms"] = elapsed_ms
+        result["thread_id"] = thread_id
+        result["status"] = "completed"
+        
+        logger.info(
+            "[HITL] 流程恢复执行完成",
+            extra={
+                "thread_id": thread_id,
+                "success": result.get("success", False),
+            }
+        )
         
         return result
     

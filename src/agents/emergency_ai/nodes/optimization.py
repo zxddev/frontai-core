@@ -2,6 +2,11 @@
 阶段4: 方案优化节点
 
 硬规则过滤、软规则评分、LLM方案解释。
+
+修改说明（HITL改造）:
+- 硬规则违反不再直接否决方案，而是标记为critical风险等级
+- 需要指挥官授权后才能执行高风险方案
+- 所有方案保留供HITL审批点展示
 """
 from __future__ import annotations
 
@@ -10,7 +15,8 @@ import time
 from typing import Dict, Any, List
 
 from ..state import EmergencyAIState, SchemeScore, AllocationSolution
-from ..tools.llm_tools import explain_scheme_async
+from src.agents.rules.engine import TRRRuleEngine
+from ..tools.llm_tools import explain_scheme_async, TimelineEvent
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +24,158 @@ logger = logging.getLogger(__name__)
 # 硬规则和权重配置已迁移到数据库，通过ConfigService访问
 
 
+# ============================================================================
+# 结构化时间线构建
+# ============================================================================
+
+def build_timeline_from_allocations(
+    allocations: List[Dict[str, Any]],
+    task_sequence: List[Dict[str, Any]],
+    disaster_type: str = "unknown",
+) -> List[TimelineEvent]:
+    """
+    基于分配方案和任务序列构建结构化时间线
+    
+    不再依赖 LLM 生成时间，而是基于队伍的真实 ETA 数据构建，
+    确保时间准确性和与方案数据的一致性。
+    
+    Args:
+        allocations: 资源分配列表，每项包含 resource_name, eta_minutes, assigned_task_name 等
+        task_sequence: HTN 任务序列
+        disaster_type: 灾害类型，用于生成适当的收尾阶段描述
+        
+    Returns:
+        按 offset_minutes 排序的时间线事件列表
+    """
+    events: List[TimelineEvent] = []
+    
+    # T+0: 接报启动
+    events.append(TimelineEvent(
+        offset_minutes=0,
+        action="接报，启动应急预案；指挥中心确认资源调度",
+        responsible_team=None,
+        phase="接报"
+    ))
+    
+    # 按 ETA 排序队伍到达事件
+    sorted_teams = sorted(allocations, key=lambda x: x.get('eta_minutes', 999))
+    
+    # 记录已添加的队伍，避免重复
+    added_teams = set()
+    
+    for team in sorted_teams:
+        eta = int(team.get('eta_minutes', 0))
+        name = team.get('resource_name', '未知队伍')
+        
+        if name in added_teams:
+            continue
+        added_teams.add(name)
+        
+        # 获取分配的任务名称
+        task_name = team.get('assigned_task_name', '')
+        if not task_name:
+            # 尝试从 capabilities 推断任务
+            caps = team.get('capabilities', [])
+            if caps:
+                task_name = f"执行{caps[0]}相关任务"
+            else:
+                task_name = "救援任务"
+        
+        events.append(TimelineEvent(
+            offset_minutes=eta,
+            action=f"{name}到达现场，开始{task_name}",
+            responsible_team=name,
+            phase="响应"
+        ))
+    
+    # 基于任务序列添加关键处置节点
+    last_arrival = 30  # 默认值
+    if task_sequence:
+        # 找到最后一个队伍的到达时间作为处置阶段开始
+        last_arrival = max([int(t.get('eta_minutes', 0)) for t in sorted_teams]) if sorted_teams else 30
+        
+        # 处置阶段（假设在全员到达后开始主要处置工作）
+        events.append(TimelineEvent(
+            offset_minutes=last_arrival + 30,
+            action="全部救援力量到位，进入全面处置阶段",
+            responsible_team=None,
+            phase="处置"
+        ))
+    
+    # 添加收尾阶段里程碑（基于灾害类型和实际作业时间估算）
+    # 时间计算：最后队伍到达 + 处置准备(30分钟) + 作业时间
+    processing_start = last_arrival + 30
+    
+    if disaster_type in ("hazmat", "化学品泄漏", "危化品"):
+        # 危化品事故：封堵作业约2-4小时，后续监测约2小时
+        containment_time = processing_start + 180  # 3小时后完成封堵
+        monitoring_time = containment_time + 120   # 再2小时后完成监测
+        
+        events.append(TimelineEvent(
+            offset_minutes=containment_time,
+            action="完成初步封堵，现场环境检测达安全阈值，进入常规监控阶段",
+            responsible_team=None,
+            phase="收尾"
+        ))
+        events.append(TimelineEvent(
+            offset_minutes=monitoring_time,
+            action="评估整体救援效果，编制现场报告，交接给后续环境修复团队",
+            responsible_team=None,
+            phase="收尾"
+        ))
+    elif disaster_type in ("earthquake", "地震"):
+        # 地震：黄金救援期72小时，但初步搜救通常6-12小时
+        initial_rescue_time = processing_start + 360  # 6小时后初步搜救完成
+        events.append(TimelineEvent(
+            offset_minutes=initial_rescue_time,
+            action="初步搜救完成，转入深度搜救和废墟清理阶段",
+            responsible_team=None,
+            phase="收尾"
+        ))
+    elif disaster_type in ("flood", "洪水", "内涝"):
+        # 洪水：转移安置约2-4小时
+        evacuation_time = processing_start + 180  # 3小时后完成转移
+        events.append(TimelineEvent(
+            offset_minutes=evacuation_time,
+            action="群众转移安置完成，进入灾后清淤和卫生防疫阶段",
+            responsible_team=None,
+            phase="收尾"
+        ))
+    elif disaster_type in ("fire", "火灾"):
+        # 火灾：扑救约1-3小时
+        suppression_time = processing_start + 120  # 2小时后完成扑救
+        events.append(TimelineEvent(
+            offset_minutes=suppression_time,
+            action="火势扑灭，现场清理和火灾原因调查启动",
+            responsible_team=None,
+            phase="收尾"
+        ))
+    else:
+        # 通用收尾：约4小时
+        completion_time = processing_start + 240
+        events.append(TimelineEvent(
+            offset_minutes=completion_time,
+            action="初步救援任务完成，进入后续处置和恢复阶段",
+            responsible_team=None,
+            phase="收尾"
+        ))
+    
+    # 按时间排序
+    events.sort(key=lambda e: e.offset_minutes)
+    
+    return events
+
+
 async def filter_hard_rules(state: EmergencyAIState) -> Dict[str, Any]:
     """
-    硬规则过滤节点：一票否决不符合安全要求的方案
+    硬规则评估节点：标记不符合安全要求的方案为高风险
     
-    对所有候选方案应用硬规则检查，过滤掉不满足
-    基本安全要求的方案。
+    对所有候选方案应用硬规则检查。违反硬规则的方案不再被删除，
+    而是标记为critical风险等级，需要指挥官授权后才能执行。
+    
+    HITL改造：
+    - 通过方案的risk_level和requires_authorization字段标记
+    - 所有方案保留，供human_review_scheme节点展示
     
     Args:
         state: 当前状态
@@ -31,65 +183,94 @@ async def filter_hard_rules(state: EmergencyAIState) -> Dict[str, Any]:
     Returns:
         更新的状态字段
     """
-    from src.agents.services.config_service import ConfigService
-    
     logger.info("执行硬规则过滤节点", extra={"event_id": state["event_id"]})
     start_time = time.time()
     
-    # 获取候选方案
     solutions = state.get("allocation_solutions", [])
     
     if not solutions:
         logger.warning("无候选方案，跳过硬规则过滤")
         return {"scheme_scores": []}
     
-    # 从数据库获取硬规则配置
-    hard_rules = await ConfigService.get_hard_rules()
+    # 使用 TRRRuleEngine 从 YAML 加载完整硬规则（包含condition等字段）
+    rule_engine = TRRRuleEngine()
     
     # 应用硬规则
     scheme_scores: List[SchemeScore] = []
     passed_count = 0
     
     for solution in solutions:
-        violations = []
-        
-        for rule in hard_rules:
-            try:
-                if not rule.check(solution):
-                    violations.append(f"{rule.rule_id}: {rule.message}")
-            except Exception as e:
-                logger.warning(f"硬规则检查异常: {rule.rule_id}", extra={"error": str(e)})
-        
+        classification_result = rule_engine.check_hard_rules(
+            solution,
+            with_classification=True,
+        )
+        results = classification_result["results"]
+        classification = classification_result["classification"]
+
+        reject_rules = classification.get("reject", [])
+        break_glass_rules = classification.get("break_glass", [])
+        warn_rules = classification.get("warn", [])
+
+        has_reject = len(reject_rules) > 0
+        has_break_glass = len(break_glass_rules) > 0
+
+        risk_level = "critical" if has_reject or has_break_glass else "normal"
+        requires_auth = has_break_glass or has_reject
+
         score: SchemeScore = {
             "scheme_id": solution["solution_id"],
-            "hard_rule_passed": len(violations) == 0,
-            "hard_rule_violations": violations,
+            "hard_rule_passed": not has_reject,
+            "hard_rule_violations": [f"{r.rule_id}: {r.message}" for r in reject_rules],
             "soft_rule_scores": {},
             "weighted_score": 0.0,
             "rank": 0,
+            "risk_level": risk_level,
+            "requires_authorization": requires_auth,
+            "safety_classification": {
+                "reject": [r.model_dump() for r in reject_rules],
+                "break_glass": [r.model_dump() for r in break_glass_rules],
+                "warn": [r.model_dump() for r in warn_rules],
+            },
+            "break_glass_rules": [r.model_dump() for r in break_glass_rules],
         }
         scheme_scores.append(score)
-        
-        if len(violations) == 0:
+
+        if not has_reject:
             passed_count += 1
         else:
             logger.info(
-                "方案被硬规则否决",
-                extra={"scheme_id": solution["solution_id"], "violations": violations}
+                "方案违反硬规则",
+                extra={
+                    "scheme_id": solution["solution_id"],
+                    "reject_count": len(reject_rules),
+                }
             )
+        if has_break_glass:
+            logger.warning(
+                "方案触发 Break Glass，需要人工确认并审计",
+                extra={
+                    "scheme_id": solution["solution_id"],
+                    "break_glass_count": len(break_glass_rules),
+                }
+            )
+    
+    # 统计高风险方案数量
+    high_risk_count = len([s for s in scheme_scores if s["risk_level"] == "critical"])
     
     # 更新追踪信息
     trace = state.get("trace", {})
     trace["phases_executed"] = trace.get("phases_executed", []) + ["filter_hard_rules"]
-    trace["hard_rules_checked"] = len(hard_rules)
+    trace["hard_rules_checked"] = rule_engine.hard_rules_count
     trace["schemes_passed"] = passed_count
+    trace["schemes_high_risk"] = high_risk_count
     
     elapsed_ms = int((time.time() - start_time) * 1000)
     logger.info(
-        "硬规则过滤完成",
+        "硬规则评估完成",
         extra={
             "total_schemes": len(solutions),
             "passed_count": passed_count,
+            "high_risk_count": high_risk_count,
             "elapsed_ms": elapsed_ms,
         }
     )
@@ -139,20 +320,17 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
     solution_map = {s["solution_id"]: s for s in solutions}
     
     # 计算软规则评分
+    # HITL改造：所有方案都参与软规则评分，包括违反硬规则的高风险方案
     for score in scheme_scores:
-        if not score["hard_rule_passed"]:
-            # 未通过硬规则的方案不参与软规则评分
-            score["weighted_score"] = 0.0
-            continue
-        
         solution = solution_map.get(score["scheme_id"])
         if not solution:
             continue
         
         # 计算5维评估得分（归一化到0-1）
+        disaster_type = parsed_disaster.get("disaster_type", "earthquake") if parsed_disaster else "earthquake"
         
         # 1. 成功率：基于历史案例相似度和能力匹配度（权重0.35）
-        success_rate_score = _calculate_success_rate(solution, similar_cases)
+        success_rate_score = _calculate_success_rate(solution, similar_cases, disaster_type)
         
         # 2. 响应时间：越短越好（权重0.30）
         response_time = solution.get("response_time_min", 60)
@@ -196,19 +374,32 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
         logger.info(f"  → 加权总分={weighted_score:.3f}")
     
     # 排名
-    passed_scores = [s for s in scheme_scores if s["hard_rule_passed"]]
-    passed_scores.sort(key=lambda x: x["weighted_score"], reverse=True)
-    for i, score in enumerate(passed_scores):
-        score["rank"] = i + 1
+    # HITL改造：所有方案都参与排名
+    # 通过硬规则的方案优先排名，高风险方案排在后面
+    normal_scores = [s for s in scheme_scores if s["hard_rule_passed"]]
+    high_risk_scores = [s for s in scheme_scores if not s["hard_rule_passed"]]
+    
+    # 分别按加权得分排序
+    normal_scores.sort(key=lambda x: x["weighted_score"], reverse=True)
+    high_risk_scores.sort(key=lambda x: x["weighted_score"], reverse=True)
+    
+    # 分配排名：正常方案排在前面，高风险方案排在后面
+    rank = 1
+    for score in normal_scores:
+        score["rank"] = rank
+        rank += 1
+    for score in high_risk_scores:
+        score["rank"] = rank
+        rank += 1
     
     # 确定推荐方案
     recommended_scheme: AllocationSolution | None = None
     requires_reinforcement: bool = False
     reinforcement_message: str = ""
     
-    if passed_scores:
+    if normal_scores:
         # 正常情况：选择得分最高的通过方案
-        best_score = passed_scores[0]
+        best_score = normal_scores[0]
         recommended_scheme = solution_map.get(best_score["scheme_id"])
     elif solutions:
         # 巨灾场景：所有方案都被硬规则否决，仍需输出最佳可用方案
@@ -220,7 +411,8 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
         recommended_scheme = best_solution
         
         # 为巨灾方案计算5维评分（即使硬规则未通过也需要评估）
-        catastrophe_success_rate = _calculate_success_rate(best_solution, similar_cases)
+        catastrophe_disaster_type = parsed_disaster.get("disaster_type", "earthquake") if parsed_disaster else "earthquake"
+        catastrophe_success_rate = _calculate_success_rate(best_solution, similar_cases, catastrophe_disaster_type)
         catastrophe_response_time = best_solution.get("response_time_min", 60)
         catastrophe_time_score = max(0, 1 - catastrophe_response_time / 120)
         catastrophe_coverage = best_solution.get("coverage_rate", 0)
@@ -317,8 +509,8 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
     logger.info(
         "软规则评分完成",
         extra={
-            "scored_count": len(passed_scores),
-            "best_score": passed_scores[0]["weighted_score"] if passed_scores else 0,
+            "scored_count": len(normal_scores),
+            "best_score": normal_scores[0]["weighted_score"] if normal_scores else 0,
             "requires_reinforcement": requires_reinforcement,
             "elapsed_ms": elapsed_ms,
         }
@@ -390,12 +582,26 @@ async def explain_scheme(state: EmergencyAIState) -> Dict[str, Any]:
             for d in deployments:
                 explanation_parts.append(f"- {d}")
         
-        # 时间线
-        timeline = explanation_result.get("timeline", [])
-        if timeline:
+        # 时间线：使用结构化数据生成，不依赖 LLM
+        # 从推荐方案中获取 allocations
+        allocations = recommended_scheme.get("allocations", [])
+        disaster_type = parsed_disaster.get("disaster_type", "unknown") if parsed_disaster else "unknown"
+        
+        timeline_events = build_timeline_from_allocations(
+            allocations=allocations,
+            task_sequence=task_sequence,
+            disaster_type=disaster_type,
+        )
+        
+        logger.info(f"[时间线] 基于 {len(allocations)} 支队伍的 ETA 生成 {len(timeline_events)} 个事件")
+        
+        if timeline_events:
+            from .output import render_timeline
             explanation_parts.append("\n## 六、行动时间线")
-            for t in timeline:
-                explanation_parts.append(f"- {t}")
+            # 渲染结构化时间线（基于队伍真实 ETA，非 LLM 生成）
+            rendered_timeline = render_timeline(timeline_events)
+            explanation_parts.append(rendered_timeline)
+            logger.debug(f"[时间线] 渲染结果:\n{rendered_timeline[:200]}...")
         
         # 协调要点
         coordination = explanation_result.get("coordination_points", [])
@@ -442,26 +648,9 @@ async def explain_scheme(state: EmergencyAIState) -> Dict[str, Any]:
             "scheme_explanation": scheme_explanation,
             "trace": trace,
         }
-        
     except Exception as e:
-        logger.warning("方案解释生成失败，使用简化解释", extra={"error": str(e)})
-        
-        # 简化解释
-        simple_explanation = f"""## 方案摘要
-推荐方案 {recommended_scheme.get('solution_id', '')}
-
-## 方案指标
-- 响应时间: {recommended_scheme.get('response_time_min', 0):.1f}分钟
-- 能力覆盖: {recommended_scheme.get('coverage_rate', 0) * 100:.1f}%
-- 风险等级: {recommended_scheme.get('risk_level', 0) * 100:.1f}%
-
-## 资源分配
-""" + "\n".join(
-            f"- {a.get('resource_name', '')}: {', '.join(a.get('assigned_capabilities', []))}"
-            for a in recommended_scheme.get("allocations", [])
-        )
-        
-        return {"scheme_explanation": simple_explanation}
+        logger.error(f"方案解释生成失败: {e}")
+        raise RuntimeError(f"[方案解释] LLM调用失败: {e}")
 
 
 # ============================================================================
@@ -612,6 +801,7 @@ def _try_combine_catastrophe_solutions(
 def _calculate_success_rate(
     solution: AllocationSolution,
     similar_cases: List[Dict[str, Any]],
+    disaster_type: str = "earthquake",
 ) -> float:
     """
     计算方案成功率
@@ -623,14 +813,23 @@ def _calculate_success_rate(
     Args:
         solution: 分配方案
         similar_cases: 相似历史案例
+        disaster_type: 灾害类型，影响默认成功率
         
     Returns:
         成功率评分（0-1）
     """
-    logger.info(f"[5维评估-成功率] 开始计算")
+    logger.info(f"[5维评估-成功率] 开始计算, disaster_type={disaster_type}")
     
-    # 历史案例成功率（如果有相似案例）
-    case_success_rate = 0.8  # 默认基准成功率
+    # 根据灾害类型设置基准成功率（无历史案例时使用）
+    # 不同灾害类型的救援难度不同，成功率基准应有差异
+    default_success_rates: Dict[str, float] = {
+        "earthquake": 0.75,    # 地震救援难度高，默认成功率较低
+        "fire": 0.85,          # 火灾扑救相对成熟
+        "flood": 0.80,         # 洪水救援中等难度
+        "hazmat": 0.70,        # 危化品处置复杂，成功率较低
+        "landslide": 0.65,     # 山体滑坡救援难度最高
+    }
+    case_success_rate = default_success_rates.get(disaster_type.lower(), 0.75)
     if similar_cases:
         logger.info(f"  - 相似案例数: {len(similar_cases)}")
         total_similarity = 0.0

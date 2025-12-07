@@ -41,8 +41,9 @@ class RulePriority(str, Enum):
 
 class HardRuleAction(str, Enum):
     """硬规则执行动作"""
-    REJECT = "reject"   # 否决方案
-    WARN = "warn"       # 警告但不否决
+    REJECT = "reject"       # 否决方案（硬性阻断）
+    BREAK_GLASS = "break_glass"  # 需要长按确认（Break Glass）
+    WARN = "warn"           # 警告但不否决（软性提示）
 
 
 class HardRuleSeverity(str, Enum):
@@ -141,6 +142,10 @@ class HardRuleResult(BaseModel):
     severity: HardRuleSeverity = Field(..., description="严重程度")
     checked_value: Optional[Any] = Field(default=None, description="检查的实际值")
     threshold_value: Optional[Any] = Field(default=None, description="阈值")
+    # Break Glass 专用字段
+    risk_description: Optional[str] = Field(default=None, description="风险说明（Break Glass专用）")
+    alternatives: Optional[List[Dict[str, Any]]] = Field(default=None, description="替代方案列表")
+    requires_audit: bool = Field(default=False, description="是否需要审计记录")
 
 
 class RuleLibrary(BaseModel):

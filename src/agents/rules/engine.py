@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .models import (
     TRRRule,
@@ -221,16 +221,24 @@ class TRRRuleEngine:
             return False
     
     def check_hard_rules(
-        self, scheme_data: Dict[str, Any]
-    ) -> List[HardRuleResult]:
+        self,
+        scheme_data: Dict[str, Any],
+        *,
+        with_classification: bool = False,
+    ) -> Union[List[HardRuleResult], Dict[str, Any]]:
         """
         检查硬约束规则
         
         Args:
             scheme_data: 方案数据，包含各项指标
             
+        Args:
+            scheme_data: 方案数据
+            with_classification: 是否同时返回按动作分类的结果
+
         Returns:
-            所有硬规则的检查结果列表
+            - 默认返回 HardRuleResult 列表
+            - 当 with_classification=True 时，返回 {"results": [...], "classification": {...}}
         """
         self._ensure_loaded()
         
@@ -251,15 +259,25 @@ class TRRRuleEngine:
             1 for r in results 
             if not r.passed and r.action == HardRuleAction.REJECT
         )
+        break_glass_count = sum(
+            1 for r in results 
+            if not r.passed and r.action == HardRuleAction.BREAK_GLASS
+        )
         warn_count = sum(
             1 for r in results 
             if not r.passed and r.action == HardRuleAction.WARN
         )
         
         logger.info(
-            f"硬规则检查完成: 通过{passed_count}, 否决{reject_count}, 警告{warn_count}"
+            f"硬规则检查完成: 通过{passed_count}, 否决{reject_count}, "
+            f"需确认{break_glass_count}, 警告{warn_count}"
         )
         
+        if with_classification:
+            return {
+                "results": results,
+                "classification": self.classify_results(results),
+            }
         return results
     
     def _check_hard_rule(
@@ -309,13 +327,17 @@ class TRRRuleEngine:
         # 注意：硬规则的check定义的是"违规条件"，满足条件说明违规
         violated = self._compare(actual, check.operator, threshold)
         passed = not violated
-        
+
         # 格式化消息
         message = rule.message.format(
             value=actual,
             threshold=threshold,
         ) if not passed else f"规则检查通过"
-        
+
+        # 风险描述与审计需求（Break Glass）
+        risk_description = rule.description if not passed else None
+        requires_audit = (rule.action == HardRuleAction.BREAK_GLASS) and not passed
+
         return HardRuleResult(
             rule_id=rule.id,
             rule_name=rule.name,
@@ -325,29 +347,64 @@ class TRRRuleEngine:
             severity=rule.severity,
             checked_value=actual,
             threshold_value=threshold,
+            risk_description=risk_description,
+            alternatives=None,
+            requires_audit=requires_audit,
         )
     
     def get_rejected_rules(
         self, results: List[HardRuleResult]
     ) -> List[HardRuleResult]:
-        """筛选出否决方案的规则"""
+        """筛选出否决方案的规则（硬性阻断）"""
         return [
             r for r in results 
             if not r.passed and r.action == HardRuleAction.REJECT
         ]
     
+    def get_break_glass_rules(
+        self, results: List[HardRuleResult]
+    ) -> List[HardRuleResult]:
+        """筛选出需要Break Glass确认的规则"""
+        return [
+            r for r in results 
+            if not r.passed and r.action == HardRuleAction.BREAK_GLASS
+        ]
+    
     def get_warning_rules(
         self, results: List[HardRuleResult]
     ) -> List[HardRuleResult]:
-        """筛选出警告的规则"""
+        """筛选出警告的规则（软性提示）"""
         return [
             r for r in results 
             if not r.passed and r.action == HardRuleAction.WARN
         ]
     
+    def classify_results(
+        self, results: List[HardRuleResult]
+    ) -> Dict[str, List[HardRuleResult]]:
+        """
+        将规则检查结果按类型分类
+        
+        Returns:
+            {
+                "reject": [...],      # 硬性阻断
+                "break_glass": [...], # 需要确认
+                "warn": [...]         # 软性提示
+            }
+        """
+        return {
+            "reject": self.get_rejected_rules(results),
+            "break_glass": self.get_break_glass_rules(results),
+            "warn": self.get_warning_rules(results),
+        }
+    
     def is_scheme_feasible(self, results: List[HardRuleResult]) -> bool:
         """判断方案是否可行（无否决规则触发）"""
         return len(self.get_rejected_rules(results)) == 0
+    
+    def requires_break_glass(self, results: List[HardRuleResult]) -> bool:
+        """判断是否需要Break Glass确认"""
+        return len(self.get_break_glass_rules(results)) > 0
     
     @property
     def trr_rules_count(self) -> int:

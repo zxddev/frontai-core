@@ -1,7 +1,7 @@
 """
 规则加载器
 
-从YAML文件加载TRR规则和硬约束规则
+从YAML文件或数据库加载TRR规则和硬约束规则
 支持文件级缓存，避免重复解析
 """
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 import yaml
 
@@ -28,6 +28,9 @@ from .models import (
     HardRuleAction,
     HardRuleSeverity,
 )
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -312,4 +315,116 @@ class RuleLoader:
             action=HardRuleAction(data.get("action", "reject")),
             message=data.get("message", "规则检查失败"),
             severity=HardRuleSeverity(data.get("severity", "high")),
+        )
+    
+    @classmethod
+    async def load_safety_rules_from_db(
+        cls, 
+        db: "AsyncSession"
+    ) -> Dict[str, List[HardRule]]:
+        """
+        从数据库加载安全规则（三级规则体系）
+        
+        Args:
+            db: 数据库会话
+            
+        Returns:
+            按规则类型分类的字典:
+            {
+                "reject": [...],      # 硬性阻断规则
+                "break_glass": [...], # Break Glass规则
+                "warn": [...]         # 软性提示规则
+            }
+        """
+        from sqlalchemy import select
+        from .db_models import SafetyRule
+        
+        # 查询所有启用的规则
+        stmt = select(SafetyRule).where(
+            SafetyRule.is_active == True
+        ).order_by(SafetyRule.sort_order)
+        
+        result = await db.execute(stmt)
+        rows = result.scalars().all()
+        
+        # 按类型分类
+        rules_by_type: Dict[str, List[HardRule]] = {
+            "reject": [],
+            "break_glass": [],
+            "warn": [],
+        }
+        
+        for row in rows:
+            try:
+                rule = cls._db_row_to_hard_rule(row)
+                rule_type = row.rule_type
+                if rule_type in rules_by_type:
+                    rules_by_type[rule_type].append(rule)
+                else:
+                    logger.warning(f"未知规则类型: {rule_type}, 规则ID: {row.rule_id}")
+            except Exception as e:
+                logger.error(f"解析数据库规则失败: {row.rule_id} - {e}")
+        
+        logger.info(
+            f"从数据库加载安全规则: reject={len(rules_by_type['reject'])}, "
+            f"break_glass={len(rules_by_type['break_glass'])}, "
+            f"warn={len(rules_by_type['warn'])}"
+        )
+        
+        return rules_by_type
+    
+    @classmethod
+    def _db_row_to_hard_rule(cls, row) -> HardRule:
+        """
+        将数据库行转换为 HardRule 对象
+        
+        Args:
+            row: SafetyRule ORM 对象
+            
+        Returns:
+            HardRule 对象
+        """
+        # 解析检查配置
+        check = HardRuleCheck(
+            field=row.check_field,
+            operator=ConditionOperator(row.check_operator),
+            threshold=row.check_threshold,
+            threshold_field=row.check_threshold_field,
+        )
+        
+        # 解析前置条件（可选）
+        condition = None
+        if row.condition_field and row.condition_operator:
+            condition = HardRuleCondition(
+                field=row.condition_field,
+                operator=ConditionOperator(row.condition_operator),
+                value=row.condition_value,
+            )
+        
+        # 映射 rule_type 到 HardRuleAction
+        action_map = {
+            "reject": HardRuleAction.REJECT,
+            "break_glass": HardRuleAction.BREAK_GLASS,
+            "warn": HardRuleAction.WARN,
+        }
+        action = action_map.get(row.rule_type, HardRuleAction.REJECT)
+        
+        # 映射 severity 到 HardRuleSeverity
+        severity_map = {
+            "critical": HardRuleSeverity.CRITICAL,
+            "high": HardRuleSeverity.HIGH,
+            "medium": HardRuleSeverity.MEDIUM,
+            "low": HardRuleSeverity.MEDIUM,  # low 映射到 medium（枚举中没有 low）
+        }
+        severity = severity_map.get(row.severity, HardRuleSeverity.HIGH)
+        
+        return HardRule(
+            id=row.rule_id,
+            name=row.rule_name,
+            description=row.risk_description,  # Break Glass 的 risk_description 作为 description
+            check=check,
+            condition=condition,
+            action=action,
+            message=row.message_template,
+            severity=severity,
         )

@@ -9,11 +9,19 @@ from pydantic import BaseModel, Field
 
 
 class PlanModuleItem(BaseModel):
-    """A single module in the plan."""
+    """A single module in the plan.
+    
+    value字段支持两种格式：
+    - 模块0（基本灾情）：dict格式的结构化数据，供前端表单编辑
+    - 其他模块：str格式的Markdown文本
+    """
 
     index: int = Field(..., ge=0, le=7, description="Module index (0-7)")
     title: str = Field(..., description="Module title in Chinese")
-    value: str = Field(..., description="Module content")
+    value: str | dict[str, Any] = Field(
+        ..., 
+        description="Module content: dict for module 0 (structured disaster data), str for others"
+    )
 
 
 class TriggerPlanResponse(BaseModel):

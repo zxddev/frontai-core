@@ -212,10 +212,44 @@ class RiskAreaService:
                     affected_moving_entities=affected_moving_entities,
                 )
             
-            # 4. 构建通知 payload（匹配前端 route-warning-modal 期望的格式）
-            # 从受影响路径中提取第一个用于绕行方案生成
+            # 3.6 生成绕行方案（如有受影响路线）
+            alternative_routes = []
             first_affected = affected_routes[0] if affected_routes else None
+            if first_affected and first_affected.get("origin") and first_affected.get("destination"):
+                try:
+                    from src.domains.routing.alternative_routes import AlternativeRoutesService
+                    from src.domains.routing.schemas import Point
+                    
+                    alt_service = AlternativeRoutesService(self.db)
+                    origin = Point(
+                        lon=first_affected["origin"]["lng"],
+                        lat=first_affected["origin"]["lat"]
+                    )
+                    destination = Point(
+                        lon=first_affected["destination"]["lng"],
+                        lat=first_affected["destination"]["lat"]
+                    )
+                    
+                    alternatives = await alt_service.generate_alternatives(
+                        origin=origin,
+                        destination=destination,
+                        risk_area_ids=[risk_area.id],
+                    )
+                    
+                    for alt in alternatives:
+                        alternative_routes.append({
+                            "strategy": alt.strategy,
+                            "strategy_name": alt.strategy_name,
+                            "distance_m": alt.distance_m,
+                            "duration_s": alt.duration_s,
+                            "polyline": [{"lon": p.lon, "lat": p.lat} for p in alt.polyline],
+                            "description": alt.description,
+                        })
+                    logger.info(f"[风险区域通知] 生成绕行方案: {len(alternative_routes)} 条")
+                except Exception as alt_err:
+                    logger.warning(f"[风险区域通知] 绕行方案生成失败: {alt_err}")
             
+            # 4. 构建通知 payload（匹配前端 route-warning-modal 期望的格式）
             alert_data = {
                 "change_type": change_type,
                 "requires_decision": requires_decision,
@@ -228,7 +262,9 @@ class RiskAreaService:
                     "risk_level": risk_area.risk_level,
                     "passage_status": risk_area.passage_status,
                 }],
-                # 用于生成绕行方案的参数
+                # 绕行方案（直接包含在广播中）
+                "alternative_routes": alternative_routes,
+                # 用于生成绕行方案的参数（备用）
                 "task_id": first_affected.get("task_id") if first_affected else None,
                 "team_id": first_affected.get("team_id") if first_affected else None,
                 "origin": first_affected.get("origin") if first_affected else None,
@@ -443,8 +479,8 @@ class RiskAreaService:
             # 7. 推送预警通知到前端
             if warnings_created > 0:
                 try:
-                    from src.domains.frontend_api.websocket.router import ws_manager
-                    await ws_manager.broadcast_disaster({
+                    from src.domains.frontend_api.websocket.router import frontend_ws_manager
+                    await frontend_ws_manager.broadcast_disaster({
                         "source": "risk_area",
                         "risk_area_id": str(risk_area.id),
                         "risk_area_name": risk_area.name,

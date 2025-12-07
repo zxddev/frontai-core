@@ -1,0 +1,137 @@
+## 1. Specification (Done)
+- [x] 1.1 Draft capability deltas in `specs/recon-agent/spec.md` (requirements + scenarios)
+- [x] 1.2 Write `design.md` (context, goals/non-goals, key decisions, risks)
+- [x] 1.3 Finalize `proposal.md` (why/what/impact) — ensure consistency with design/spec
+- [x] 1.4 Run `openspec validate add-recon-agent-v21-spec --strict` and fix all findings
+
+## 2. Sprint 0: Infrastructure + Mock Data (Done)
+- [x] 2.1 **Mock Data Directory**: Create `src/agents/recon_scheduler/mock_data/` structure
+  - [x] 2.1.1 Create `__init__.py` with exports
+  - [x] 2.1.2 Create `README.md` documenting data format and integration guide
+  - [x] 2.1.3 Create `comm_coverage.json` with simulated signal coverage (grid-based)
+  - [x] 2.1.4 Create `device_profiles.json` with device energy parameters
+  - [x] 2.1.5 ~~Create `weather_conditions.json` with weather scenarios~~ (deferred - use existing)
+- [x] 2.2 **Provider Interface**: Create `mock_data/providers/`
+  - [x] 2.2.1 Create `base_provider.py` with Protocol definitions (CommCoverageProvider, DeviceDataProvider)
+  - [x] 2.2.2 Create `mock_comm_provider.py` implementing mock comm coverage
+  - [x] 2.2.3 Create `mock_device_provider.py` implementing mock device data
+- [x] 2.3 **Coordinate Transform**: Extend `src/core/coord_transform.py`
+  - [x] 2.3.1 Add `wgs84_to_utm(lng, lat) -> (easting, northing, zone, hemisphere)`
+  - [x] 2.3.2 Add `utm_to_wgs84(easting, northing, zone, hemisphere) -> (lng, lat)`
+  - [x] 2.3.3 Add `get_utm_zone(lng, lat) -> (zone, hemisphere)`
+  - [x] 2.3.4 Add `ellipsoid_to_geoid()` and `geoid_to_ellipsoid()` for height conversion
+  - [x] 2.3.5 Verify round-trip accuracy (< 1m)
+- [x] 2.4 **State Extension**: Extend `src/agents/recon_scheduler/state.py`
+  - [x] 2.4.1 Add retry fields: `retry_count`, `max_retries`, `retry_history`
+  - [x] 2.4.2 Add checkpoint fields: `checkpoint`, `checkpoint_id`
+  - [x] 2.4.3 Add stream fields: `stream_events`, `buffered_events`
+  - [x] 2.4.4 Add validation fields: `validation_level`, `l1_result`, `l2_result`
+  - [x] 2.4.5 Add coordinate fields: `utm_zone`, `home_position_utm`, `route_history`
+  - [x] 2.4.6 Add approval fields: `approval_status`, `approval_timeout`, `degradation_options`
+  - [x] 2.4.7 Add V2.1 enums: ValidationLevel, ApprovalStatus, SafeModeAction, etc.
+
+## 3. Sprint 1: Core Features (Done)
+- [x] 3.1 **Energy Model**: Create `src/agents/recon_scheduler/energy_model.py`
+  - [x] 3.1.1 Define `EnergyFactors` dataclass with all factors
+  - [x] 3.1.2 Implement `calculate_energy()` with wind/temp/payload/age factors
+  - [x] 3.1.3 Implement `calculate_rth_required_from_profile()` for RTH margin
+  - [x] 3.1.4 Implement `should_trigger_rth()` check
+  - [x] 3.1.5 Add `EnergyCalculator` class for convenience
+- [x] 3.2 **Stream Emitter**: Create `src/agents/recon_scheduler/emitter.py`
+  - [x] 3.2.1 Use existing EventType enum from state.py
+  - [x] 3.2.2 Use IntelligenceEvent TypedDict from state.py
+  - [x] 3.2.3 Implement `emit_event()` writing to STOMP + PostGIS
+  - [x] 3.2.4 Implement local buffer for network failures (max 1000 events)
+  - [x] 3.2.5 Implement idempotency check (event_id dedup in _sent_ids)
+- [x] 3.3 **L1 Validation**: Create `src/agents/recon_scheduler/nodes/l1_validation.py`
+  - [x] 3.3.1 Implement 2.5D ban-zone intersection check (point_in_polygon)
+  - [x] 3.3.2 Implement coarse energy estimation (calculate_energy_simple)
+  - [x] 3.3.3 Implement max flight time constraint check
+  - [x] 3.3.4 Add 500ms timeout handling (asyncio.wait_for)
+  - [x] 3.3.5 Integrate into graph after flight_planning
+- [x] 3.4 **Graph Integration**: Extend `src/agents/recon_scheduler/graph.py`
+  - [x] 3.4.1 Add L1 validation node to graph
+  - [x] 3.4.2 Add conditional edge for L1 pass/fail (should_continue_after_l1)
+
+## 4. Sprint 2: Safety Features (Done)
+- [x] 4.1 **L2 Validation**: Create `src/agents/recon_scheduler/nodes/l2_validation.py`
+  - [x] 4.1.1 Implement 3D terrain collision check (using terrain_checker.py)
+  - [x] 4.1.2 ~~Implement voxel-based obstacle detection~~ (deferred - terrain check sufficient)
+  - [x] 4.1.3 Implement dynamic energy validation with full model
+  - [x] 4.1.4 Implement comm coverage validation
+  - [x] 4.1.5 Add 5s timeout handling with 7.5s retry
+- [x] 4.2 **Relay Insertion**: Create `src/agents/recon_scheduler/nodes/relay_insertion.py`
+  - [x] 4.2.1 Implement blind zone detection along path
+  - [x] 4.2.2 Implement route history stack for backtracking
+  - [x] 4.2.3 Implement relay point insertion algorithm
+  - [x] 4.2.4 Implement ACK timeout handling with retry (3x10s)
+  - [x] 4.2.5 Implement controlled climb fallback (+50m)
+- [x] 4.3 **Emergency RTH**: Create `src/agents/recon_scheduler/nodes/emergency_rth.py`
+  - [x] 4.3.1 Implement RTH trigger condition checks (5 priorities)
+  - [x] 4.3.2 Implement inverse path calculation from route history
+  - [x] 4.3.3 Implement climb-and-direct fallback
+  - [x] 4.3.4 Add check_should_trigger_rth() helper
+- [x] 4.4 **Human Approval Flow**: Create `src/agents/recon_scheduler/nodes/approval_flow.py`
+  - [x] 4.4.1 Implement approval_required node emitting event
+  - [x] 4.4.2 Implement wait_for_approval node with timeout (300s)
+  - [x] 4.4.3 Implement execute_degradation node (4 options)
+  - [x] 4.4.4 ~~Add API endpoint~~ (deferred - use existing event system)
+- [x] 4.5 **Supporting Modules**:
+  - [x] 4.5.1 Create `terrain_checker.py` for DEM-based terrain detection
+  - [x] 4.5.2 Update `nodes/__init__.py` with new exports
+  - [x] 4.5.3 Update `graph.py` with L2 validation node and edges
+
+## 5. Sprint 3: Resilience & Integration (Done)
+- [x] 5.1 **Checkpoint System**: Create `src/agents/recon_scheduler/checkpoint.py`
+  - [x] 5.1.1 Define `CheckpointPayload` with all required fields
+  - [x] 5.1.2 Implement `save_checkpoint()` to Redis + PostgreSQL
+  - [x] 5.1.3 Implement `load_checkpoint()` with distributed lock
+  - [x] 5.1.4 Implement `resume_mission()` with re-planning
+  - [x] 5.1.5 Add TTL management (24h Redis, permanent PostgreSQL)
+- [x] 5.2 **Retry & Circuit Breaker Integration**
+  - [x] 5.2.1 Integrate `circuit_breaker.py` into L1/L2 validation nodes
+  - [x] 5.2.2 Implement retry counting in state (l1_breaker_failures, l2_breaker_failures)
+  - [x] 5.2.3 Implement fail-safe mode transition (breaker_state, fail_safe_triggered)
+  - [x] 5.2.4 Implement safe mode options (HOVER/RTH/EMERGENCY_LAND)
+- [x] 5.3 **Performance Guardrails**: Create `src/agents/recon_scheduler/rate_limiter.py`
+  - [x] 5.3.1 Add semaphore for concurrent L2 limit (L2_SEMAPHORE, max 3)
+  - [x] 5.3.2 Add semaphore for concurrent planning limit (PLANNING_SEMAPHORE, max 5)
+  - [x] 5.3.3 Implement per-device rate limiter (DEVICE_RATE_LIMITER, 2/min)
+  - [x] 5.3.4 Implement total L2 rate limiter (L2_RATE_LIMITER, 10/min)
+  - [x] 5.3.5 Add queue timeout handling (QueueTimeoutError, 30s)
+- [x] 5.4 **End-to-End Testing**: Create `tests/e2e/test_recon_scheduler_e2e.py`
+  - [x] 5.4.1 Create test scenario: normal mission completion
+  - [x] 5.4.2 Create test scenario: L1 failure and retry
+  - [x] 5.4.3 Create test scenario: L2 failure triggering approval flow
+  - [x] 5.4.4 Create test scenario: blind zone relay insertion
+  - [x] 5.4.5 Create test scenario: low battery emergency RTH
+  - [x] 5.4.6 Create test scenario: checkpoint save and resume
+  - [x] 5.4.7 Create test: circuit breaker opens after failures
+  - [x] 5.4.8 Create test: rate limiter blocks excess requests
+
+## 6. API & E2E Integration (Done)
+- [x] 6.1 Add Pydantic schemas for ReconScheduler API (`schemas.py`)
+  - [x] ReconScheduleRequest, ReconScheduleTaskResponse, ReconScheduleResult
+  - [x] ReconApproveRequest, ReconCheckpointResponse, ReconResumeRequest
+- [x] 6.2 Add API endpoints to `router.py` (5 endpoints)
+  - [x] POST /ai/recon-schedule (submit task)
+  - [x] GET /ai/recon-schedule/{task_id} (get result)
+  - [x] POST /ai/recon-schedule/{task_id}/checkpoint (save checkpoint)
+  - [x] POST /ai/recon-schedule/{task_id}/resume (resume task)
+  - [x] POST /ai/recon-schedule/{task_id}/approve (manual approval)
+- [x] 6.3 Create ReconSchedulerClient (`tests/e2e/utils/recon_client.py`)
+- [x] 6.4 Create API E2E tests (`tests/e2e/test_recon_api_e2e.py`)
+  - [x] Health check test
+  - [x] Submit and get task test
+  - [x] Full schedule flow test
+  - [x] Approval flow test
+  - [x] Checkpoint test
+  - [x] Rate limiting test
+  - [x] Error handling test
+- [x] 6.5 Extend conftest.py with recon fixtures
+
+## 7. Documentation & Validation
+- [ ] 7.1 Update `recon_scheduler/config/__init__.py` to export new configs
+- [ ] 7.2 Add inline documentation for all new modules
+- [ ] 7.3 Run full regression test
+- [ ] 7.4 Update tasks.md marking all items complete

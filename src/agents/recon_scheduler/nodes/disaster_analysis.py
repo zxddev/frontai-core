@@ -141,12 +141,12 @@ async def disaster_analysis_node(state: ReconSchedulerState) -> Dict[str, Any]:
 
 def _identify_disaster_type(
     recon_request: str,
-    disaster_context: Dict[str, Any],
+    disaster_context: Optional[Dict[str, Any]],
     scenarios_config: Dict[str, Any]
 ) -> str:
     """识别灾情类型"""
     # 优先从上下文获取
-    if disaster_context.get("disaster_type"):
+    if disaster_context and disaster_context.get("disaster_type"):
         return disaster_context["disaster_type"]
     
     # 从请求文本中识别

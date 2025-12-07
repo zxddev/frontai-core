@@ -16,9 +16,50 @@ from uuid import UUID
 from sqlalchemy import text
 
 from ..state import EmergencyAIState
+from ..tools.llm_tools import TimelineEvent
 from src.core.database import AsyncSessionLocal
 
 logger = logging.getLogger(__name__)
+
+
+def render_timeline(
+    events: List[TimelineEvent],
+    base_time: Optional[datetime] = None,
+) -> str:
+    """
+    将结构化时间线渲染为可读文本
+    
+    Args:
+        events: TimelineEvent 列表，按 offset_minutes 排序
+        base_time: 基准时间（接报时间），默认为当前时间
+        
+    Returns:
+        格式化的时间线文本
+    """
+    if not events:
+        return ""
+    
+    base_time = base_time or datetime.now()
+    lines = []
+    
+    for e in events:
+        actual_time = base_time + timedelta(minutes=e.offset_minutes)
+        
+        # 判断是否跨天
+        if actual_time.date() == base_time.date():
+            # 当天：显示 HH:MM
+            time_str = actual_time.strftime("%H:%M")
+        else:
+            # 跨天：显示 M月D日 HH:MM
+            time_str = f"{actual_time.month}月{actual_time.day}日 {actual_time.strftime('%H:%M')}"
+        
+        # 添加负责队伍信息（如有）
+        if e.responsible_team:
+            lines.append(f"- {time_str}：{e.action}（{e.responsible_team}）")
+        else:
+            lines.append(f"- {time_str}：{e.action}")
+    
+    return "\n".join(lines)
 
 
 def _filter_for_commander(text: str, event_time: Optional[datetime] = None) -> str:
@@ -163,14 +204,8 @@ async def _enrich_allocations(allocations: List[Dict[str, Any]]) -> List[Dict[st
                 enriched.append(enriched_alloc)
             
             return enriched
-            
     except Exception as e:
-        logger.warning(f"[输出] 补充队伍详细信息失败: {e}")
-        # 失败时返回原始数据，添加空字段
-        for alloc in allocations:
-            alloc.setdefault("all_capabilities", [])
-            alloc.setdefault("vehicles", [])
-            alloc.setdefault("equipments", [])
+        logger.warning(f"[输出生成] 补充分配详情失败: {e}")
         return allocations
 
 
@@ -296,6 +331,16 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
         )
     
     success = len(errors) == 0 and recommended_scheme is not None
+    
+    # 调试：检查 state 中的缺口数据
+    supply_shortages_from_state = state.get("supply_shortages", [])
+    capability_gap_from_state = state.get("capability_gap_report")
+    data_gaps_from_state = state.get("data_gap_warnings", [])
+    logger.info(
+        f"[输出生成] 缺口数据检查: 物资缺口={len(supply_shortages_from_state)}种, "
+        f"能力缺口={'有' if capability_gap_from_state else '无'}, "
+        f"数据缺口={len(data_gaps_from_state)}条"
+    )
     
     # 构建输出
     final_output: Dict[str, Any] = {
@@ -449,6 +494,35 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
         # 方案文本（供指挥员查看/编辑）
         "scheme_text": "",
         "scheme_text_hash": "",
+        
+        # 资源缺口信息（供指挥员协调外部资源）
+        "resource_gaps": {
+            # 能力缺口（从 matching 节点获取）
+            "capability_gap": state.get("capability_gap_report"),
+            # 物资缺口
+            "supply_shortages": [
+                {
+                    "supply_code": s.get("supply_code"),
+                    "supply_name": s.get("supply_name"),
+                    "required": s.get("required"),
+                    "available": s.get("available"),
+                    "shortage": s.get("shortage"),
+                    "transfer_suggestion": s.get("transfer_suggestion"),
+                }
+                for s in state.get("supply_shortages", [])
+            ],
+            # 数据缺口（从 understanding 节点获取）
+            "data_gaps": state.get("data_gap_warnings", []),
+        },
+        
+        # 所有警告汇总（供指挥员快速了解问题）
+        "warnings_summary": {
+            "validation": state.get("validation_warnings", []),
+            "data_gaps": [g.get("message") for g in state.get("data_gap_warnings", [])],
+            "capability_gaps": state.get("capability_gap_report", {}).get("message") if state.get("capability_gap_report") else None,
+            "capacity_warning": recommended_scheme.get("capacity_warning") if recommended_scheme else None,
+            "transport_warnings": state.get("transport_warnings", []),
+        },
         
         # 追踪信息
         "trace": state.get("trace", {}),

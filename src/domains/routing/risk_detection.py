@@ -155,11 +155,12 @@ class RiskDetectionService:
         # 根据是否有缓冲区选择不同的 SQL
         if buffer_meters > 0:
             # 使用 ST_Buffer 扩大区域（需要先转换到投影坐标系）
+            # 注意：geometry 列是 geography 类型，需要先转换为 geometry
             sql = text("""
                 SELECT ST_AsText(
                     ST_Transform(
                         ST_Buffer(
-                            ST_Transform(geometry, 3857),
+                            ST_Transform(geometry::geometry, 3857),
                             :buffer_meters
                         ),
                         4326
@@ -170,7 +171,7 @@ class RiskDetectionService:
             """)
         else:
             sql = text("""
-                SELECT ST_AsText(geometry) as wkt
+                SELECT ST_AsText(geometry::geometry) as wkt
                 FROM operational_v2.disaster_affected_areas_v2
                 WHERE id = ANY(:ids)
             """)

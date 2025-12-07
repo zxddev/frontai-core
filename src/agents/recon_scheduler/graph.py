@@ -67,6 +67,68 @@ def should_continue_after_allocation(state: ReconSchedulerState) -> Literal["fli
     return "flight_planning"
 
 
+def should_continue_after_l1(state: ReconSchedulerState) -> Literal["timeline_scheduling", "plan_adjustment", "handle_error"]:
+    """
+    判断 L1 验证后是否继续
+    
+    - L1 通过，继续到 L2 验证 (返回 timeline_scheduling 映射到 l2_validation)
+    - L1 失败且可重试，进入 plan_adjustment
+    - L1 失败且重试次数达上限，进入错误处理（不跳过验证）
+    """
+    l1_result = state.get("l1_result")
+    
+    if l1_result is None:
+        logger.warning("L1 result is None, assuming passed")
+        return "timeline_scheduling"
+    
+    if l1_result.get("passed", True):
+        return "timeline_scheduling"
+    
+    # L1 失败，检查重试次数
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", 3)
+    
+    if retry_count >= max_retries:
+        # 验证失败且无法修复，必须停止并报错
+        errors = l1_result.get("errors", [])
+        logger.error(f"L1 validation failed, max retries ({max_retries}) reached, STOPPING. Errors: {errors}")
+        return "handle_error"
+    
+    logger.info(f"L1 validation failed, retry_count={retry_count}, entering plan_adjustment")
+    return "plan_adjustment"
+
+
+def should_continue_after_l2(state: ReconSchedulerState) -> Literal["timeline_scheduling", "plan_adjustment", "handle_error"]:
+    """
+    判断 L2 验证后是否继续
+    
+    - L2 通过，继续到 timeline_scheduling
+    - L2 失败且可重试，进入 plan_adjustment
+    - L2 失败且重试次数达上限，进入错误处理（不跳过验证）
+    """
+    l2_result = state.get("l2_result")
+    
+    if l2_result is None:
+        logger.warning("L2 result is None, assuming passed")
+        return "timeline_scheduling"
+    
+    if l2_result.get("passed", True):
+        return "timeline_scheduling"
+    
+    # L2 失败，检查重试次数
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", 3)
+    
+    if retry_count >= max_retries:
+        # 验证失败且无法修复，必须停止并报错
+        errors = l2_result.get("errors", [])
+        logger.error(f"L2 validation failed, max retries ({max_retries}) reached, STOPPING. Errors: {errors}")
+        return "handle_error"
+    
+    logger.info(f"L2 validation failed, retry_count={retry_count}, entering plan_adjustment")
+    return "plan_adjustment"
+
+
 def should_continue_after_validation(state: ReconSchedulerState) -> Literal["output_generation", "plan_adjustment", "handle_error"]:
     """
     判断计划校验后是否继续
@@ -208,6 +270,8 @@ def build_recon_scheduler_graph() -> StateGraph:
         mission_planning_node,
         resource_allocation_node,
         flight_planning_node,
+        l1_validation_node,
+        l2_validation_node,
         timeline_scheduling_node,
         risk_assessment_node,
         plan_validation_node,
@@ -236,6 +300,12 @@ def build_recon_scheduler_graph() -> StateGraph:
     
     # Phase 6: 航线规划
     workflow.add_node("flight_planning", flight_planning_node)
+    
+    # Phase 6.5: L1 快速验证 (V2.1 新增)
+    workflow.add_node("l1_validation", l1_validation_node)
+    
+    # Phase 6.6: L2 深度验证 (V2.1 新增)
+    workflow.add_node("l2_validation", l2_validation_node)
     
     # Phase 7: 时间线编排
     workflow.add_node("timeline_scheduling", timeline_scheduling_node)
@@ -288,8 +358,30 @@ def build_recon_scheduler_graph() -> StateGraph:
         }
     )
     
-    # Phase 6 → Phase 7
-    workflow.add_edge("flight_planning", "timeline_scheduling")
+    # Phase 6 → Phase 6.5 (L1 验证)
+    workflow.add_edge("flight_planning", "l1_validation")
+    
+    # Phase 6.5 → Phase 6.6 (conditional: L1 结果)
+    workflow.add_conditional_edges(
+        "l1_validation",
+        should_continue_after_l1,
+        {
+            "timeline_scheduling": "l2_validation",  # L1通过后进入L2
+            "plan_adjustment": "plan_adjustment",
+            "handle_error": "handle_error",  # L1验证失败且无法修复时停止
+        }
+    )
+    
+    # Phase 6.6 → Phase 7 (conditional: L2 结果)
+    workflow.add_conditional_edges(
+        "l2_validation",
+        should_continue_after_l2,
+        {
+            "timeline_scheduling": "timeline_scheduling",
+            "plan_adjustment": "plan_adjustment",
+            "handle_error": "handle_error",  # L2验证失败且无法修复时停止
+        }
+    )
     
     # Phase 7 → Phase 8
     workflow.add_edge("timeline_scheduling", "risk_assessment")
@@ -331,6 +423,7 @@ def plan_adjustment_node(state: ReconSchedulerState) -> dict:
     logger.info("进入计划调整节点")
     
     adjustment_count = state.get("adjustment_count", 0) + 1
+    retry_count = state.get("retry_count", 0) + 1  # 增加重试计数
     unallocated = state.get("unallocated_tasks", [])
     validation_errors = []
     
@@ -377,6 +470,7 @@ def plan_adjustment_node(state: ReconSchedulerState) -> dict:
     return {
         "all_tasks": adjusted_tasks,
         "adjustment_count": adjustment_count,
+        "retry_count": retry_count,  # 更新重试计数
         "warnings": warnings,
         "unallocated_tasks": [],  # 清空，重新分配
         "current_phase": "plan_adjustment",

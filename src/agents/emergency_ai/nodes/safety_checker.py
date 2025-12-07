@@ -188,12 +188,12 @@ async def check_safety_rules(state: EmergencyAIState) -> Dict[str, Any]:
             if row.rule_type == "hard":
                 logger.error(
                     "【安全规则】硬规则违反",
-                    extra={"rule_id": rule_id, "message": row.message}
+                    extra={"rule_id": rule_id, "rule_message": row.message}
                 )
             else:
                 logger.warning(
                     "【安全规则】软规则触发",
-                    extra={"rule_id": rule_id, "message": row.message}
+                    extra={"rule_id": rule_id, "rule_message": row.message}
                 )
     
     # 更新追踪信息

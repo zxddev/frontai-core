@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_session
 from src.core.dependencies import get_current_user
 
-from .schemas import LoginRequest, TokenResponse, RefreshRequest, RefreshResponse
+from .schemas import LoginRequest, TokenResponse, RefreshRequest, RefreshResponse, PhoneLoginRequest
 from .service import AuthService
 
 
@@ -34,6 +34,21 @@ async def login(
     """用户登录"""
     service = AuthService(session)
     return await service.login(data.username, data.password)
+
+
+@router.post(
+    "/login/phone",
+    response_model=TokenResponse,
+    summary="手机号验证码登录",
+    description="外部救援队伍通过手机号验证码登录，首次登录自动注册",
+)
+async def login_by_phone(
+    data: PhoneLoginRequest,
+    session: AsyncSession = Depends(get_session),
+) -> TokenResponse:
+    """手机号验证码登录（外部救援队伍）"""
+    service = AuthService(session)
+    return await service.login_by_phone(data.phone, data.code)
 
 
 @router.post(

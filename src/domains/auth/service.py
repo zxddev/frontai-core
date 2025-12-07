@@ -19,12 +19,37 @@ from src.core.exceptions import (
     AuthenticationError, AuthorizationError, NotFoundError, ValidationError, ConflictError
 )
 
+from sqlalchemy import text
+
 from .repository import RoleRepository, PermissionRepository, UserRoleRepository
 from .schemas import TokenResponse, RoleInfo, UserInfo
 from src.domains.users.models import User
 from src.domains.users.repository import UserRepository
 
 logger = logging.getLogger(__name__)
+
+
+async def _get_team_by_phone(session: AsyncSession, phone: str) -> tuple[Optional[UUID], Optional[str]]:
+    """
+    通过手机号查询所属队伍
+    
+    查询逻辑：team_members_v2.contact_phone → team_id → rescue_teams_v2.name
+    
+    Returns:
+        (team_id, team_name) 或 (None, None)
+    """
+    sql = text("""
+        SELECT t.id, t.name 
+        FROM operational_v2.team_members_v2 m
+        JOIN operational_v2.rescue_teams_v2 t ON m.team_id = t.id
+        WHERE m.contact_phone = :phone
+        LIMIT 1
+    """)
+    result = await session.execute(sql, {"phone": phone})
+    row = result.fetchone()
+    if row:
+        return row.id, row.name
+    return None, None
 
 
 class AuthService:
@@ -87,6 +112,101 @@ class AuthService:
             permissions=permissions,
         )
         
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in=settings.jwt_access_expire_minutes * 60,
+            user=user_info,
+        )
+    
+    async def login_by_phone(self, phone: str, code: str) -> TokenResponse:
+        """
+        手机号验证码登录（外部救援队伍专用）
+        
+        开发阶段固定验证码：123456
+        首次登录自动创建external_team用户
+        
+        Args:
+            phone: 手机号
+            code: 验证码
+            
+        Raises:
+            AuthenticationError: AU4001 验证码错误
+        """
+        # 验证码校验（开发阶段固定123456，后续可接入真实短信服务）
+        if code != "123456":
+            logger.warning(f"手机号登录失败：验证码错误 {phone}")
+            raise AuthenticationError(code="AU4001", message="验证码错误")
+        
+        # 查找用户
+        user = await self.user_repo.get_by_phone(phone)
+        
+        if not user:
+            # 首次登录，自动创建external_team用户
+            logger.info(f"手机号 {phone} 首次登录，自动创建外部用户")
+            user = User(
+                username=phone,
+                phone=phone,
+                real_name=f"救援队员{phone[-4:]}",
+                user_type="external_team",
+                status="active",
+            )
+            user = await self.user_repo.create(user)
+            
+            # 分配外部队伍成员角色
+            external_role = await self.role_repo.get_by_code("EXTERNAL_MEMBER")
+            if external_role:
+                await self.user_role_repo.assign_role(
+                    user_id=user.id,
+                    role_id=external_role.id,
+                )
+            await self.session.commit()
+            logger.info(f"外部用户创建成功: {user.id}, phone={phone}")
+        
+        if user.status != 'active':
+            logger.warning(f"手机号登录失败：用户已禁用 {phone}")
+            raise AuthenticationError(code="AU4002", message="账号已禁用")
+        
+        # 获取用户角色和权限
+        roles = await self.role_repo.get_user_roles(user.id)
+        role_codes = [r.code for r in roles]
+        permissions = await self.perm_repo.get_user_permissions(user.id)
+        
+        # 生成Token
+        access_token = create_access_token(
+            user_id=user.id,
+            username=user.username,
+            roles=role_codes,
+            permissions=permissions,
+        )
+        refresh_token = create_refresh_token(user_id=user.id)
+        
+        # 更新最后登录时间
+        await self.user_repo.update_last_login(user.id)
+        await self.session.commit()
+        
+        # 查询所属队伍（通过手机号匹配team_members_v2.contact_phone）
+        team_id, team_name = await _get_team_by_phone(self.session, phone)
+        if team_id:
+            logger.info(f"用户 {phone} 所属队伍: {team_name} ({team_id})")
+        else:
+            logger.info(f"用户 {phone} 未关联队伍（team_members表无匹配记录）")
+        
+        # 构造响应
+        role_infos = [RoleInfo(id=r.id, code=r.code, name=r.name) for r in roles]
+        user_info = UserInfo(
+            id=user.id,
+            username=user.username,
+            real_name=user.real_name,
+            phone=user.phone,
+            user_type=user.user_type,
+            roles=role_infos,
+            permissions=permissions,
+            team_id=team_id,
+            team_name=team_name,
+        )
+        
+        logger.info(f"手机号登录成功: {user.id}, phone={phone}, team={team_name or '无'}")
         return TokenResponse(
             access_token=access_token,
             refresh_token=refresh_token,

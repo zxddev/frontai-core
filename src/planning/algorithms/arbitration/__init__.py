@@ -7,6 +7,7 @@
 """
 
 from .conflict_resolver import ConflictResolver
+from .gra_config_loader import GRAConfigLoader
 from .scene_arbitrator import SceneArbitrator
 
-__all__ = ["ConflictResolver", "SceneArbitrator"]
+__all__ = ["ConflictResolver", "SceneArbitrator", "GRAConfigLoader"]

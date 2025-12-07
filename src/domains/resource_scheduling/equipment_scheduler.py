@@ -194,14 +194,15 @@ class EquipmentScheduler:
         destination_lat: float,
         max_distance_km: float,
     ) -> List[EquipmentCandidate]:
-        """查询可用装备（设备+非消耗品物资）"""
-        # 分类装备编码
+        """查询可用装备（设备+队伍装备+非消耗品物资）"""
+        # 收集所有装备编码
+        all_codes = [r.equipment_code for r in requirements]
         device_codes = [r.equipment_code for r in requirements if r.equipment_type == EquipmentType.DEVICE]
         supply_codes = [r.equipment_code for r in requirements if r.equipment_type == EquipmentType.SUPPLY]
 
         candidates: List[EquipmentCandidate] = []
 
-        # 1. 查询设备（devices_v2）
+        # 1. 查询无人设备（devices_v2：机器狗、无人机等）
         if device_codes:
             device_candidates = await self._query_devices(
                 device_codes=device_codes,
@@ -211,8 +212,17 @@ class EquipmentScheduler:
             )
             candidates.extend(device_candidates)
 
-        # 2. 查询非消耗品物资（supplies_v2 where is_consumable=false）
-        # 物资可能在队伍自带或仓库中
+        # 2. 查询队伍携带的装备（team_equipment_v2 + equipment_v2）
+        if all_codes:
+            team_equipment_candidates = await self._query_team_equipment(
+                equipment_codes=all_codes,
+                destination_lon=destination_lon,
+                destination_lat=destination_lat,
+                max_distance_km=max_distance_km,
+            )
+            candidates.extend(team_equipment_candidates)
+
+        # 3. 查询仓库中的非消耗品物资
         if supply_codes:
             supply_candidates = await self._query_equipment_supplies(
                 supply_codes=supply_codes,
@@ -223,6 +233,84 @@ class EquipmentScheduler:
             candidates.extend(supply_candidates)
 
         return candidates
+
+    async def _query_team_equipment(
+        self,
+        equipment_codes: List[str],
+        destination_lon: float,
+        destination_lat: float,
+        max_distance_km: float,
+    ) -> List[EquipmentCandidate]:
+        """
+        查询救援队伍携带的装备
+        
+        数据来源：team_equipment_v2 + equipment_v2 + rescue_teams_v2
+        队伍位置：通过 entities_v2 获取
+        """
+        if not equipment_codes:
+            return []
+
+        sql = text("""
+            SELECT 
+                e.id as equipment_id,
+                e.code as equipment_code,
+                e.name as equipment_name,
+                te.quantity as available_quantity,
+                rt.id as team_id,
+                rt.name as team_name,
+                ST_X(COALESCE(rt.current_location, rt.base_location)::geometry) as longitude,
+                ST_Y(COALESCE(rt.current_location, rt.base_location)::geometry) as latitude,
+                ST_Distance(
+                    COALESCE(rt.current_location, rt.base_location)::geography,
+                    ST_SetSRID(ST_MakePoint(:dest_lon, :dest_lat), 4326)::geography
+                ) / 1000.0 as distance_km
+            FROM operational_v2.team_equipment_v2 te
+            JOIN operational_v2.equipment_v2 e ON e.id = te.equipment_id
+            JOIN operational_v2.rescue_teams_v2 rt ON rt.id = te.team_id
+            WHERE e.code = ANY(:equipment_codes)
+            AND te.quantity > 0
+            AND rt.status IN ('available', 'standby')
+            AND COALESCE(rt.current_location, rt.base_location) IS NOT NULL
+            AND ST_DWithin(
+                COALESCE(rt.current_location, rt.base_location)::geography,
+                ST_SetSRID(ST_MakePoint(:dest_lon, :dest_lat), 4326)::geography,
+                :max_distance_m
+            )
+            ORDER BY distance_km ASC
+        """)
+
+        try:
+            result = await self._db.execute(sql, {
+                "equipment_codes": equipment_codes,
+                "dest_lon": destination_lon,
+                "dest_lat": destination_lat,
+                "max_distance_m": max_distance_km * 1000,
+            })
+
+            candidates: List[EquipmentCandidate] = []
+            for row in result.fetchall():
+                candidate = EquipmentCandidate(
+                    equipment_id=row.equipment_id,
+                    equipment_code=row.equipment_code,
+                    equipment_name=row.equipment_name,
+                    equipment_type=EquipmentType.DEVICE,
+                    location_type=LocationType.TEAM,
+                    location_id=row.team_id,
+                    location_name=row.team_name,
+                    longitude=row.longitude or 0,
+                    latitude=row.latitude or 0,
+                    available_quantity=row.available_quantity,
+                    distance_km=row.distance_km or 0,
+                    capabilities=[],
+                )
+                candidates.append(candidate)
+
+            logger.info(f"[装备调度] 查询队伍装备完成: 找到{len(candidates)}个候选")
+            return candidates
+
+        except Exception as e:
+            logger.warning(f"[装备调度] 查询队伍装备失败: {e}")
+            return []
 
     async def _query_devices(
         self,

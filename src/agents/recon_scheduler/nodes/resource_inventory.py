@@ -15,6 +15,7 @@ from ..state import (
     DeviceStatus,
 )
 from ..config import get_weather_rules
+from ..mock_data import get_device_provider
 
 logger = logging.getLogger(__name__)
 
@@ -112,128 +113,58 @@ async def resource_inventory_node(state: ReconSchedulerState) -> Dict[str, Any]:
 
 async def _query_devices_from_db(event_id: str, scenario_id: str) -> List[DeviceStatus]:
     """
-    从数据库查询设备
+    从统一数据源查询设备
     
-    实际实现应该查询 devices_v2 表
-    这里返回模拟数据
+    使用 MockDeviceDataProvider 获取设备数据，确保与 L1/L2 验证使用同一数据源。
+    实际生产环境可替换为数据库查询。
     """
-    # 模拟设备数据（基于之前插入的数据）
-    devices = [
-        # 多旋翼无人机
-        {
-            "device_id": "dev-drone-002",
-            "device_code": "DV-DRONE-002",
-            "device_name": "经纬M300 RTK侦察无人机",
-            "device_type": "drone",
-            "category": "multirotor",
-            "status": "available",
-            "battery_percent": 100,
-            "location": None,
-            "capabilities": ["rgb_camera", "thermal_camera", "mapping", "zoom_camera"],
-            "max_endurance_min": 55,
-            "max_speed_ms": 23,
-            "max_wind_resistance_ms": 12,
-            "ip_rating": "IP45",
-            "sensor_fov_deg": 84,
-            "requires_runway": False,
-            "is_autonomous": False,
-            "effective_endurance_min": 55,
-            "ready_time_min": 0,
-            "vehicle_id": None,
-            "vehicle_name": None,
-        },
-        {
-            "device_id": "dev-drone-004",
-            "device_code": "DV-DRONE-004",
-            "device_name": "御3行业版热成像无人机",
-            "device_type": "drone",
-            "category": "multirotor",
-            "status": "available",
-            "battery_percent": 100,
-            "location": None,
-            "capabilities": ["rgb_camera", "thermal_camera", "zoom_camera"],
-            "max_endurance_min": 45,
-            "max_speed_ms": 21,
-            "max_wind_resistance_ms": 12,
-            "ip_rating": "IP43",
-            "sensor_fov_deg": 84,
-            "requires_runway": False,
-            "is_autonomous": False,
-            "effective_endurance_min": 45,
-            "ready_time_min": 0,
-            "vehicle_id": None,
-            "vehicle_name": None,
-        },
-        # 垂直起降固定翼
-        {
-            "device_id": "dev-drone-006",
-            "device_code": "DV-DRONE-006",
-            "device_name": "傲势X-Chimera垂直起降无人机",
-            "device_type": "drone",
-            "category": "vtol_fixed_wing",
-            "status": "available",
-            "battery_percent": 100,
-            "location": None,
-            "capabilities": ["rgb_camera", "mapping", "thermal_camera"],
-            "max_endurance_min": 240,  # 4小时
-            "max_speed_ms": 30,
-            "max_wind_resistance_ms": 15,
-            "ip_rating": "IP45",
-            "sensor_fov_deg": 90,
-            "requires_runway": False,
-            "is_autonomous": False,
-            "effective_endurance_min": 240,
-            "ready_time_min": 5,
-            "vehicle_id": None,
-            "vehicle_name": None,
-        },
-        # 机器狗
-        {
-            "device_id": "dev-dog-003",
-            "device_code": "DV-DOG-003",
-            "device_name": "宇树B2搜救机器狗",
-            "device_type": "dog",
-            "category": "ugv_quadruped",
-            "status": "available",
-            "battery_percent": 100,
-            "location": None,
-            "capabilities": ["search", "rubble_traverse", "camera"],
-            "max_endurance_min": 300,  # 5小时
-            "max_speed_ms": 6.0,
-            "max_wind_resistance_ms": 99,  # 不受风影响
-            "ip_rating": "IP54",
-            "sensor_fov_deg": None,
-            "requires_runway": False,
-            "is_autonomous": False,
-            "effective_endurance_min": 300,
-            "ready_time_min": 0,
-            "vehicle_id": None,
-            "vehicle_name": None,
-        },
-        {
-            "device_id": "dev-dog-008",
-            "device_code": "DV-DOG-008",
-            "device_name": "四足生命探测机器狗",
-            "device_type": "dog",
-            "category": "ugv_quadruped",
-            "status": "available",
-            "battery_percent": 100,
-            "location": None,
-            "capabilities": ["life_detection", "search", "rubble_traverse", "camera"],
-            "max_endurance_min": 240,  # 4小时
-            "max_speed_ms": 2.5,
-            "max_wind_resistance_ms": 99,
-            "ip_rating": "IP54",
-            "sensor_fov_deg": None,
-            "requires_runway": False,
-            "is_autonomous": False,
-            "effective_endurance_min": 240,
-            "ready_time_min": 0,
-            "vehicle_id": None,
-            "vehicle_name": None,
-        },
-    ]
+    provider = get_device_provider()
+    device_ids = await provider.list_available_devices()
     
+    devices = []
+    for device_id in device_ids:
+        profile = await provider.get_device_profile(device_id)
+        if profile is None:
+            continue
+        
+        # 从Provider的原始数据中获取完整信息
+        provider._load_data()
+        raw_data = provider._devices.get(device_id, {})
+        
+        # 根据category确定device_type (drone/dog)
+        category = raw_data.get("category", "multirotor")
+        if category in ["multirotor", "vtol_fixed_wing", "fixed_wing"]:
+            device_type = "drone"
+        elif category in ["ugv_quadruped"]:
+            device_type = "dog"
+        else:
+            device_type = "unknown"
+        
+        device_status: DeviceStatus = {
+            "device_id": device_id,
+            "device_code": raw_data.get("device_code", device_id),
+            "device_name": raw_data.get("device_name", profile.device_type),
+            "device_type": device_type,
+            "category": category,
+            "status": raw_data.get("status", "available"),
+            "battery_percent": raw_data.get("battery_percent", 100),
+            "location": raw_data.get("location"),
+            "capabilities": raw_data.get("capabilities", []),
+            "max_endurance_min": raw_data.get("max_endurance_min", 30),
+            "max_speed_ms": profile.max_speed_ms,
+            "max_wind_resistance_ms": profile.max_wind_resistance_ms,
+            "ip_rating": raw_data.get("ip_rating", "IP43"),
+            "sensor_fov_deg": raw_data.get("sensor_fov_deg", 84),
+            "requires_runway": raw_data.get("requires_runway", False),
+            "is_autonomous": raw_data.get("is_autonomous", False),
+            "effective_endurance_min": raw_data.get("effective_endurance_min", 30),
+            "ready_time_min": raw_data.get("ready_time_min", 0),
+            "vehicle_id": raw_data.get("vehicle_id"),
+            "vehicle_name": raw_data.get("vehicle_name"),
+        }
+        devices.append(device_status)
+    
+    logger.info(f"从统一数据源加载了 {len(devices)} 个设备")
     return devices
 
 

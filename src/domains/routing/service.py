@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,10 @@ from src.infra.clients.amap.route_planning import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 是否优先使用内部路径规划（已废弃，改为高德优先 + 直线fallback）
+# 可通过环境变量 PREFER_INTERNAL_ROUTING=true 恢复内部路径规划
+PREFER_INTERNAL_ROUTING = os.environ.get("PREFER_INTERNAL_ROUTING", "false").lower() == "true"
 
 
 class RoutePlanningService:
@@ -51,7 +56,15 @@ class RoutePlanningService:
         """
         logger.info(f"路径规划: ({origin.lon},{origin.lat}) → ({destination.lon},{destination.lat})")
         
-        # Step 1: 尝试高德API
+        if PREFER_INTERNAL_ROUTING:
+            # 内部路径规划模式（需设置环境变量 PREFER_INTERNAL_ROUTING=true）
+            internal_result = await self._internal_route(origin, destination)
+            if internal_result.success:
+                return internal_result
+            logger.warning("内部路径规划失败，fallback到直线估算")
+            return self._fallback_straight_line(origin, destination)
+        
+        # 默认模式：优先高德API → 直线fallback
         try:
             result = await amap_route_planning_async(
                 origin_lon=origin.lon,
@@ -67,8 +80,9 @@ class RoutePlanningService:
         except Exception as e:
             logger.warning(f"高德API失败: {e}")
         
-        # Step 2: Fallback到内部路径规划
-        return await self._internal_route(origin, destination)
+        # Fallback: 直线距离 + 系数估算
+        logger.info("高德API无结果，使用直线距离估算")
+        return self._fallback_straight_line(origin, destination)
     
     async def plan_route_with_avoidance(
         self,
@@ -94,6 +108,10 @@ class RoutePlanningService:
             f"避让区域数={len(avoid_areas)}"
         )
         
+        # 无避让区域，使用普通规划
+        if not avoid_areas:
+            return await self.plan_route(origin, destination, strategy)
+        
         # 转换避让区域为高德格式
         avoid_polygons = [
             [(p.lon, p.lat) for p in area.polygon]
@@ -101,7 +119,15 @@ class RoutePlanningService:
             if area.severity == "hard"
         ]
         
-        # Step 1: 尝试高德API
+        if PREFER_INTERNAL_ROUTING:
+            # 内部路径规划模式（需设置环境变量 PREFER_INTERNAL_ROUTING=true）
+            internal_result = await self._internal_route_with_avoidance(origin, destination, avoid_areas)
+            if internal_result.success:
+                return internal_result
+            logger.warning("内部避障路径规划失败，fallback到直线估算")
+            return self._fallback_straight_line(origin, destination)
+        
+        # 默认模式：优先高德API → 直线fallback
         if avoid_polygons:
             try:
                 result = await amap_route_planning_with_avoidance_async(
@@ -118,12 +144,10 @@ class RoutePlanningService:
                     
             except Exception as e:
                 logger.warning(f"高德避障API失败: {e}")
-        else:
-            # 无避让区域，使用普通规划
-            return await self.plan_route(origin, destination, strategy)
         
-        # Step 2: Fallback到内部路径规划
-        return await self._internal_route_with_avoidance(origin, destination, avoid_areas)
+        # Fallback: 直线距离 + 系数估算
+        logger.info("高德避障API无结果，使用直线距离估算")
+        return self._fallback_straight_line(origin, destination)
     
     async def _internal_route(
         self,
@@ -131,9 +155,15 @@ class RoutePlanningService:
         destination: Point,
     ) -> RouteResult:
         """内部路径规划（DatabaseRouteEngine）"""
-        logger.info("使用内部路径规划引擎")
+        import time
+        start_time = time.perf_counter()
+        
+        logger.info(
+            f"[内部路径规划] 开始 ({origin.lon:.4f},{origin.lat:.4f}) → ({destination.lon:.4f},{destination.lat:.4f})"
+        )
         
         if self._db is None:
+            logger.warning("[内部路径规划] 数据库连接不可用")
             return RouteResult(
                 source="fallback",
                 success=False,
@@ -145,23 +175,47 @@ class RoutePlanningService:
             )
         
         try:
-            from src.planning.algorithms.routing import DatabaseRouteEngine
-            from src.planning.algorithms.routing.types import Point as RoutingPoint
+            from uuid import uuid4
+            from src.planning.algorithms.routing.db_route_engine import (
+                DatabaseRouteEngine,
+                VehicleCapability,
+                Point as RoutingPoint,
+            )
             
             engine = DatabaseRouteEngine(self._db)
             
             start = RoutingPoint(lon=origin.lon, lat=origin.lat)
             end = RoutingPoint(lon=destination.lon, lat=destination.lat)
             
-            path_result = await engine.route_async(
+            # 创建默认车辆能力（普通救援车辆）
+            default_vehicle = VehicleCapability(
+                vehicle_id=uuid4(),
+                vehicle_code="DEFAULT_RESCUE",
+                max_speed_kmh=60,
+                is_all_terrain=False,
+                terrain_capabilities=["paved", "gravel"],
+                terrain_speed_factors={"paved": 1.0, "gravel": 0.7, "dirt": 0.5},
+                max_gradient_percent=15,
+                max_wading_depth_m=0.3,
+                width_m=2.5,
+                height_m=3.0,
+                total_weight_kg=10000,
+            )
+            
+            path_result = await engine.plan_route(
                 start=start,
                 end=end,
-                vehicle_capability=None,
-                disaster_areas=[],
+                vehicle=default_vehicle,
             )
             
             # 转换结果
-            polyline = [Point(lon=p.lon, lat=p.lat) for p in path_result.points]
+            polyline = [Point(lon=p.lon, lat=p.lat) for p in path_result.path_points]
+            
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            logger.info(
+                f"[内部路径规划] 成功 距离={path_result.distance_m/1000:.2f}km "
+                f"时间={path_result.duration_seconds/60:.1f}分钟 耗时={elapsed_ms:.0f}ms"
+            )
             
             return RouteResult(
                 source="internal",
@@ -169,12 +223,13 @@ class RoutePlanningService:
                 origin=origin,
                 destination=destination,
                 total_distance_m=path_result.distance_m,
-                total_duration_s=path_result.duration_s,
+                total_duration_s=int(path_result.duration_seconds),
                 polyline=polyline,
             )
             
         except Exception as e:
-            logger.error(f"内部路径规划失败: {e}")
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            logger.error(f"[内部路径规划] 失败(耗时{elapsed_ms:.0f}ms): {e}")
             return RouteResult(
                 source="fallback",
                 success=False,
@@ -192,9 +247,16 @@ class RoutePlanningService:
         avoid_areas: List[AvoidArea],
     ) -> RouteResult:
         """内部避障路径规划"""
-        logger.info(f"使用内部避障路径规划, 避让区域数={len(avoid_areas)}")
+        import time
+        start_time = time.perf_counter()
+        
+        logger.info(
+            f"[内部避障路径规划] 开始 ({origin.lon:.4f},{origin.lat:.4f}) → ({destination.lon:.4f},{destination.lat:.4f}) "
+            f"避让区域数={len(avoid_areas)}"
+        )
         
         if self._db is None:
+            logger.warning("[内部避障路径规划] 数据库连接不可用")
             return RouteResult(
                 source="fallback",
                 success=False,
@@ -206,31 +268,49 @@ class RoutePlanningService:
             )
         
         try:
-            from src.planning.algorithms.routing import DatabaseRouteEngine, DisasterArea
-            from src.planning.algorithms.routing.types import Point as RoutingPoint
+            from uuid import uuid4
+            from src.planning.algorithms.routing.db_route_engine import (
+                DatabaseRouteEngine,
+                VehicleCapability,
+                Point as RoutingPoint,
+            )
             
             engine = DatabaseRouteEngine(self._db)
             
             start = RoutingPoint(lon=origin.lon, lat=origin.lat)
             end = RoutingPoint(lon=destination.lon, lat=destination.lat)
             
-            # 转换避让区域为DisasterArea
-            disaster_areas = []
-            for area in avoid_areas:
-                coords = [(p.lon, p.lat) for p in area.polygon]
-                disaster_areas.append(DisasterArea(
-                    boundary={"type": "Polygon", "coordinates": [coords]},
-                    hardness="hard" if area.severity == "hard" else "soft",
-                ))
-            
-            path_result = await engine.route_async(
-                start=start,
-                end=end,
-                vehicle_capability=None,
-                disaster_areas=disaster_areas,
+            # 创建默认车辆能力（普通救援车辆）
+            default_vehicle = VehicleCapability(
+                vehicle_id=uuid4(),
+                vehicle_code="DEFAULT_RESCUE",
+                max_speed_kmh=60,
+                is_all_terrain=False,
+                terrain_capabilities=["paved", "gravel"],
+                terrain_speed_factors={"paved": 1.0, "gravel": 0.7, "dirt": 0.5},
+                max_gradient_percent=15,
+                max_wading_depth_m=0.3,
+                width_m=2.5,
+                height_m=3.0,
+                total_weight_kg=10000,
             )
             
-            polyline = [Point(lon=p.lon, lat=p.lat) for p in path_result.points]
+            # TODO: 当前 plan_route 不支持直接传入避让区域
+            # 避障功能需要从数据库加载 disaster_affected_areas_v2
+            # 暂时使用普通路径规划
+            path_result = await engine.plan_route(
+                start=start,
+                end=end,
+                vehicle=default_vehicle,
+            )
+            
+            polyline = [Point(lon=p.lon, lat=p.lat) for p in path_result.path_points]
+            
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            logger.info(
+                f"[内部避障路径规划] 成功 距离={path_result.distance_m/1000:.2f}km "
+                f"时间={path_result.duration_seconds/60:.1f}分钟 耗时={elapsed_ms:.0f}ms"
+            )
             
             return RouteResult(
                 source="internal",
@@ -238,12 +318,13 @@ class RoutePlanningService:
                 origin=origin,
                 destination=destination,
                 total_distance_m=path_result.distance_m,
-                total_duration_s=path_result.duration_s,
+                total_duration_s=int(path_result.duration_seconds),
                 polyline=polyline,
             )
             
         except Exception as e:
-            logger.error(f"内部避障路径规划失败: {e}")
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            logger.error(f"[内部避障路径规划] 失败(耗时{elapsed_ms:.0f}ms): {e}")
             return RouteResult(
                 source="fallback",
                 success=False,
@@ -314,6 +395,61 @@ class RoutePlanningService:
             segments=segments,
             polyline=polyline_points,
         )
+    
+    def _fallback_straight_line(
+        self,
+        origin: Point,
+        destination: Point,
+        road_factor: float = 1.4,
+        avg_speed_kmh: float = 40,
+    ) -> RouteResult:
+        """
+        直线距离 + 系数估算（高德失败时的fallback）
+        
+        Args:
+            origin: 起点
+            destination: 终点
+            road_factor: 道路迂回系数（直线距离 × 1.4 = 估算道路距离）
+            avg_speed_kmh: 平均行驶速度（考虑城镇和山区道路）
+            
+        Returns:
+            估算的路径规划结果
+        """
+        straight_distance_m = self._haversine_distance(origin, destination)
+        estimated_distance_m = straight_distance_m * road_factor
+        estimated_duration_s = int(estimated_distance_m / (avg_speed_kmh * 1000 / 3600))
+        
+        logger.info(
+            f"[直线估算] 直线距离={straight_distance_m/1000:.2f}km, "
+            f"估算道路距离={estimated_distance_m/1000:.2f}km, "
+            f"估算时间={estimated_duration_s/60:.1f}分钟"
+        )
+        
+        return RouteResult(
+            source="fallback_straight_line",
+            success=True,
+            origin=origin,
+            destination=destination,
+            total_distance_m=estimated_distance_m,
+            total_duration_s=estimated_duration_s,
+            polyline=[origin, destination],
+        )
+    
+    def _haversine_distance(self, p1: Point, p2: Point) -> float:
+        """Haversine公式计算两点间直线距离（米）"""
+        from math import radians, sin, cos, sqrt, atan2
+        R = 6371000  # 地球半径（米）
+        
+        lat1, lon1 = radians(p1.lat), radians(p1.lon)
+        lat2, lon2 = radians(p2.lat), radians(p2.lon)
+        
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        
+        a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+        c = 2 * atan2(sqrt(a), sqrt(1-a))
+        
+        return R * c
 
 
 _routing_service: Optional[RoutePlanningService] = None

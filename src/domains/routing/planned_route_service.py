@@ -171,7 +171,7 @@ class PlannedRouteService:
     
     async def generate_and_save_alternatives(
         self,
-        task_id: UUID,
+        task_id: Optional[UUID],
         origin: Point,
         destination: Point,
         risk_area_ids: List[UUID],
@@ -179,10 +179,10 @@ class PlannedRouteService:
         vehicle_id: Optional[UUID] = None,
     ) -> Dict[str, Any]:
         """
-        生成绕行方案并存储到数据库
+        生成绕行方案，如有 task_id 则存储到数据库
         
         Args:
-            task_id: 任务ID
+            task_id: 任务ID（可选，不传则只返回方案不存储）
             origin: 起点
             destination: 终点
             risk_area_ids: 需要避让的风险区域ID列表
@@ -210,42 +210,44 @@ class PlannedRouteService:
                 "success": False,
                 "error": "未能生成绕行方案",
                 "alternatives": [],
+                "alternative_count": 0,
             }
         
-        # 2. 存储每个绕行方案到数据库
+        # 2. 构建返回结果（如有 task_id 则同时存储到数据库）
         saved_routes = []
         for alt in alternatives:
-            estimated_time_minutes = int(alt.duration_s / 60)
-            
-            route_id = await self._repo.create(
-                task_id=task_id,
-                vehicle_id=vehicle_id,
-                team_id=team_id,
-                polyline=alt.polyline,
-                total_distance_m=alt.distance_m,
-                estimated_time_minutes=estimated_time_minutes,
-                status="alternative",
-                properties={
-                    "strategy": alt.strategy,
-                    "strategy_name": alt.strategy_name,
-                    "description": alt.description,
-                },
-            )
-            
-            saved_routes.append({
-                "route_id": str(route_id),
+            route_data = {
                 "strategy": alt.strategy,
                 "strategy_name": alt.strategy_name,
                 "distance_m": alt.distance_m,
                 "duration_s": alt.duration_s,
                 "description": alt.description,
                 "polyline": [{"lon": p.lon, "lat": p.lat} for p in alt.polyline],
-            })
+            }
             
-            logger.info(f"绕行方案已存储: route_id={route_id}, strategy={alt.strategy}")
+            # 只有传入 task_id 时才存储到数据库
+            if task_id:
+                estimated_time_minutes = int(alt.duration_s / 60)
+                route_id = await self._repo.create(
+                    task_id=task_id,
+                    vehicle_id=vehicle_id,
+                    team_id=team_id,
+                    polyline=alt.polyline,
+                    total_distance_m=alt.distance_m,
+                    estimated_time_minutes=estimated_time_minutes,
+                    status="alternative",
+                    properties={
+                        "strategy": alt.strategy,
+                        "strategy_name": alt.strategy_name,
+                        "description": alt.description,
+                    },
+                )
+                route_data["route_id"] = str(route_id)
+                logger.info(f"绕行方案已存储: route_id={route_id}, strategy={alt.strategy}")
+            
+            saved_routes.append(route_data)
         
-        # 3. 更新任务的备选路径数
-        # 这里可以通过 properties 记录或其他方式
+        logger.info(f"绕行方案生成完成: {len(saved_routes)} 条方案")
         
         return {
             "success": True,

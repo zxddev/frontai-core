@@ -107,7 +107,7 @@ async def fetch_entities(
     includeHidden: bool = Query(False, description="是否包含隐藏实体"),
     updatedSince: Optional[str] = Query(None, description="增量查询起始时间"),
     page: int = Query(1, ge=1),
-    pageSize: int = Query(20, ge=1, le=100),
+    pageSize: int = Query(20, ge=1, le=1000),
     service: EntityService = Depends(get_entity_service),
 ) -> ApiResponse[EntityPage]:
     """

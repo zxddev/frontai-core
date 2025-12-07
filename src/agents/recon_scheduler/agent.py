@@ -3,6 +3,8 @@
 
 完整的救灾侦察调度系统，调度前突车队对内的无人设备，
 生成侦察航线和执行计划。
+
+继承BaseAgent，遵循项目架构规范。
 """
 from __future__ import annotations
 
@@ -10,6 +12,9 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
+from langgraph.graph.state import CompiledStateGraph
+
+from ..base.agent import BaseAgent
 from .graph import get_recon_scheduler_graph
 from .state import ReconSchedulerState
 
@@ -19,9 +24,11 @@ logger = logging.getLogger(__name__)
 _agent_instance: Optional["ReconSchedulerAgent"] = None
 
 
-class ReconSchedulerAgent:
+class ReconSchedulerAgent(BaseAgent[ReconSchedulerState]):
     """
     侦察调度智能体
+    
+    继承BaseAgent，实现标准Agent接口。
     
     负责:
     1. 灾情深度理解
@@ -36,44 +43,36 @@ class ReconSchedulerAgent:
     10. 输出生成（航线文件、执行包）
     """
     
-    def __init__(self):
+    def __init__(self) -> None:
         """初始化Agent"""
-        self._graph = None
-        logger.info("ReconSchedulerAgent 初始化")
+        super().__init__(name="recon_scheduler")
+        self.logger.info("ReconSchedulerAgent 初始化")
     
-    @property
-    def graph(self):
-        """懒加载图"""
-        if self._graph is None:
-            self._graph = get_recon_scheduler_graph()
-        return self._graph
+    def build_graph(self) -> CompiledStateGraph:
+        """构建LangGraph状态图"""
+        return get_recon_scheduler_graph()
     
-    async def schedule(
-        self,
-        event_id: str,
-        scenario_id: str,
-        recon_request: str,
-        target_area: Optional[Dict[str, Any]] = None,
-        disaster_context: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    def prepare_input(self, **kwargs: Any) -> ReconSchedulerState:
         """
-        执行侦察调度
+        准备初始状态
         
         Args:
             event_id: 事件ID
             scenario_id: 场景ID
             recon_request: 侦察需求描述
             target_area: 目标区域（GeoJSON格式）
-            disaster_context: 灾情上下文（来自EmergencyAI，可选）
+            disaster_context: 灾情上下文
         
         Returns:
-            完整的侦察计划
+            初始化的ReconSchedulerState
         """
-        logger.info(f"开始侦察调度: event_id={event_id}, scenario_id={scenario_id}")
-        logger.info(f"侦察需求: {recon_request[:100]}...")
+        event_id = kwargs.get("event_id", "")
+        scenario_id = kwargs.get("scenario_id", "")
+        recon_request = kwargs.get("recon_request", "")
+        target_area = kwargs.get("target_area")
+        disaster_context = kwargs.get("disaster_context")
         
-        # 构建初始状态
-        initial_state: ReconSchedulerState = {
+        return {
             # 输入
             "event_id": event_id,
             "scenario_id": scenario_id,
@@ -115,36 +114,203 @@ class ReconSchedulerAgent:
                 "start_time": datetime.now().isoformat(),
                 "request": recon_request,
             },
+            
+            # V2.1 新增: 重试控制
+            "retry_count": 0,
+            "max_retries": 3,
+            "retry_history": [],
+            
+            # V2.1 新增: 验证状态
+            "validation_level": None,
+            "l1_result": None,
+            "l2_result": None,
+            
+            # V2.1 新增: 流式事件
+            "stream_events": [],
+            "buffered_events": [],
+            
+            # V2.1 新增: 检查点
+            "checkpoint": None,
+            "saved_checkpoint_id": None,
+            
+            # V2.1 新增: 坐标系
+            "utm_zone": None,
+            "utm_hemisphere": None,
+            "home_position_utm": None,
+            "current_position_utm": None,
+            "route_history": [],
+            
+            # V2.1 新增: 人工审批
+            "approval_status": "not_required",
+            "approval_request": None,
+            "approval_timeout_s": 300,
+            "degradation_options": [],
+            "approved_degradation": None,
+            
+            # V2.1 新增: 安全模式
+            "safe_mode_action": None,
+            "rth_triggers": [],
+            "signal_lost_since": None,
+            
+            # V2.1 新增: 熔断器状态
+            "breaker_state": "closed",
+            "fail_safe_triggered": False,
+            "l1_breaker_failures": 0,
+            "l2_breaker_failures": 0,
+            
+            # V2.1 新增: 恢复状态
+            "is_resumed": False,
+            "needs_replan": False,
+            "resume_checkpoint_id": None,
+            "resume_timestamp": None,
+            
+            # V2.1 新增: 能耗追踪
+            "battery_percent": 95.0,
+            "rth_required_percent": 20.0,
+            "energy_consumed_percent": 0.0,
+            
+            # V2.1 新增: 通信状态
+            "signal_dbm": -50.0,
+            "last_ack_time": None,
+            "relay_dwell_total_s": 0.0,
         }
+    
+    async def arun(self, **kwargs: Any) -> Dict[str, Any]:
+        """
+        异步执行Agent（覆盖基类方法，设置更高的递归限制）
+        
+        ReconScheduler有14个节点和复杂的条件边，需要更高的递归限制。
+        """
+        import time
+        
+        start_time = time.time()
+        task_id = kwargs.get("task_id", f"task-{self.name}-{int(time.time())}")
+        
+        self.logger.info(
+            "ReconScheduler开始异步执行",
+            extra={"task_id": task_id, "input_keys": list(kwargs.keys())},
+        )
         
         try:
-            # 执行图
-            result = await self.graph.ainvoke(initial_state)
-            
-            # 提取结果
-            recon_plan = result.get("recon_plan", {})
-            
-            logger.info(f"侦察调度完成: plan_id={recon_plan.get('plan_id', 'N/A')}")
-            
-            return {
-                "success": True,
-                "plan_id": recon_plan.get("plan_id"),
-                "recon_plan": recon_plan,
-                "execution_package": result.get("execution_package"),
-                "flight_files": result.get("flight_files", []),
-                "errors": result.get("errors", []),
-                "warnings": result.get("warnings", []),
-                "phase_history": result.get("phase_history", []),
+            # 准备输入
+            input_state = self.prepare_input(**kwargs)
+            input_state["task_id"] = task_id
+            input_state["started_at"] = datetime.now()
+            input_state["trace"] = {
+                **input_state.get("trace", {}),
+                "algorithms_used": [],
+                "nodes_executed": [],
             }
             
+            # 异步执行图（使用更高的递归限制）
+            final_state = await self.graph.ainvoke(
+                input_state,
+                config={"recursion_limit": 100}
+            )
+            
+            # 记录完成时间
+            final_state["completed_at"] = datetime.now()
+            
+            # 处理输出
+            result = self.process_output(final_state)
+            
+            execution_time_ms = (time.time() - start_time) * 1000
+            result["execution_time_ms"] = round(execution_time_ms, 2)
+            
+            self.logger.info(
+                "ReconScheduler异步执行完成",
+                extra={
+                    "task_id": task_id,
+                    "execution_time_ms": execution_time_ms,
+                    "has_errors": len(final_state.get("errors", [])) > 0,
+                },
+            )
+            
+            return result
+            
         except Exception as e:
-            logger.exception(f"侦察调度失败: {e}")
+            execution_time_ms = (time.time() - start_time) * 1000
+            self.logger.exception(
+                "ReconScheduler异步执行失败",
+                extra={"task_id": task_id, "error": str(e)},
+            )
             return {
                 "success": False,
                 "error": str(e),
                 "errors": [str(e)],
                 "warnings": [],
+                "execution_time_ms": round(execution_time_ms, 2),
             }
+    
+    def process_output(self, state: ReconSchedulerState) -> Dict[str, Any]:
+        """
+        处理输出结果
+        
+        Args:
+            state: 最终状态
+            
+        Returns:
+            格式化的输出结果，包含成功判断
+        """
+        recon_plan = state.get("recon_plan", {})
+        flight_plans = state.get("flight_plans", [])
+        errors = state.get("errors", [])
+        
+        # 成功条件：有航线输出且无错误
+        success = len(flight_plans) > 0 and len(errors) == 0
+        
+        if success:
+            self.logger.info(f"侦察调度完成: plan_id={recon_plan.get('plan_id', 'N/A')}, 航线数={len(flight_plans)}")
+        else:
+            self.logger.warning(f"侦察调度失败: 航线数={len(flight_plans)}, 错误数={len(errors)}")
+        
+        return {
+            "success": success,
+            "plan_id": recon_plan.get("plan_id"),
+            "recon_plan": recon_plan,
+            "flight_plans": flight_plans,
+            "execution_package": state.get("execution_package"),
+            "flight_files": state.get("flight_files", []),
+            "errors": errors,
+            "warnings": state.get("warnings", []),
+            "phase_history": state.get("phase_history", []),
+            "l1_result": state.get("l1_result"),
+            "l2_result": state.get("l2_result"),
+            "breaker_state": state.get("breaker_state", "closed"),
+            "retry_count": state.get("retry_count", 0),
+        }
+    
+    async def schedule(
+        self,
+        event_id: str,
+        scenario_id: str,
+        recon_request: str,
+        target_area: Optional[Dict[str, Any]] = None,
+        disaster_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        执行侦察调度（便捷方法，内部调用arun）
+        
+        Args:
+            event_id: 事件ID
+            scenario_id: 场景ID
+            recon_request: 侦察需求描述
+            target_area: 目标区域（GeoJSON格式）
+            disaster_context: 灾情上下文（来自EmergencyAI，可选）
+        
+        Returns:
+            完整的侦察计划
+        """
+        self.logger.info(f"开始侦察调度: event_id={event_id}, scenario_id={scenario_id}")
+        self.logger.info(f"侦察需求: {recon_request[:100]}...")
+        
+        return await self.arun(
+            event_id=event_id,
+            scenario_id=scenario_id,
+            recon_request=recon_request,
+            target_area=target_area,
+            disaster_context=disaster_context,
+        )
     
     async def quick_schedule(
         self,

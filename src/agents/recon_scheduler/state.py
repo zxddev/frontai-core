@@ -94,6 +94,62 @@ class Priority(str, Enum):
     LOW = "low"
 
 
+# ==================== V2.1 新增枚举 ====================
+
+class ValidationLevel(str, Enum):
+    """验证级别"""
+    L1 = "l1"  # 快速2.5D验证
+    L2 = "l2"  # 深度3D验证
+
+
+class ApprovalStatus(str, Enum):
+    """人工审批状态"""
+    NOT_REQUIRED = "not_required"
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    TIMEOUT = "timeout"
+
+
+class SafeModeAction(str, Enum):
+    """安全模式动作"""
+    HOVER = "hover"
+    RTH = "rth"
+    EMERGENCY_LAND = "emergency_land"
+
+
+class BreakerState(str, Enum):
+    """熔断器状态"""
+    CLOSED = "closed"      # 正常
+    OPEN = "open"          # 熔断
+    HALF_OPEN = "half_open"  # 半开
+
+
+class DegradationOption(str, Enum):
+    """降级选项"""
+    REDUCE_ALTITUDE = "reduce_altitude"
+    REDUCE_COVERAGE = "reduce_coverage"
+    SWITCH_DEVICE = "switch_device"
+    PERIMETER_ONLY = "perimeter_only"
+
+
+class EventType(str, Enum):
+    """流式事件类型"""
+    PERCEPTION = "PERCEPTION"
+    HEALTH = "HEALTH"
+    PLAN = "PLAN"
+    CHECKPOINT = "CHECKPOINT"
+
+
+class RTHTrigger(str, Enum):
+    """RTH触发类型 (按优先级排序)"""
+    CRITICAL_HARDWARE_FAULT = "CRITICAL_HARDWARE_FAULT"  # 优先级1
+    BATTERY_CRITICAL = "BATTERY_CRITICAL"                # 优先级2
+    HUMAN_COMMAND = "HUMAN_COMMAND"                      # 优先级3
+    SIGNAL_LOST_TIMEOUT = "SIGNAL_LOST_TIMEOUT"          # 优先级4
+    VALIDATION_EXHAUSTED = "VALIDATION_EXHAUSTED"        # 优先级5
+
+
 # ==================== Phase 1: 灾情分析 ====================
 
 class SecondaryRisk(TypedDict):
@@ -557,6 +613,84 @@ class RiskAssessment(TypedDict):
     pre_flight_checklist: List[Dict[str, Any]]
 
 
+# ==================== V2.1 新增TypedDict ====================
+
+class RetryRecord(TypedDict):
+    """重试记录"""
+    attempt: int
+    timestamp: str
+    reason: str
+    result: str  # success/failure
+
+
+class ValidationResult(TypedDict):
+    """验证结果 (L1/L2)"""
+    level: str  # L1/L2
+    passed: bool
+    duration_ms: float
+    checks: Dict[str, bool]
+    errors: List[str]
+    timestamp: str
+
+
+class IntelligenceEvent(TypedDict):
+    """情报事件"""
+    event_id: str
+    event_type: str  # PERCEPTION/HEALTH/PLAN/CHECKPOINT
+    timestamp: str
+    mission_id: str
+    geometry: Optional[Dict[str, Any]]
+    confidence: Optional[float]
+    source: Optional[str]
+    priority: int
+    payload: Dict[str, Any]
+
+
+class CheckpointPayload(TypedDict):
+    """检查点数据"""
+    checkpoint_id: str
+    mission_id: str
+    timestamp: str
+    schema_version: str
+    current_position_utm: Dict[str, float]  # easting, northing, alt
+    heading_deg: float
+    covered_area_mask: Optional[Dict[str, Any]]  # UTM polygon
+    remaining_waypoints: List[int]
+    environment_snapshot: Dict[str, Any]
+    cached_intelligence: List[IntelligenceEvent]
+    battery_percent: float
+    device_health: Dict[str, Any]
+
+
+class ApprovalRequest(TypedDict):
+    """人工审批请求"""
+    request_id: str
+    mission_id: str
+    timestamp: str
+    reason: str
+    degradation_options: List[str]
+    current_status: str
+    expires_at: str
+
+
+class UTMPosition(TypedDict):
+    """UTM坐标位置"""
+    easting: float
+    northing: float
+    altitude: float
+    zone: int
+    hemisphere: str
+
+
+class RouteHistoryEntry(TypedDict):
+    """路径历史记录"""
+    waypoint_seq: int
+    position_utm: UTMPosition
+    timestamp: str
+    signal_dbm: float
+    battery_percent: float
+
+
 # ==================== Phase 9: 计划校验 ====================
 
 class ValidationError(TypedDict):
@@ -783,3 +917,62 @@ class ReconSchedulerState(TypedDict):
     
     # ========== 追溯 ==========
     trace: Dict[str, Any]
+    
+    # ========== V2.1 新增: 重试控制 ==========
+    retry_count: int
+    max_retries: int  # 来源优先级: device > mission > default(3)
+    retry_history: List[RetryRecord]
+    
+    # ========== V2.1 新增: 验证状态 ==========
+    validation_level: Optional[str]  # L1/L2
+    l1_result: Optional[ValidationResult]
+    l2_result: Optional[ValidationResult]
+    
+    # ========== V2.1 新增: 流式事件 ==========
+    stream_events: List[IntelligenceEvent]
+    buffered_events: List[IntelligenceEvent]  # 网络断开时的缓冲
+    
+    # ========== V2.1 新增: 检查点 ==========
+    checkpoint: Optional[CheckpointPayload]
+    saved_checkpoint_id: Optional[str]  # 注意: checkpoint_id是LangGraph保留字
+    
+    # ========== V2.1 新增: 坐标系 ==========
+    utm_zone: Optional[int]
+    utm_hemisphere: Optional[str]
+    home_position_utm: Optional[UTMPosition]
+    current_position_utm: Optional[UTMPosition]
+    route_history: List[RouteHistoryEntry]
+    
+    # ========== V2.1 新增: 人工审批 ==========
+    approval_status: str  # ApprovalStatus enum value
+    approval_request: Optional[ApprovalRequest]
+    approval_timeout_s: int  # 默认300s
+    degradation_options: List[str]  # DegradationOption enum values
+    approved_degradation: Optional[str]
+    
+    # ========== V2.1 新增: 安全模式 ==========
+    safe_mode_action: Optional[str]  # SafeModeAction enum value
+    rth_triggers: List[str]  # RTHTrigger enum values
+    signal_lost_since: Optional[str]  # ISO8601 timestamp
+    
+    # ========== V2.1 新增: 熔断器状态 ==========
+    breaker_state: str  # BreakerState enum value (closed/open/half_open)
+    fail_safe_triggered: bool  # 是否已触发fail-safe
+    l1_breaker_failures: int  # L1熔断器连续失败次数
+    l2_breaker_failures: int  # L2熔断器连续失败次数
+    
+    # ========== V2.1 新增: 恢复状态 ==========
+    is_resumed: bool  # 是否从检查点恢复
+    needs_replan: bool  # 是否需要重规划
+    resume_checkpoint_id: Optional[str]  # 恢复的检查点ID
+    resume_timestamp: Optional[str]  # 恢复时间戳
+    
+    # ========== V2.1 新增: 能耗追踪 ==========
+    battery_percent: float
+    rth_required_percent: float
+    energy_consumed_percent: float
+    
+    # ========== V2.1 新增: 通信状态 ==========
+    signal_dbm: float
+    last_ack_time: Optional[str]
+    relay_dwell_total_s: float

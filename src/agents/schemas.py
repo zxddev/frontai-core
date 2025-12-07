@@ -390,6 +390,10 @@ class ConfirmEmergencySchemeRequest(BaseModel):
         min_length=1, 
         description="用户选中的队伍ID列表（UUID字符串）"
     )
+    operator_id: Optional[str] = Field(default=None, description="操作者ID（演示环境可为空，正式需从token获取）")
+    operator_name: Optional[str] = Field(default=None, description="操作者姓名")
+    operator_role: Optional[str] = Field(default=None, description="操作者角色: commander/deputy/operator")
+    auth_method: Optional[str] = Field(default=None, description="确认方式: long_press_5s/password/dual_confirm")
 
     class Config:
         json_schema_extra = {
@@ -397,7 +401,11 @@ class ConfirmEmergencySchemeRequest(BaseModel):
                 "team_ids": [
                     "72c767de-379d-421a-bbf5-7fb01abd7cc7",
                     "1fe8d3b7-3bfc-4d1d-b246-fe4cec9f30c8"
-                ]
+            ],
+            "operator_id": "op-001",
+            "operator_name": "张三",
+            "operator_role": "commander",
+            "auth_method": "long_press_5s",
             }
         }
 
@@ -640,3 +648,104 @@ class RoutePlanningResult(BaseModel):
     # 追踪
     trace: Optional[Dict[str, Any]] = Field(default=None, description="执行追踪")
     errors: List[str] = Field(default_factory=list, description="错误列表")
+
+
+# ============================================================================
+# 侦察调度接口 (ReconScheduler V2.1)
+# ============================================================================
+
+class ReconScheduleRequest(BaseModel):
+    """侦察调度请求"""
+    event_id: str = Field(..., description="事件ID")
+    scenario_id: str = Field(..., description="场景ID")
+    recon_request: str = Field(..., description="侦察需求描述")
+    target_area: Optional[Dict[str, Any]] = Field(default=None, description="目标区域 (GeoJSON)")
+    disaster_context: Optional[Dict[str, Any]] = Field(default=None, description="灾情上下文")
+    config: Optional[Dict[str, Any]] = Field(default=None, description="配置项 (max_retries, battery_percent等)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "event_id": "mission_001",
+                "scenario_id": "rescue_scenario",
+                "recon_request": "搜索茂县震区滞留人员，重点关注居民区和学校",
+                "target_area": {
+                    "type": "Polygon",
+                    "coordinates": [[[103.8, 31.6], [103.9, 31.6], [103.9, 31.7], [103.8, 31.7], [103.8, 31.6]]]
+                },
+                "disaster_context": {
+                    "disaster_type": "earthquake",
+                    "severity": "severe",
+                    "estimated_victims": 50,
+                },
+                "config": {
+                    "max_retries": 3,
+                    "initial_battery_percent": 95,
+                },
+            }
+        }
+
+
+class ReconScheduleTaskResponse(BaseModel):
+    """侦察调度任务提交响应"""
+    success: bool = Field(..., description="是否成功")
+    task_id: str = Field(..., description="任务ID")
+    status: str = Field(..., description="任务状态: processing/completed/failed/awaiting_approval")
+    message: str = Field(..., description="状态消息")
+    created_at: datetime = Field(default_factory=datetime.now, description="创建时间")
+
+
+class ReconScheduleResult(BaseModel):
+    """侦察调度结果"""
+    task_id: str = Field(..., description="任务ID")
+    status: str = Field(..., description="任务状态")
+    success: bool = Field(..., description="是否成功")
+    
+    # 航线结果
+    flight_plans: List[Dict[str, Any]] = Field(default_factory=list, description="航线计划列表")
+    execution_package: Optional[Dict[str, Any]] = Field(default=None, description="执行包")
+    
+    # 验证结果
+    validation_results: Optional[Dict[str, Any]] = Field(default=None, description="L1/L2验证结果")
+    breaker_state: str = Field(default="closed", description="熔断器状态")
+    
+    # 审批相关
+    approval_status: Optional[str] = Field(default=None, description="审批状态")
+    degradation_options: List[str] = Field(default_factory=list, description="可用降级选项")
+    
+    # 进度
+    progress_percent: float = Field(default=0.0, description="完成进度")
+    current_phase: Optional[str] = Field(default=None, description="当前阶段")
+    
+    # 追踪
+    retry_count: int = Field(default=0, description="重试次数")
+    warnings: List[str] = Field(default_factory=list, description="警告列表")
+    errors: List[str] = Field(default_factory=list, description="错误列表")
+
+
+class ReconApproveRequest(BaseModel):
+    """人工审批请求"""
+    approved_degradation: str = Field(..., description="批准的降级选项: reduce_altitude/reduce_coverage/switch_device/perimeter_only")
+    comment: Optional[str] = Field(default=None, description="审批备注")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "approved_degradation": "reduce_altitude",
+                "comment": "批准降低飞行高度以减少能耗",
+            }
+        }
+
+
+class ReconCheckpointResponse(BaseModel):
+    """检查点响应"""
+    success: bool = Field(..., description="是否成功")
+    checkpoint_id: str = Field(..., description="检查点ID")
+    mission_id: str = Field(..., description="任务ID")
+    progress_percent: float = Field(..., description="保存时的进度")
+    timestamp: str = Field(..., description="保存时间")
+
+
+class ReconResumeRequest(BaseModel):
+    """恢复任务请求"""
+    force: bool = Field(default=False, description="强制恢复（忽略锁）")
