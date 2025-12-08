@@ -72,8 +72,11 @@ async def load_context_node(state: OverallPlanState) -> dict[str, Any]:
             if not scenario_data:
                 raise ContextLoadError(f"Scenario not found: {scenario_id}")
 
-            # 加载想定下的所有事件
-            events_data = await _load_events_for_scenario(session, scenario_id)
+            # 加载想定下的所有事件（区分主事件和相关事件）
+            events_result = await _load_events_for_scenario(session, scenario_id)
+            main_event = events_result["main_event"]
+            related_events = events_result["related_events"]
+            all_events = events_result["all_events"]
 
             # 加载灾情态势
             disaster_situations = await _load_disaster_situations(session, scenario_id)
@@ -91,23 +94,40 @@ async def load_context_node(state: OverallPlanState) -> dict[str, Any]:
                 response_level=scenario_data.get("response_level", "II")
             )
 
+        # 汇总主事件和所有相关事件的灾情数据（用于传递给CrewAI，防止LLM造假）
+        aggregated_disaster_data = _aggregate_disaster_data(
+            scenario_data=scenario_data,
+            main_event=main_event,
+            related_events=related_events,
+        )
+
         logger.info(
             f"Context loaded: scenario={scenario_data.get('name')}, "
-            f"events={len(events_data)}, situations={len(disaster_situations)}, "
-            f"teams={len(available_teams)}, supplies={len(available_supplies)}, "
-            f"command_groups={len(command_groups)}"
+            f"main_event={'有' if main_event else '无'}, related_events={len(related_events)}, "
+            f"situations={len(disaster_situations)}, teams={len(available_teams)}, "
+            f"supplies={len(available_supplies)}, command_groups={len(command_groups)}"
+        )
+        logger.info(
+            f"Aggregated disaster data: deaths={aggregated_disaster_data.get('deaths', 0)}, "
+            f"injuries={aggregated_disaster_data.get('injuries', 0)}, "
+            f"trapped={aggregated_disaster_data.get('trapped', 0)}, "
+            f"buildings_collapsed={aggregated_disaster_data.get('buildings_collapsed', 0)}, "
+            f"buildings_damaged={aggregated_disaster_data.get('buildings_damaged', 0)}"
         )
 
         return {
             "scenario_id": scenario_id,
             "scenario_data": scenario_data,
-            "events_data": events_data,
+            "main_event": main_event,
+            "related_events": related_events,
+            "events_data": all_events,
             "disaster_situations": disaster_situations,
             "available_teams": available_teams,
             "available_supplies": available_supplies,
             "command_groups": command_groups,
+            "aggregated_disaster_data": aggregated_disaster_data,
             # 兼容旧字段
-            "event_data": events_data[0] if events_data else None,
+            "event_data": main_event if main_event else (all_events[0] if all_events else None),
             "available_resources": available_teams,
             "status": "running",
             "current_phase": "load_context_completed",
@@ -119,6 +139,82 @@ async def load_context_node(state: OverallPlanState) -> dict[str, Any]:
     except Exception as e:
         logger.exception(f"Failed to load context for scenario {scenario_id}")
         raise ContextLoadError(f"Failed to load context: {e}") from e
+
+
+def _aggregate_disaster_data(
+    scenario_data: dict[str, Any],
+    main_event: dict[str, Any] | None,
+    related_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """汇总主事件和所有相关事件的灾情数据
+    
+    用于传递给CrewAI，确保LLM使用真实数据而非编造。
+    
+    Args:
+        scenario_data: 想定基本信息
+        main_event: 主事件数据
+        related_events: 相关事件列表
+        
+    Returns:
+        汇总后的灾情数据字典
+    """
+    # 初始化汇总数据
+    total_deaths = 0
+    total_injuries = 0
+    total_missing = 0
+    total_trapped = 0
+    total_buildings_collapsed = 0
+    total_buildings_damaged = 0
+    event_descriptions: list[str] = []
+    
+    # 合并所有事件
+    all_events = []
+    if main_event:
+        all_events.append(main_event)
+    all_events.extend(related_events)
+    
+    # 遍历汇总
+    for event in all_events:
+        total_deaths += event.get("casualties", 0)
+        total_injuries += event.get("injuries", 0)
+        total_missing += event.get("missing", 0)
+        total_trapped += event.get("trapped", 0)
+        total_buildings_collapsed += event.get("buildings_collapsed", 0)
+        total_buildings_damaged += event.get("buildings_damaged", 0)
+        
+        # 收集事件描述
+        if event.get("description"):
+            event_descriptions.append(event["description"])
+    
+    # 从scenario_data获取基本信息
+    affected_population = scenario_data.get("affected_population", 0)
+    affected_area_km2 = scenario_data.get("affected_area_km2", 0)
+    magnitude = scenario_data.get("magnitude")
+    
+    return {
+        # 基本信息
+        "disaster_name": scenario_data.get("name", "未知灾害"),
+        "disaster_type": scenario_data.get("scenario_type", "earthquake"),
+        "magnitude": magnitude,
+        "affected_population": affected_population,
+        "affected_area_km2": affected_area_km2,
+        # 汇总的伤亡数据
+        "deaths": total_deaths,
+        "injuries": total_injuries,
+        "missing": total_missing,
+        "trapped": total_trapped,
+        # 汇总的建筑损毁数据
+        "buildings_collapsed": total_buildings_collapsed,
+        "buildings_damaged": total_buildings_damaged,
+        # 事件数量统计
+        "main_event_count": 1 if main_event else 0,
+        "related_events_count": len(related_events),
+        "total_events_count": len(all_events),
+        # 事件描述汇总
+        "event_descriptions": event_descriptions[:10],  # 限制数量
+        # 数据来源标记（用于前端显示）
+        "data_source": "database",
+    }
 
 
 async def _get_scenario_from_event(session: AsyncSession, event_id: str) -> str | None:
@@ -203,8 +299,8 @@ async def _load_scenario_data(session: AsyncSession, scenario_id: str) -> dict[s
     }
 
 
-async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> list[dict[str, Any]]:
-    """从events_v2按scenario_id加载事件
+async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> dict[str, Any]:
+    """从events_v2按scenario_id加载事件，区分主事件和相关事件
     
     必须按scenario_id过滤，否则会混入其他想定的灾情数据导致救援计算错误
 
@@ -213,7 +309,12 @@ async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> 
         scenario_id: 想定ID
 
     Returns:
-        该想定下的事件列表
+        包含 main_event 和 related_events 的字典:
+        {
+            "main_event": {...},  # 主事件（is_main_event=true）
+            "related_events": [...],  # 相关事件列表
+            "all_events": [...]  # 所有事件（兼容旧代码）
+        }
         
     Raises:
         ContextLoadError: scenario_id无效时抛出
@@ -228,20 +329,24 @@ async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> 
             SELECT id, event_code, event_type, source_type, source_detail,
                    title, description, address, priority, status,
                    estimated_victims, casualty_count, reported_at,
-                   ST_X(location::geometry) as lon, ST_Y(location::geometry) as lat
+                   ST_X(location::geometry) as lon, ST_Y(location::geometry) as lat,
+                   is_main_event, parent_event_id
             FROM operational_v2.events_v2
             WHERE scenario_id = :scenario_id
-            ORDER BY reported_at, event_code
+            ORDER BY is_main_event DESC, reported_at, event_code
         """),
         {"scenario_id": scenario_uuid}
     )
     rows = result.fetchall()
 
-    events = []
+    main_event: dict[str, Any] | None = None
+    related_events: list[dict[str, Any]] = []
+    all_events: list[dict[str, Any]] = []
     missing_source_detail_count = 0
     
     for row in rows:
         source_detail = row[4] or {}
+        is_main = row[15] or False
         
         # 检查source_detail是否缺少关键灾情字段
         if not source_detail or not any(
@@ -250,7 +355,7 @@ async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> 
         ):
             missing_source_detail_count += 1
         
-        events.append({
+        event = {
             "id": str(row[0]),
             "event_code": row[1],
             "event_type": row[2],
@@ -264,22 +369,39 @@ async def _load_events_for_scenario(session: AsyncSession, scenario_id: str) -> 
             "casualties": row[11] or 0,
             "reported_at": row[12].isoformat() if row[12] else None,
             "location": {"longitude": row[13], "latitude": row[14]} if row[13] else None,
+            "is_main_event": is_main,
+            "parent_event_id": str(row[16]) if row[16] else None,
             # 从source_detail扩展字段（数据库主字段不含injuries/missing/buildings等）
             "injuries": source_detail.get("injuries", 0),
             "missing": source_detail.get("missing", 0),
             "buildings_collapsed": source_detail.get("buildings_collapsed", 0),
             "buildings_damaged": source_detail.get("buildings_damaged", 0),
-        })
+        }
+        
+        all_events.append(event)
+        
+        if is_main:
+            main_event = event
+        else:
+            related_events.append(event)
 
     # 记录数据完整性警告
     if missing_source_detail_count > 0:
         logger.warning(
-            f"[数据完整性] {missing_source_detail_count}/{len(events)}个事件缺少source_detail灾情字段"
+            f"[数据完整性] {missing_source_detail_count}/{len(all_events)}个事件缺少source_detail灾情字段"
             f"(injuries/missing/buildings_*)，可能影响救援资源计算准确性"
         )
 
-    logger.info(f"[load_context] 加载{len(events)}个事件 scenario_id={scenario_id}")
-    return events
+    logger.info(
+        f"[load_context] 加载事件 scenario_id={scenario_id}: "
+        f"主事件={'有' if main_event else '无'}, 相关事件={len(related_events)}个"
+    )
+    
+    return {
+        "main_event": main_event,
+        "related_events": related_events,
+        "all_events": all_events,
+    }
 
 
 async def _load_disaster_situations(session: AsyncSession, scenario_id: str) -> list[dict[str, Any]]:

@@ -323,11 +323,19 @@ async def _run_emergency_analysis(
         agent = get_emergency_ai_agent()
         logger.info(f"[EmergencyAI] Agent初始化完成，开始分析...")
         
+        # 将rescue_points放入structured_input以传递给agent
+        structured_input = request.structured_input or {}
+        if request.rescue_points:
+            structured_input["rescue_points"] = [
+                p.model_dump() for p in request.rescue_points
+            ]
+            logger.info(f"[EmergencyAI] 传递{len(request.rescue_points)}个救援点到分析流程")
+        
         result = await agent.analyze(
             event_id=str(request.event_id),
             scenario_id=str(request.scenario_id),
             disaster_description=request.disaster_description,
-            structured_input=request.structured_input,
+            structured_input=structured_input,
             constraints=request.constraints,
             optimization_weights=request.optimization_weights,
         )
@@ -584,6 +592,7 @@ async def get_emergency_analyze_result(task_id: str) -> EmergencyAnalyzeResult:
         strategic=result.get("strategic"),
         matching=result.get("matching"),
         optimization=result.get("optimization"),
+        multi_point_allocation=result.get("multi_point_allocation"),
         recommended_scheme=result.get("recommended_scheme"),
         scheme_explanation=result.get("scheme_explanation"),
         trace=result.get("trace"),
@@ -827,8 +836,34 @@ async def confirm_emergency_scheme(
                     "message": f"有 {len(unavailable_teams)} 支队伍不可用",
                 }
             
-            # ========== 5. 创建任务记录 ==========
-            new_task_id = uuid_lib.uuid4()
+            # ========== 5. 创建方案记录(schemes_v2) ==========
+            scheme_id = uuid_lib.uuid4()
+            scheme_code = f"SCH-{datetime.now().strftime('%Y%m%d')}-{uuid_lib.uuid4().hex[:4].upper()}"
+            
+            insert_scheme = text("""
+                INSERT INTO operational_v2.schemes_v2 (
+                    id, scenario_id, event_id, scheme_code, scheme_type,
+                    title, status, source, ai_reasoning,
+                    created_at, updated_at
+                ) VALUES (
+                    :id, :scenario_id, :event_id, :scheme_code, 'rescue',
+                    :title, 'approved', 'ai_generated', :ai_reasoning,
+                    now(), now()
+                )
+            """)
+            await db.execute(insert_scheme, {
+                "id": str(scheme_id),
+                "scenario_id": str(scenario_id),
+                "event_id": str(event_id),
+                "scheme_code": scheme_code,
+                "title": f"{event_title} - 救援方案",
+                "ai_reasoning": scheme_explanation[:2000],
+            })
+            logger.info(f"[EmergencyConfirm] 创建方案 scheme_id={scheme_id}, scheme_code={scheme_code}")
+            
+            # ========== 5.5 检查多点位分配结果 ==========
+            multi_point = ai_result.get("multi_point_allocation", {})
+            rescue_points_alloc = multi_point.get("rescue_points", []) if multi_point.get("enabled") else []
             
             # 获取下一个任务编号
             code_query = text("""
@@ -838,98 +873,209 @@ async def confirm_emergency_scheme(
             """)
             code_result = await db.execute(code_query, {"scenario_id": str(scenario_id)})
             next_code = code_result.scalar() or 1
-            task_code = f"TSK-{next_code:04d}"
             
-            # 任务标题：事件标题 + 救援任务
-            task_title = f"{event_title} - 救援任务"
+            created_tasks: List[Dict[str, Any]] = []
+            task_team_map: Dict[str, List[Dict[str, Any]]] = {}  # task_id -> teams
             
-            # 任务描述：合并事件描述和AI方案说明
-            task_description = f"{event_description}\n\n【AI方案说明】\n{scheme_explanation[:500]}"
-            
-            insert_task = text("""
-                INSERT INTO operational_v2.tasks_v2 (
-                    id, scenario_id, event_id, task_code, task_type,
-                    title, description, status, priority,
-                    target_location, instructions, created_at, updated_at
-                ) VALUES (
-                    :id, :scenario_id, :event_id, :task_code, 'rescue',
-                    :title, :description, 'assigned', :priority,
-                    ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
-                    :instructions, now(), now()
-                )
-            """)
-            await db.execute(insert_task, {
-                "id": str(new_task_id),
-                "scenario_id": str(scenario_id),
-                "event_id": str(event_id),
-                "task_code": task_code,
-                "title": task_title,
-                "description": task_description,
-                "priority": event_priority,
-                "lng": event_lng,
-                "lat": event_lat,
-                "instructions": scheme_explanation[:1000],
-            })
-            
-            logger.info(f"[EmergencyConfirm] 创建任务 task_id={new_task_id}, task_code={task_code}")
-            
-            # ========== 6. 创建分配记录 ==========
-            for team in available_teams:
-                assignment_id = uuid_lib.uuid4()
-                insert_assignment = text("""
-                    INSERT INTO operational_v2.task_assignments_v2 (
-                        id, task_id, assignee_type, assignee_id, assignee_name,
-                        assignment_source, assignment_reason, status,
-                        assigned_at, created_at, updated_at
+            if rescue_points_alloc:
+                # ========== 多救援点模式：为每个救援点创建任务 ==========
+                logger.info(f"[EmergencyConfirm] 多救援点模式: {len(rescue_points_alloc)} 个救援点")
+                
+                for idx, point_alloc in enumerate(rescue_points_alloc):
+                    point_id = point_alloc.get("rescue_point_id")
+                    point_name = point_alloc.get("rescue_point_name", f"救援点{idx+1}")
+                    point_location = point_alloc.get("location", {})
+                    point_lat = point_location.get("latitude", event_lat)
+                    point_lng = point_location.get("longitude", event_lng)
+                    victims = point_alloc.get("estimated_victims", 0)
+                    priority = point_alloc.get("priority", event_priority)
+                    assigned_teams = point_alloc.get("assigned_teams", [])
+                    
+                    # 过滤出用户选中的队伍
+                    selected_teams = [
+                        t for t in assigned_teams 
+                        if t.get("team_id") in validated_team_ids
+                    ]
+                    
+                    if not selected_teams:
+                        logger.info(f"[EmergencyConfirm] 救援点'{point_name}'无选中队伍，跳过")
+                        continue
+                    
+                    new_task_id = uuid_lib.uuid4()
+                    task_code = f"TSK-{next_code:04d}"
+                    next_code += 1
+                    
+                    task_title = f"{point_name}救援任务（{victims}人被困）" if victims > 0 else f"{point_name}救援任务"
+                    task_description = f"{event_description}\n\n【救援点】{point_name}\n预估被困: {victims}人\n\n【AI方案说明】\n{scheme_explanation[:300]}"
+                    
+                    insert_task = text("""
+                        INSERT INTO operational_v2.tasks_v2 (
+                            id, scenario_id, event_id, scheme_id, rescue_point_id, task_code, task_type,
+                            title, description, status, priority,
+                            target_location, instructions, created_at, updated_at
+                        ) VALUES (
+                            :id, :scenario_id, :event_id, :scheme_id, :rescue_point_id, :task_code, 'rescue',
+                            :title, :description, 'assigned', :priority,
+                            ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
+                            :instructions, now(), now()
+                        )
+                    """)
+                    await db.execute(insert_task, {
+                        "id": str(new_task_id),
+                        "scenario_id": str(scenario_id),
+                        "event_id": str(event_id),
+                        "scheme_id": str(scheme_id),
+                        "rescue_point_id": point_id,
+                        "task_code": task_code,
+                        "title": task_title,
+                        "description": task_description,
+                        "priority": priority,
+                        "lng": point_lng,
+                        "lat": point_lat,
+                        "instructions": f"前往{point_name}执行救援",
+                    })
+                    
+                    created_tasks.append({
+                        "task_id": str(new_task_id),
+                        "task_code": task_code,
+                        "rescue_point_id": point_id,
+                        "rescue_point_name": point_name,
+                        "location": {"lat": point_lat, "lng": point_lng},
+                    })
+                    task_team_map[str(new_task_id)] = selected_teams
+                    
+                    logger.info(f"[EmergencyConfirm] 创建任务 task_code={task_code} for '{point_name}', 队伍数={len(selected_teams)}")
+            else:
+                # ========== 单任务模式（向后兼容） ==========
+                new_task_id = uuid_lib.uuid4()
+                task_code = f"TSK-{next_code:04d}"
+                task_title = f"{event_title} - 救援任务"
+                task_description = f"{event_description}\n\n【AI方案说明】\n{scheme_explanation[:500]}"
+                
+                insert_task = text("""
+                    INSERT INTO operational_v2.tasks_v2 (
+                        id, scenario_id, event_id, scheme_id, task_code, task_type,
+                        title, description, status, priority,
+                        target_location, instructions, created_at, updated_at
                     ) VALUES (
-                        :id, :task_id, 'team', :assignee_id, :assignee_name,
-                        'ai_recommended', :reason, 'pending',
-                        now(), now(), now()
+                        :id, :scenario_id, :event_id, :scheme_id, :task_code, 'rescue',
+                        :title, :description, 'assigned', :priority,
+                        ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
+                        :instructions, now(), now()
                     )
                 """)
-                await db.execute(insert_assignment, {
-                    "id": str(assignment_id),
-                    "task_id": str(new_task_id),
-                    "assignee_id": team["id"],
-                    "assignee_name": team["name"],
-                    "reason": "AI智能推荐",
+                await db.execute(insert_task, {
+                    "id": str(new_task_id),
+                    "scenario_id": str(scenario_id),
+                    "event_id": str(event_id),
+                    "scheme_id": str(scheme_id),
+                    "task_code": task_code,
+                    "title": task_title,
+                    "description": task_description,
+                    "priority": event_priority,
+                    "lng": event_lng,
+                    "lat": event_lat,
+                    "instructions": scheme_explanation[:1000],
                 })
+                
+                created_tasks.append({
+                    "task_id": str(new_task_id),
+                    "task_code": task_code,
+                    "location": {"lat": event_lat, "lng": event_lng},
+                })
+                task_team_map[str(new_task_id)] = [{"team_id": t["id"], "team_name": t["name"], "task_description": "AI智能推荐"} for t in available_teams]
+                
+                logger.info(f"[EmergencyConfirm] 创建任务 task_id={new_task_id}, task_code={task_code}")
             
-            logger.info(f"[EmergencyConfirm] 创建分配记录 数量={len(available_teams)}")
+            # ========== 6. 创建分配记录（使用AI生成的task_description） ==========
+            total_assignments = 0
+            all_deployed_teams: List[Dict[str, Any]] = []
+            
+            for task_id_str, teams in task_team_map.items():
+                for team in teams:
+                    assignment_id = uuid_lib.uuid4()
+                    team_id = team.get("team_id") or team.get("id")
+                    team_name = team.get("team_name") or team.get("name")
+                    task_desc = team.get("task_description", "AI智能推荐")
+                    
+                    insert_assignment = text("""
+                        INSERT INTO operational_v2.task_assignments_v2 (
+                            id, task_id, assignee_type, assignee_id, assignee_name,
+                            assignment_source, assignment_reason, status,
+                            assigned_at, created_at, updated_at
+                        ) VALUES (
+                            :id, :task_id, 'team', :assignee_id, :assignee_name,
+                            'ai_recommended', :reason, 'pending',
+                            now(), now(), now()
+                        )
+                    """)
+                    await db.execute(insert_assignment, {
+                        "id": str(assignment_id),
+                        "task_id": task_id_str,
+                        "assignee_id": team_id,
+                        "assignee_name": team_name,
+                        "reason": task_desc,
+                    })
+                    total_assignments += 1
+                    
+                    if team_id not in [t["id"] for t in all_deployed_teams]:
+                        all_deployed_teams.append({"id": team_id, "name": team_name})
+            
+            logger.info(f"[EmergencyConfirm] 创建分配记录 数量={total_assignments}")
             
             # ========== 7. 更新队伍状态 ==========
-            team_id_list = [t["id"] for t in available_teams]
-            placeholders = ','.join(f"'{tid}'" for tid in team_id_list)
-            update_teams = text(f"""
-                UPDATE operational_v2.rescue_teams_v2
-                SET status = 'deployed',
-                    current_task_id = :task_id,
-                    updated_at = now()
-                WHERE id IN ({placeholders})
-                  AND status = 'standby'
-                RETURNING id, name
-            """)
-            update_result = await db.execute(update_teams, {"task_id": str(new_task_id)})
-            deployed_rows = update_result.fetchall()
-            deployed_info = [{"id": str(r.id), "name": r.name} for r in deployed_rows]
+            # 在多任务模式下，每个队伍关联到其第一个任务
+            first_task_id = created_tasks[0]["task_id"] if created_tasks else str(new_task_id)
+            team_id_list = [t["id"] for t in all_deployed_teams] if all_deployed_teams else [t["id"] for t in available_teams]
+            
+            if team_id_list:
+                placeholders = ','.join(f"'{tid}'" for tid in team_id_list)
+                update_teams = text(f"""
+                    UPDATE operational_v2.rescue_teams_v2
+                    SET status = 'deployed',
+                        current_task_id = :task_id,
+                        updated_at = now()
+                    WHERE id IN ({placeholders})
+                      AND status = 'standby'
+                    RETURNING id, name
+                """)
+                update_result = await db.execute(update_teams, {"task_id": first_task_id})
+                deployed_rows = update_result.fetchall()
+                deployed_info = [{"id": str(r.id), "name": r.name} for r in deployed_rows]
+            else:
+                deployed_info = []
             
             logger.info(f"[EmergencyConfirm] 更新队伍状态 deployed={len(deployed_info)}")
             
             # 刷新事务，确保任务记录对后续外键检查可见
             await db.flush()
             
-            # ========== 7.5 为每个队伍生成路径规划 ==========
-            logger.info(f"[EmergencyConfirm] 开始路径规划 deployed_info={deployed_info}, event_lng={event_lng}, event_lat={event_lat}")
+            # ========== 7.5 为每个队伍生成路径规划（到对应救援点） ==========
+            # 构建队伍到目的地的映射
+            team_destination_map: Dict[str, Dict[str, float]] = {}
+            for task in created_tasks:
+                task_id_str = task["task_id"]
+                task_location = task.get("location", {})
+                dest_lat = task_location.get("lat", event_lat)
+                dest_lng = task_location.get("lng", event_lng)
+                
+                for team in task_team_map.get(task_id_str, []):
+                    team_id = team.get("team_id") or team.get("id")
+                    if team_id and team_id not in team_destination_map:
+                        team_destination_map[team_id] = {"lat": dest_lat, "lng": dest_lng, "task_id": task_id_str}
+            
+            logger.info(f"[EmergencyConfirm] 开始路径规划 deployed_info={deployed_info}")
             route_results: List[Dict[str, Any]] = []
             for team in deployed_info:
+                dest = team_destination_map.get(team["id"], {"lat": event_lat, "lng": event_lng, "task_id": first_task_id})
                 try:
                     route_result = await _generate_team_route(
                         db=db,
                         team_id=UUID(team["id"]),
-                        task_id=new_task_id,
+                        task_id=UUID(dest["task_id"]),
                         scenario_id=scenario_id,
-                        destination_lng=event_lng,
-                        destination_lat=event_lat,
+                        destination_lng=dest["lng"],
+                        destination_lat=dest["lat"],
                     )
                     if route_result:
                         route_results.append({
@@ -956,10 +1102,11 @@ async def confirm_emergency_scheme(
             dispatch_service = TeamDispatchService(db)
             movement_sessions = []
             for route in route_results:
+                dest = team_destination_map.get(route["team_id"], {"lat": event_lat, "lng": event_lng})
                 try:
                     # 使用已规划的路径启动移动
                     dispatch_request = TeamDispatchRequest(
-                        destination=[event_lng, event_lat],
+                        destination=[dest["lng"], dest["lat"]],
                         scenario_id=scenario_id,
                         speed_mps=15.0,  # 救援车辆默认速度 54km/h
                     )
@@ -1001,8 +1148,8 @@ async def confirm_emergency_scheme(
             await db.commit()
             
             logger.info(
-                f"[EmergencyConfirm] 确认成功 task_id={new_task_id}, "
-                f"task_code={task_code}, deployed={len(deployed_info)}"
+                f"[EmergencyConfirm] 确认成功 tasks={len(created_tasks)}, "
+                f"deployed={len(deployed_info)}"
             )
             
             # ========== 9. WebSocket推送 ==========
@@ -1012,8 +1159,9 @@ async def confirm_emergency_scheme(
                     event_type="rescue_task_created",
                     event_data={
                         "event_id": str(event_id),
-                        "task_id": str(new_task_id),
-                        "task_code": task_code,
+                        "scheme_id": str(scheme_id),
+                        "scheme_code": scheme_code,
+                        "tasks": created_tasks,
                         "deployed_teams": deployed_info,
                     },
                 )
@@ -1021,14 +1169,19 @@ async def confirm_emergency_scheme(
             except Exception as ws_err:
                 logger.warning(f"[EmergencyConfirm] WebSocket推送失败: {ws_err}")
             
+            # 构建返回结果
+            primary_task = created_tasks[0] if created_tasks else {}
             return {
                 "success": True,
-                "task_id": str(new_task_id),
-                "task_code": task_code,
+                "scheme_id": str(scheme_id),
+                "scheme_code": scheme_code,
+                "task_id": primary_task.get("task_id"),  # 向后兼容：返回第一个任务ID
+                "task_code": primary_task.get("task_code"),  # 向后兼容：返回第一个任务编号
+                "tasks": created_tasks,  # 新增：所有创建的任务
                 "deployed_teams": deployed_info,
                 "route_results": route_results,
                 "audit_overrides": audit_override_ids,
-                "message": f"成功创建任务 {task_code}，部署 {len(deployed_info)} 支队伍，生成 {len(route_results)} 条路径",
+                "message": f"成功创建方案 {scheme_code}，{len(created_tasks)} 个任务，部署 {len(deployed_info)} 支队伍",
             }
             
         except Exception as e:

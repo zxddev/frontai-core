@@ -17,6 +17,7 @@
 - 队伍知道具体救援位置和职责
 
 **Non-Goals:**
+- 不实现多事件并行处理（由 `add-frontline-rescue-dispatch` 变更专门处理，当前专注单事件多救援点）
 - 不修改HTN任务分解逻辑（复用现有）
 - 不新建独立agent（扩展现有emergency_ai）
 - 不修改前端UI（仅后端API变更）

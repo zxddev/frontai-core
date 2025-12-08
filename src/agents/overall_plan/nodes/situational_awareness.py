@@ -57,17 +57,22 @@ async def situational_awareness_node(
         scenario_data = state.get("scenario_data", {})
         available_teams = state.get("available_teams", [])
         available_supplies = state.get("available_supplies", [])
+        aggregated_disaster_data = state.get("aggregated_disaster_data")
         
         inputs = prepare_crew_inputs(
             event_data=event_data,
             scenario_data=scenario_data,
             available_teams=available_teams,
             available_supplies=available_supplies,
+            aggregated_disaster_data=aggregated_disaster_data,
         )
 
         logger.info(
             f"Prepared inputs: trapped={inputs['trapped_count']}, "
-            f"teams={len(available_teams)}, supplies={len(available_supplies)}"
+            f"buildings_collapsed={inputs['buildings_collapsed']}, "
+            f"buildings_damaged={inputs['buildings_damaged']}, "
+            f"teams={len(available_teams)}, supplies={len(available_supplies)}, "
+            f"data_source={inputs.get('data_source', 'unknown')}"
         )
 
         # 在线程池中运行CrewAI（避免事件循环冲突）

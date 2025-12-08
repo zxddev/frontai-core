@@ -16,6 +16,19 @@
 - **THEN** 系统自动从数据库读取救援点列表
 - **AND** 为读取到的救援点生成分配方案
 
+#### Scenario: 救援点数量超过上限
+- **GIVEN** 用户提交包含60个救援点的分析请求
+- **WHEN** 系统校验输入
+- **THEN** 系统返回 HTTP 400 错误
+- **AND** 错误信息为"救援点数量超过上限50个"
+
+#### Scenario: 无任何救援点（向后兼容）
+- **GIVEN** 用户提交的分析请求未包含 `rescue_points` 字段
+- **AND** 数据库 `rescue_points_v2` 表中无该事件的救援点记录
+- **WHEN** 系统执行应急分析
+- **THEN** 系统使用事件位置作为单一救援点
+- **AND** 行为与旧版本完全一致
+
 ### Requirement: Address Geocoding Support
 系统 SHALL 支持通过地名输入救援点位置，并自动转换为经纬度坐标。
 
@@ -38,6 +51,14 @@
 - **WHEN** 系统解析救援点位置
 - **THEN** 系统直接使用 `location` 坐标
 - **AND** 不调用地理编码API
+
+#### Scenario: 地理编码API超时
+- **GIVEN** 用户提交的救援点包含地名 `address: "某地址"`
+- **AND** 高德地理编码API响应超过10秒
+- **WHEN** 系统等待API响应
+- **THEN** 系统抛出 `GeocodingError` 异常
+- **AND** 错误信息为"地理编码服务超时：某地址"
+- **AND** 不使用任何降级策略
 
 ### Requirement: Multi-Point Resource Matching
 系统 SHALL 为每个救援点独立计算候选队伍列表，并执行全局最优分配。

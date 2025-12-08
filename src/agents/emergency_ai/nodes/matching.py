@@ -47,12 +47,22 @@ from src.domains.disaster import (
     DisasterType as DisasterTypeEnum,
 )
 from src.domains.disaster.casualty_estimator import CasualtyEstimate
-from ..state import EmergencyAIState, ResourceCandidate, AllocationSolution
+from ..state import (
+    EmergencyAIState,
+    ResourceCandidate,
+    AllocationSolution,
+    ResolvedRescuePoint,
+    PointAllocation,
+    TeamAllocation,
+    MultiPointAllocationPlan,
+)
 from ..tools.routing_tools import (
     batch_calculate_team_etas,
     get_disaster_avoid_areas,
     get_danger_area_avoid_areas,
 )
+from src.infra.clients.amap import amap_geocode_async
+from src.agents.schemas import RescuePointInput
 from src.planning.algorithms.optimization.pymoo_optimizer import PymooOptimizer
 from src.planning.algorithms.base import AlgorithmStatus
 
@@ -505,8 +515,37 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
     required_caps = rule_caps | task_caps
     
     if not required_caps:
-        logger.warning("[资源匹配] 无能力需求，跳过资源匹配")
-        return {"resource_candidates": [], "trace": trace}
+        logger.warning("[资源匹配] 无能力需求，仅执行多点位分配")
+        # 即使没有能力需求，也执行多点位分配
+        rescue_points_input = state.get("structured_input", {}).get("rescue_points", [])
+        resolved_rescue_points: List[ResolvedRescuePoint] = []
+        point_candidates: Dict[str, List[ResourceCandidate]] = {}
+        point_allocations = None
+        
+        if rescue_points_input:
+            try:
+                logger.info(f"[资源匹配] 检测到{len(rescue_points_input)}个救援点输入，启动多点位分配")
+                input_points = [
+                    RescuePointInput(**p) if isinstance(p, dict) else p 
+                    for p in rescue_points_input
+                ]
+                multi_result = await match_resources_multi_point(state, input_points)
+                resolved_rescue_points = multi_result.get("resolved_rescue_points", [])
+                point_candidates = multi_result.get("point_candidates", {})
+                state["resolved_rescue_points"] = resolved_rescue_points
+                state["point_candidates"] = point_candidates
+                point_allocations = optimize_multi_point_allocation(state)
+                logger.info(f"[资源匹配] 多点位分配完成: {point_allocations['total_rescue_points']}个救援点")
+            except Exception as e:
+                logger.error(f"[资源匹配] 多点位分配失败: {e}")
+        
+        return {
+            "resource_candidates": [],
+            "resolved_rescue_points": resolved_rescue_points,
+            "point_candidates": point_candidates,
+            "point_allocations": point_allocations,
+            "trace": trace,
+        }
 
     logger.info(f"[资源匹配] 需要的能力({len(required_caps)}种): 规则{len(rule_caps)}种 + 任务{len(task_caps)}种 = {required_caps}")
 
@@ -887,13 +926,53 @@ async def match_resources(state: EmergencyAIState) -> Dict[str, Any]:
         f"调度{len(equipment_allocations)}件装备，计算{len(supply_requirements)}种物资需求，"
         f"缺口{len(supply_shortages)}种，耗时{elapsed_ms}ms"
     )
+    
+    # ========== 多点位分配（如果有rescue_points输入） ==========
+    # rescue_points从structured_input传入
+    rescue_points_input = state.get("structured_input", {}).get("rescue_points", [])
+    resolved_rescue_points: List[ResolvedRescuePoint] = []
+    point_candidates: Dict[str, List[ResourceCandidate]] = {}
+    point_allocations = None
+    
+    if rescue_points_input:
+        try:
+            logger.info(f"[资源匹配] 检测到{len(rescue_points_input)}个救援点输入，启动多点位分配")
+            # 将dict转换为RescuePointInput
+            input_points = [
+                RescuePointInput(**p) if isinstance(p, dict) else p 
+                for p in rescue_points_input
+            ]
+            
+            # 多点匹配
+            multi_result = await match_resources_multi_point(state, input_points)
+            resolved_rescue_points = multi_result.get("resolved_rescue_points", [])
+            point_candidates = multi_result.get("point_candidates", {})
+            
+            # 更新state用于优化
+            state["resolved_rescue_points"] = resolved_rescue_points
+            state["point_candidates"] = point_candidates
+            
+            # 多点优化分配
+            point_allocations = optimize_multi_point_allocation(state)
+            
+            logger.info(
+                f"[资源匹配] 多点位分配完成: {point_allocations['total_rescue_points']}个救援点，"
+                f"{point_allocations['assigned_points']}个已分配"
+            )
+        except Exception as e:
+            logger.error(f"[资源匹配] 多点位分配失败: {e}")
+            errors.append(f"多点位分配失败: {e}")
 
     return {
         "resource_candidates": candidates,
         "equipment_allocations": equipment_allocations,
         "supply_requirements": supply_requirements,
         "supply_shortages": supply_shortages,
-        "capability_gap_report": capability_gap_report,  # 能力缺口报告（供指挥员协调外部资源）
+        "capability_gap_report": capability_gap_report,
+        # 多点位分配结果
+        "resolved_rescue_points": resolved_rescue_points,
+        "point_candidates": point_candidates,
+        "point_allocations": point_allocations,
         "trace": trace,
         "errors": errors,
         "current_phase": "matching",
@@ -2388,3 +2467,424 @@ def _build_gra_inputs(
             })
 
     return {"resources": resources, "conflicts": conflicts}
+
+
+# ============================================================================
+# 地理编码与多救援点处理
+# ============================================================================
+
+class GeocodingError(Exception):
+    """地理编码异常"""
+    def __init__(self, address: str, reason: str = "地理编码失败"):
+        self.address = address
+        self.reason = reason
+        super().__init__(f"{reason}: {address}")
+
+
+async def resolve_rescue_point_location(
+    point: RescuePointInput,
+    timeout_seconds: float = 10.0,
+) -> Tuple[float, float]:
+    """
+    解析救援点位置（坐标优先，否则调用高德地理编码）
+    
+    Args:
+        point: 救援点输入
+        timeout_seconds: 地理编码超时时间
+        
+    Returns:
+        (latitude, longitude) 元组
+        
+    Raises:
+        GeocodingError: 无坐标且地理编码失败时抛出
+    """
+    # 坐标优先
+    if point.location:
+        logger.info(f"救援点'{point.name}'使用输入坐标: ({point.location.latitude}, {point.location.longitude})")
+        return (point.location.latitude, point.location.longitude)
+    
+    # 使用地名进行地理编码
+    address = point.address or point.name
+    logger.info(f"救援点'{point.name}'开始地理编码: {address}")
+    
+    try:
+        result = await amap_geocode_async(address)
+        if result:
+            lat, lng = result["latitude"], result["longitude"]
+            logger.info(f"救援点'{point.name}'地理编码成功: ({lat}, {lng})")
+            return (lat, lng)
+        else:
+            raise GeocodingError(address, f"高德API返回空结果")
+    except GeocodingError:
+        raise
+    except Exception as e:
+        if "timeout" in str(e).lower():
+            raise GeocodingError(address, "地理编码服务超时")
+        raise GeocodingError(address, f"地理编码异常: {str(e)}")
+
+
+async def resolve_all_rescue_points(
+    points: List[RescuePointInput],
+) -> List[ResolvedRescuePoint]:
+    """
+    批量解析所有救援点位置
+    
+    Args:
+        points: 救援点输入列表
+        
+    Returns:
+        解析后的救援点列表（含坐标）
+        
+    Raises:
+        GeocodingError: 任一救援点地理编码失败时抛出
+    """
+    resolved: List[ResolvedRescuePoint] = []
+    
+    for point in points:
+        lat, lng = await resolve_rescue_point_location(point)
+        resolved.append(ResolvedRescuePoint(
+            point_id=str(uuid.uuid4()),
+            name=point.name,
+            latitude=lat,
+            longitude=lng,
+            estimated_victims=point.estimated_victims,
+            priority=point.priority,
+            source="input",
+        ))
+    
+    logger.info(f"成功解析{len(resolved)}个救援点位置")
+    return resolved
+
+
+async def get_rescue_points_from_db(
+    event_id: str,
+    session: AsyncSession,
+) -> List[ResolvedRescuePoint]:
+    """
+    从数据库加载事件关联的救援点
+    
+    Args:
+        event_id: 事件ID
+        session: 数据库会话
+        
+    Returns:
+        救援点列表（可能为空）
+    """
+    sql = text("""
+        SELECT id, name, latitude, longitude, estimated_victims, priority
+        FROM operational_v2.rescue_points_v2
+        WHERE event_id = :event_id
+        ORDER BY priority DESC, created_at
+    """)
+    
+    result = await session.execute(sql, {"event_id": event_id})
+    rows = result.fetchall()
+    
+    points: List[ResolvedRescuePoint] = []
+    for row in rows:
+        points.append(ResolvedRescuePoint(
+            point_id=str(row.id),
+            name=row.name,
+            latitude=float(row.latitude),
+            longitude=float(row.longitude),
+            estimated_victims=row.estimated_victims or 0,
+            priority=row.priority or "medium",
+            source="database",
+        ))
+    
+    logger.info(f"从数据库加载{len(points)}个救援点 (event_id={event_id})")
+    return points
+
+
+def get_rescue_point_from_event_location(
+    state: EmergencyAIState,
+) -> ResolvedRescuePoint:
+    """
+    从事件位置创建单一救援点（向后兼容）
+    
+    Args:
+        state: AI状态
+        
+    Returns:
+        基于事件位置的救援点
+    """
+    location = state["structured_input"].get("location", {})
+    lat = location.get("latitude", 0.0)
+    lng = location.get("longitude", 0.0)
+    
+    # 从灾情理解中获取被困人数
+    estimated_victims = 0
+    if state.get("parsed_disaster"):
+        estimated_victims = state["parsed_disaster"].get("estimated_casualties", 0)
+    
+    return ResolvedRescuePoint(
+        point_id=str(uuid.uuid4()),
+        name="主救援点",
+        latitude=lat,
+        longitude=lng,
+        estimated_victims=estimated_victims,
+        priority="high",
+        source="event_location",
+    )
+
+
+async def load_rescue_points(
+    state: EmergencyAIState,
+    input_points: Optional[List[RescuePointInput]] = None,
+) -> List[ResolvedRescuePoint]:
+    """
+    加载救援点（优先级：输入 > 数据库 > 事件位置）
+    
+    Args:
+        state: AI状态
+        input_points: 输入的救援点列表
+        
+    Returns:
+        解析后的救援点列表
+    """
+    # 1. 优先使用输入的救援点
+    if input_points and len(input_points) > 0:
+        if len(input_points) > 50:
+            raise ValueError(f"救援点数量超过上限: {len(input_points)} > 50")
+        return await resolve_all_rescue_points(input_points)
+    
+    # 2. 从数据库查询
+    async with AsyncSessionLocal() as session:
+        db_points = await get_rescue_points_from_db(state["event_id"], session)
+        if db_points:
+            return db_points
+    
+    # 3. 使用事件位置作为单一救援点
+    logger.info("无救援点输入，使用事件位置作为救援点")
+    return [get_rescue_point_from_event_location(state)]
+
+
+async def query_candidates_for_point(
+    rescue_point: ResolvedRescuePoint,
+    state: EmergencyAIState,
+    max_distance_km: float = 100.0,
+    max_candidates: int = 20,
+) -> List[ResourceCandidate]:
+    """
+    为单个救援点查询候选队伍
+    
+    Args:
+        rescue_point: 救援点
+        state: AI状态
+        max_distance_km: 最大搜索距离
+        max_candidates: 最多返回候选数
+        
+    Returns:
+        候选队伍列表（按匹配分数排序）
+    """
+    async with AsyncSessionLocal() as session:
+        # 查询队伍并计算距离（基于base_location）
+        sql = text("""
+            SELECT 
+                t.id, 
+                t.name as team_name, 
+                t.team_type,
+                ARRAY_AGG(DISTINCT tc.capability_code) FILTER (WHERE tc.capability_code IS NOT NULL) as capabilities,
+                COALESCE(SUM(tc.max_capacity), 10) AS rescue_capacity,
+                ST_Distance(
+                    t.base_location,
+                    ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography
+                ) / 1000.0 as distance_km
+            FROM operational_v2.rescue_teams_v2 t
+            LEFT JOIN operational_v2.team_capabilities_v2 tc ON tc.team_id = t.id
+            WHERE t.status IN ('standby', 'available')
+              AND t.base_location IS NOT NULL
+              AND ST_DWithin(
+                  t.base_location,
+                  ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)::geography,
+                  :max_dist_m
+              )
+            GROUP BY t.id, t.name, t.team_type
+            ORDER BY distance_km
+            LIMIT :limit
+        """)
+        
+        result = await session.execute(sql, {
+            "lat": rescue_point["latitude"],
+            "lng": rescue_point["longitude"],
+            "max_dist_m": max_distance_km * 1000,
+            "limit": max_candidates,
+        })
+        rows = result.fetchall()
+        
+        candidates: List[ResourceCandidate] = []
+        for row in rows:
+            # 计算ETA（假设平均速度40km/h）
+            eta_min = row.distance_km / 40.0 * 60
+            
+            # 计算能力匹配分数
+            required_caps = [req.get("capability_name", "") for req in state.get("capability_requirements", [])]
+            team_caps = list(row.capabilities) if row.capabilities else []
+            if required_caps:
+                match_count = sum(1 for cap in required_caps if cap in team_caps)
+                cap_score = match_count / len(required_caps)
+            else:
+                cap_score = 1.0
+            
+            # 综合匹配分数 = 能力匹配 * 距离因子
+            distance_factor = max(0, 1 - row.distance_km / max_distance_km)
+            match_score = cap_score * 0.6 + distance_factor * 0.4
+            
+            candidates.append(ResourceCandidate(
+                resource_id=str(row.id),
+                resource_name=row.team_name,
+                resource_type=row.team_type or "rescue",
+                capabilities=team_caps,
+                distance_km=round(row.distance_km, 2),
+                availability_score=1.0,
+                match_score=round(match_score, 3),
+                rescue_capacity=row.rescue_capacity or 10,
+            ))
+        
+        logger.info(f"救援点'{rescue_point['name']}'找到{len(candidates)}个候选队伍")
+        return candidates
+
+
+async def match_resources_multi_point(
+    state: EmergencyAIState,
+    input_points: Optional[List[RescuePointInput]] = None,
+) -> Dict[str, Any]:
+    """
+    多救援点资源匹配
+    
+    为每个救援点查询候选队伍，更新状态中的point_candidates。
+    
+    Args:
+        state: AI状态
+        input_points: 输入的救援点（可选）
+        
+    Returns:
+        更新字典，包含 resolved_rescue_points 和 point_candidates
+    """
+    start_time = time.time()
+    
+    # 加载救援点
+    rescue_points = await load_rescue_points(state, input_points)
+    logger.info(f"开始多点资源匹配，共{len(rescue_points)}个救援点")
+    
+    # 为每个救援点查询候选
+    point_candidates: Dict[str, List[ResourceCandidate]] = {}
+    for point in rescue_points:
+        candidates = await query_candidates_for_point(point, state)
+        point_candidates[point["point_id"]] = candidates
+    
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    logger.info(f"多点资源匹配完成，耗时{elapsed_ms}ms")
+    
+    return {
+        "resolved_rescue_points": rescue_points,
+        "point_candidates": point_candidates,
+    }
+
+
+def optimize_multi_point_allocation(
+    state: EmergencyAIState,
+    solver_timeout_sec: float = 30.0,
+) -> MultiPointAllocationPlan:
+    """
+    多点位全局优化分配
+    
+    使用贪心算法为每个救援点分配队伍，约束：每个队伍最多分配到一个救援点。
+    
+    Args:
+        state: AI状态（需包含 resolved_rescue_points 和 point_candidates）
+        solver_timeout_sec: 求解超时时间
+        
+    Returns:
+        多点位分配方案
+    """
+    rescue_points = state.get("resolved_rescue_points", [])
+    point_candidates = state.get("point_candidates", {})
+    
+    if not rescue_points:
+        return MultiPointAllocationPlan(
+            event_id=state["event_id"],
+            total_rescue_points=0,
+            assigned_points=0,
+            rescue_points=[],
+            unassigned_points=[],
+            resource_warnings=["无救援点需要分配"],
+        )
+    
+    # 按优先级排序救援点
+    priority_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    sorted_points = sorted(
+        rescue_points,
+        key=lambda p: (priority_order.get(p["priority"], 2), -p["estimated_victims"])
+    )
+    
+    assigned_teams: set = set()  # 已分配的队伍ID
+    point_allocations: List[PointAllocation] = []
+    unassigned_points: List[str] = []
+    warnings: List[str] = []
+    
+    for point in sorted_points:
+        point_id = point["point_id"]
+        candidates = point_candidates.get(point_id, [])
+        
+        # 过滤已分配的队伍
+        available = [c for c in candidates if c["resource_id"] not in assigned_teams]
+        
+        if not available:
+            unassigned_points.append(point_id)
+            warnings.append(f"救援点'{point['name']}'无可用队伍")
+            continue
+        
+        # 选择最佳候选（按match_score排序）
+        available.sort(key=lambda c: c["match_score"], reverse=True)
+        
+        # 根据被困人数和队伍容量分配多个队伍
+        victims = point["estimated_victims"] or 10
+        needed_capacity = victims
+        assigned_to_point: List[TeamAllocation] = []
+        
+        for candidate in available:
+            if needed_capacity <= 0:
+                break
+            
+            team_alloc = TeamAllocation(
+                team_id=candidate["resource_id"],
+                team_name=candidate["resource_name"],
+                capabilities=candidate["capabilities"],
+                distance_km=candidate["distance_km"],
+                eta_minutes=round(candidate["distance_km"] / 40.0 * 60, 1),
+                task_description=f"前往{point['name']}执行救援任务",
+            )
+            assigned_to_point.append(team_alloc)
+            assigned_teams.add(candidate["resource_id"])
+            needed_capacity -= candidate["rescue_capacity"] or 10
+        
+        # 计算覆盖状态
+        if needed_capacity > 0:
+            coverage_status = "partial"
+            warnings.append(f"救援点'{point['name']}'救援容量不足，缺口{needed_capacity}人")
+        else:
+            coverage_status = "full"
+        
+        # 最长ETA
+        max_eta = max((t["eta_minutes"] for t in assigned_to_point), default=0)
+        
+        point_allocations.append(PointAllocation(
+            rescue_point_id=point_id,
+            rescue_point_name=point["name"],
+            location={"latitude": point["latitude"], "longitude": point["longitude"]},
+            estimated_victims=victims,
+            priority=point["priority"],
+            assigned_teams=assigned_to_point,
+            total_eta_minutes=max_eta,
+            coverage_status=coverage_status,
+        ))
+    
+    return MultiPointAllocationPlan(
+        event_id=state["event_id"],
+        total_rescue_points=len(rescue_points),
+        assigned_points=len(point_allocations),
+        rescue_points=point_allocations,
+        unassigned_points=unassigned_points,
+        resource_warnings=warnings,
+    )

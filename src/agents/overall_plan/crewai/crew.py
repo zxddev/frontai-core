@@ -112,8 +112,20 @@ def prepare_crew_inputs(
     scenario_data: dict[str, Any],
     available_teams: list[dict[str, Any]],
     available_supplies: list[dict[str, Any]],
+    aggregated_disaster_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """准备Crew输入数据"""
+    """准备Crew输入数据
+    
+    Args:
+        event_data: 单个事件数据（兼容旧逻辑）
+        scenario_data: 想定基本信息
+        available_teams: 可用救援队伍
+        available_supplies: 可用物资
+        aggregated_disaster_data: 汇总后的灾情数据（优先使用）
+        
+    Returns:
+        Crew输入数据字典
+    """
     # 格式化队伍列表
     teams_by_type = _group_teams_by_type(available_teams)
     
@@ -126,11 +138,26 @@ def prepare_crew_inputs(
     # 格式化物资列表
     supplies_str = _format_supplies_list(available_supplies)
     
-    # 提取关键数值
-    trapped_count = event_data.get("trapped", 0)
-    injured_count = event_data.get("injuries", 0)
+    # 优先使用汇总后的灾情数据，避免LLM编造数据
+    if aggregated_disaster_data:
+        trapped_count = aggregated_disaster_data.get("trapped", 0)
+        injured_count = aggregated_disaster_data.get("injuries", 0)
+        deaths_count = aggregated_disaster_data.get("deaths", 0)
+        missing_count = aggregated_disaster_data.get("missing", 0)
+        buildings_collapsed = aggregated_disaster_data.get("buildings_collapsed", 0)
+        buildings_damaged = aggregated_disaster_data.get("buildings_damaged", 0)
+        affected_population = aggregated_disaster_data.get("affected_population", 0) or scenario_data.get("affected_population", 0)
+    else:
+        # 兼容旧逻辑：从单个event_data获取
+        trapped_count = event_data.get("trapped", 0)
+        injured_count = event_data.get("injuries", 0)
+        deaths_count = event_data.get("casualties", 0)
+        missing_count = event_data.get("missing", 0)
+        buildings_collapsed = event_data.get("buildings_collapsed", 0)
+        buildings_damaged = event_data.get("buildings_damaged", 0)
+        affected_population = scenario_data.get("affected_population", 0)
+    
     serious_injury_count = int(injured_count * 0.25) if injured_count > 0 else 0
-    affected_population = scenario_data.get("affected_population", 0)
     
     # 计算救援人员规模
     rescue_teams_count = max(1, trapped_count // 50) if trapped_count > 0 else len(available_teams)
@@ -139,22 +166,39 @@ def prepare_crew_inputs(
     engineering_personnel = 0
     total_responders = rescue_personnel + medical_staff + engineering_personnel
     
+    # 格式化数值显示（0显示为"待核实"）
+    def format_count(value: int, unit: str = "") -> str:
+        if value > 0:
+            return f"{value}{unit}"
+        return "待核实"
+    
     return {
         # 原始数据
         "event_data": json.dumps(event_data, ensure_ascii=False, indent=2),
         "scenario_data": json.dumps(scenario_data, ensure_ascii=False, indent=2),
         
-        # 关键数值
+        # 关键数值（用于prompt模板）
         "trapped_count": trapped_count,
         "injured_count": injured_count,
+        "deaths_count": deaths_count,
+        "missing_count": missing_count,
         "serious_injury_count": serious_injury_count,
         "affected_population": affected_population,
-        "buildings_collapsed": event_data.get("buildings_collapsed", 0),
-        "buildings_damaged": event_data.get("buildings_damaged", 0),
+        "buildings_collapsed": buildings_collapsed,
+        "buildings_damaged": buildings_damaged,
         "roads_damaged_km": event_data.get("roads_damaged_km", 0),
         "bridges_damaged": event_data.get("bridges_damaged", 0),
         "power_outage_households": event_data.get("power_outage_households", 0),
         "days": 3,
+        
+        # 格式化显示值（0显示为"待核实"，防止LLM编造）
+        "trapped_count_display": format_count(trapped_count, "人"),
+        "injured_count_display": format_count(injured_count, "人"),
+        "deaths_count_display": format_count(deaths_count, "人"),
+        "missing_count_display": format_count(missing_count, "人"),
+        "buildings_collapsed_display": format_count(buildings_collapsed, "栋"),
+        "buildings_damaged_display": format_count(buildings_damaged, "栋"),
+        "affected_population_display": format_count(affected_population, "人"),
         
         # 灾害信息
         "disaster_type": scenario_data.get("scenario_type", "earthquake"),
@@ -173,6 +217,9 @@ def prepare_crew_inputs(
         "available_medical_teams": medical_teams_str,
         "available_engineering_teams": engineering_teams_str,
         "available_supplies": supplies_str,
+        
+        # 数据来源标记
+        "data_source": "database" if aggregated_disaster_data else "event_data",
     }
 
 

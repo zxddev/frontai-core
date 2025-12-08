@@ -291,6 +291,26 @@ class BatchGenerateSchemeResponse(BaseModel):
 # 应急AI混合分析接口
 # ============================================================================
 
+
+class LocationInput(BaseModel):
+    """坐标输入"""
+    longitude: float = Field(..., ge=-180, le=180, description="经度")
+    latitude: float = Field(..., ge=-90, le=90, description="纬度")
+
+
+class RescuePointInput(BaseModel):
+    """救援点输入（支持地名或坐标）"""
+    name: str = Field(..., min_length=1, max_length=200, description="救援点名称")
+    address: Optional[str] = Field(None, max_length=500, description="地名，用于地理编码")
+    location: Optional[LocationInput] = Field(None, description="坐标，优先于地名使用")
+    estimated_victims: int = Field(0, ge=0, description="预估被困人数")
+    priority: str = Field(
+        "medium",
+        pattern="^(critical|high|medium|low)$",
+        description="优先级: critical/high/medium/low"
+    )
+
+
 class EmergencyAnalyzeRequest(BaseModel):
     """应急AI分析请求"""
     event_id: UUID = Field(..., description="事件ID")
@@ -299,6 +319,11 @@ class EmergencyAnalyzeRequest(BaseModel):
     structured_input: Optional[Dict[str, Any]] = Field(
         default=None, 
         description="结构化输入，必须包含location.longitude和location.latitude用于计算队伍响应时间"
+    )
+    rescue_points: Optional[List[RescuePointInput]] = Field(
+        default=None,
+        max_length=50,
+        description="救援点列表（最多50个），为空时从数据库读取或使用事件位置"
     )
     constraints: Optional[Dict[str, Any]] = Field(
         default=None, 
@@ -372,6 +397,9 @@ class EmergencyAnalyzeResult(BaseModel):
     strategic: Optional[Dict[str, Any]] = Field(default=None, description="战略层结果(任务域/阶段/模块/运力/安全)")
     matching: Optional[Dict[str, Any]] = Field(default=None, description="资源匹配结果")
     optimization: Optional[Dict[str, Any]] = Field(default=None, description="方案优化结果")
+    
+    # 多救援点分配
+    multi_point_allocation: Optional[Dict[str, Any]] = Field(default=None, description="多救援点分配方案")
     
     # 推荐方案
     recommended_scheme: Optional[Dict[str, Any]] = Field(default=None, description="推荐方案")

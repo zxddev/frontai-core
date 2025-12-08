@@ -209,6 +209,61 @@ async def _enrich_allocations(allocations: List[Dict[str, Any]]) -> List[Dict[st
         return allocations
 
 
+def _build_multi_point_output(state: EmergencyAIState) -> Dict[str, Any]:
+    """
+    构建多救援点分配输出
+    
+    Args:
+        state: AI状态
+        
+    Returns:
+        多点位分配输出字典
+    """
+    point_allocations = state.get("point_allocations")
+    resolved_points = state.get("resolved_rescue_points", [])
+    
+    if not point_allocations:
+        return {
+            "enabled": False,
+            "total_rescue_points": len(resolved_points) if resolved_points else 0,
+            "rescue_points": [],
+            "unassigned_points": [],
+            "resource_warnings": [],
+        }
+    
+    return {
+        "enabled": True,
+        "event_id": point_allocations.get("event_id"),
+        "total_rescue_points": point_allocations.get("total_rescue_points", 0),
+        "assigned_points": point_allocations.get("assigned_points", 0),
+        "rescue_points": [
+            {
+                "rescue_point_id": p.get("rescue_point_id"),
+                "rescue_point_name": p.get("rescue_point_name"),
+                "location": p.get("location"),
+                "estimated_victims": p.get("estimated_victims"),
+                "priority": p.get("priority"),
+                "coverage_status": p.get("coverage_status"),
+                "total_eta_minutes": p.get("total_eta_minutes"),
+                "assigned_teams": [
+                    {
+                        "team_id": t.get("team_id"),
+                        "team_name": t.get("team_name"),
+                        "capabilities": t.get("capabilities", []),
+                        "distance_km": t.get("distance_km"),
+                        "eta_minutes": t.get("eta_minutes"),
+                        "task_description": t.get("task_description"),
+                    }
+                    for t in p.get("assigned_teams", [])
+                ],
+            }
+            for p in point_allocations.get("rescue_points", [])
+        ],
+        "unassigned_points": point_allocations.get("unassigned_points", []),
+        "resource_warnings": point_allocations.get("resource_warnings", []),
+    }
+
+
 async def _generate_scheme_text(
     parsed_disaster: Dict[str, Any],
     task_sequence: List[Dict[str, Any]],
@@ -466,6 +521,9 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
                 for c in state.get("resource_candidates", [])[:20]  # 最多显示20个
             ],
         },
+        
+        # 阶段3.5: 多救援点分配
+        "multi_point_allocation": _build_multi_point_output(state),
         
         # 阶段4: 方案优化（5维评估）
         "optimization": {

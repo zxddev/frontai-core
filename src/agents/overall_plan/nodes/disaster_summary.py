@@ -28,7 +28,9 @@ async def disaster_summary_node(state: OverallPlanState) -> dict[str, Any]:
     从 load_context 加载的数据中汇总灾情态势，输出结构化数据。
     数据来源：
     - scenario_data: 想定基本信息（灾害类型、震级、受灾人口）
-    - events_data: 事件列表（伤亡、被困、建筑损毁）
+    - main_event: 主事件（is_main_event=true）
+    - related_events: 相关事件列表（次生灾害等）
+    - aggregated_disaster_data: 已汇总的灾情数据（load_context预处理）
     - disaster_situations: 灾情态势（灾害扩散、严重程度）
     
     Args:
@@ -45,24 +47,36 @@ async def disaster_summary_node(state: OverallPlanState) -> dict[str, Any]:
     try:
         # 从state获取已加载的数据
         scenario_data = state.get("scenario_data", {})
-        events_data = state.get("events_data", [])
+        main_event = state.get("main_event")
+        related_events = state.get("related_events", [])
+        aggregated_data = state.get("aggregated_disaster_data", {})
         disaster_situations = state.get("disaster_situations", [])
         
         # 输入数据追踪日志
         logger.info(
             f"[灾情汇总] 输入数据: scenario={scenario_data.get('name', 'N/A')}, "
-            f"events数={len(events_data)}, situations数={len(disaster_situations)}"
+            f"主事件={'有' if main_event else '无'}, 相关事件={len(related_events)}个, "
+            f"situations数={len(disaster_situations)}"
         )
         
         if not scenario_data:
             raise DisasterSummaryError("scenario_data为空，无法汇总灾情")
         
-        # 汇总灾情数据
-        disaster_assessment = _summarize_disaster_data(
-            scenario_data=scenario_data,
-            events_data=events_data,
-            disaster_situations=disaster_situations,
-        )
+        # 优先使用已汇总的数据，否则重新汇总
+        if aggregated_data:
+            disaster_assessment = _build_assessment_from_aggregated(
+                aggregated_data=aggregated_data,
+                scenario_data=scenario_data,
+                disaster_situations=disaster_situations,
+            )
+        else:
+            # 兼容旧逻辑：从events_data汇总
+            events_data = state.get("events_data", [])
+            disaster_assessment = _summarize_disaster_data(
+                scenario_data=scenario_data,
+                events_data=events_data,
+                disaster_situations=disaster_situations,
+            )
         
         # 生成总体描述文本
         overview_text = _generate_overview_text(disaster_assessment)
@@ -70,7 +84,9 @@ async def disaster_summary_node(state: OverallPlanState) -> dict[str, Any]:
         logger.info(
             f"[灾情汇总] 完成: 死亡={disaster_assessment.get('deaths', 0)}, "
             f"受伤={disaster_assessment.get('injuries', 0)}, "
-            f"被困={disaster_assessment.get('trapped', 0)}"
+            f"被困={disaster_assessment.get('trapped', 0)}, "
+            f"倒塌={disaster_assessment.get('buildings_collapsed', 0)}, "
+            f"受损={disaster_assessment.get('buildings_damaged', 0)}"
         )
         
         return {
@@ -87,6 +103,85 @@ async def disaster_summary_node(state: OverallPlanState) -> dict[str, Any]:
     except Exception as e:
         logger.exception(f"[灾情汇总] 失败: {e}")
         raise DisasterSummaryError(f"灾情汇总失败: {e}") from e
+
+
+def _build_assessment_from_aggregated(
+    aggregated_data: dict[str, Any],
+    scenario_data: dict[str, Any],
+    disaster_situations: list[dict[str, Any]],
+) -> BasicDisasterValue:
+    """
+    从已汇总的数据构建灾情评估结构
+    
+    Args:
+        aggregated_data: load_context预处理的汇总数据
+        scenario_data: 想定基本信息
+        disaster_situations: 灾情态势
+        
+    Returns:
+        结构化的灾情评估数据
+    """
+    # 格式化发生时间
+    started_at = scenario_data.get("started_at")
+    occurrence_time = "未知"
+    if started_at:
+        if isinstance(started_at, str):
+            occurrence_time = started_at
+        elif isinstance(started_at, datetime):
+            occurrence_time = started_at.strftime("%Y年%m月%d日 %H:%M")
+    
+    # 获取受灾区域描述
+    affected_area = _get_affected_area_desc(scenario_data, disaster_situations)
+    
+    # 构建基础设施损毁描述
+    event_descriptions = aggregated_data.get("event_descriptions", [])
+    infrastructure_damage = ""
+    if event_descriptions:
+        infrastructure_damage = "；".join(event_descriptions[:5])
+        if len(event_descriptions) > 5:
+            infrastructure_damage += f"等{len(event_descriptions)}处"
+    
+    result: BasicDisasterValue = {
+        "disaster_name": aggregated_data.get("disaster_name", scenario_data.get("name", "未知灾害")),
+        "disaster_type": _translate_disaster_type(aggregated_data.get("disaster_type", "earthquake")),
+        "occurrence_time": occurrence_time,
+        "magnitude": aggregated_data.get("magnitude"),
+        "epicenter_depth_km": scenario_data.get("depth_km"),
+        "affected_area": affected_area,
+        "affected_scope_km2": aggregated_data.get("affected_area_km2"),
+        "deaths": aggregated_data.get("deaths", 0),
+        "injuries": aggregated_data.get("injuries", 0),
+        "missing": aggregated_data.get("missing", 0),
+        "trapped": aggregated_data.get("trapped", 0),
+        "buildings_collapsed": aggregated_data.get("buildings_collapsed", 0),
+        "buildings_damaged": aggregated_data.get("buildings_damaged", 0),
+        "infrastructure_damage": infrastructure_damage,
+    }
+    
+    return result
+
+
+def _get_affected_area_desc(
+    scenario_data: dict[str, Any],
+    disaster_situations: list[dict[str, Any]],
+) -> str:
+    """获取受灾区域描述"""
+    # 从disaster_situations获取更详细的区域描述
+    for situation in disaster_situations:
+        if situation.get("disaster_name"):
+            return situation["disaster_name"]
+    
+    # 从scenario_data获取位置信息
+    affected_area_desc = scenario_data.get("location", {})
+    if isinstance(affected_area_desc, dict):
+        lon = affected_area_desc.get("longitude", "")
+        lat = affected_area_desc.get("latitude", "")
+        if lon and lat:
+            return f"经度{lon}°, 纬度{lat}°"
+    elif affected_area_desc:
+        return str(affected_area_desc)
+    
+    return "未知地区"
 
 
 def _summarize_disaster_data(

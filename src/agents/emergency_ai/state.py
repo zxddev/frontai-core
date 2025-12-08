@@ -76,6 +76,49 @@ class ResourceCandidate(TypedDict):
     rescue_capacity: int                  # 救援容量（72小时内可救援人数）
 
 
+class ResolvedRescuePoint(TypedDict):
+    """解析后的救援点（含坐标）"""
+    point_id: str                         # 救援点ID（UUID字符串）
+    name: str                             # 救援点名称
+    latitude: float                       # 纬度
+    longitude: float                      # 经度
+    estimated_victims: int                # 预估被困人数
+    priority: str                         # 优先级: critical/high/medium/low
+    source: str                           # 来源: 'input' | 'database' | 'event_location'
+
+
+class TeamAllocation(TypedDict):
+    """队伍分配详情"""
+    team_id: str                          # 队伍ID
+    team_name: str                        # 队伍名称
+    capabilities: List[str]               # 队伍能力
+    distance_km: float                    # 到救援点距离
+    eta_minutes: float                    # 预计到达时间
+    task_description: str                 # AI生成的任务描述
+
+
+class PointAllocation(TypedDict):
+    """单个救援点的分配结果"""
+    rescue_point_id: str                  # 救援点ID
+    rescue_point_name: str                # 救援点名称
+    location: Dict[str, float]            # 坐标 {latitude, longitude}
+    estimated_victims: int                # 预估被困人数
+    priority: str                         # 优先级
+    assigned_teams: List[TeamAllocation]  # 分配的队伍列表
+    total_eta_minutes: float              # 最长ETA（所有队伍中最慢的）
+    coverage_status: str                  # 覆盖状态: 'full' | 'partial' | 'none'
+
+
+class MultiPointAllocationPlan(TypedDict):
+    """多点位分配方案"""
+    event_id: str                         # 事件ID
+    total_rescue_points: int              # 救援点总数
+    assigned_points: int                  # 已分配队伍的救援点数
+    rescue_points: List[PointAllocation]  # 各救援点分配结果
+    unassigned_points: List[str]          # 无法分配队伍的救援点ID列表
+    resource_warnings: List[str]          # 资源不足警告
+
+
 class AllocationSolution(TypedDict):
     """
     资源分配方案
@@ -360,6 +403,12 @@ class EmergencyAIState(TypedDict):
     capability_gap_report: Optional[Dict[str, Any]]         # 能力缺口报告（供指挥员协调外部资源）
     capacity_warning: Optional[str]                         # 救援容量警告（覆盖率不足时生成）
     
+    # ========== 阶段3.5: 多救援点分配 ==========
+    rescue_points: List[Dict[str, Any]]                     # 输入的救援点列表（原始输入）
+    resolved_rescue_points: List[ResolvedRescuePoint]       # 解析后的救援点（含坐标）
+    point_candidates: Dict[str, List[ResourceCandidate]]    # 每个救援点的候选队伍 {point_id: [candidates]}
+    point_allocations: Optional[MultiPointAllocationPlan]   # 多点位分配方案
+    
     # ========== 阶段4: 方案优化 ==========
     scheme_scores: List[SchemeScore]                        # 方案评分
     recommended_scheme: Optional[AllocationSolution]        # 推荐方案
@@ -451,6 +500,11 @@ def create_initial_state(
         supply_shortages=[],
         capability_gap_report=None,
         capacity_warning=None,
+        # 多救援点分配
+        rescue_points=[],
+        resolved_rescue_points=[],
+        point_candidates={},
+        point_allocations=None,
         scheme_scores=[],
         recommended_scheme=None,
         scheme_explanation="",

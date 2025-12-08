@@ -83,11 +83,16 @@ class OverallPlanState(TypedDict, total=False):
 
     # Data aggregation (load_context node output) - 新版本按想定加载
     scenario_data: dict[str, Any]  # 想定基本信息（从scenarios_v2）
-    events_data: list[dict[str, Any]]  # 想定下的所有事件
+    main_event: dict[str, Any]  # 主事件（is_main_event=true）
+    related_events: list[dict[str, Any]]  # 相关事件（次生灾害等）
+    events_data: list[dict[str, Any]]  # 所有事件（主事件+相关事件）
     disaster_situations: list[dict[str, Any]]  # 灾情态势
     available_teams: list[dict[str, Any]]  # 可用救援队伍
     available_supplies: list[dict[str, Any]]  # 可用物资
     command_groups: list[dict[str, Any]]  # 工作组配置（基于国家预案）
+    
+    # 汇总后的灾情数据（用于传递给CrewAI，防止LLM造假）
+    aggregated_disaster_data: dict[str, Any]
     
     # 兼容旧字段
     event_data: dict[str, Any]  # 兼容：第一个事件数据

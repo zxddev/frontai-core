@@ -85,18 +85,18 @@ async def run_simulation(state: EmergencyAIState) -> Dict[str, Any]:
     final_output = state.get("final_output", {})
     final_output["simulation_result"] = simulation_result
     
-    # 如果有方案解释，追加仿真结论
+    # 仿真结论暂时禁用（仿真输入为硬编码默认值，结果不可信，等参数校准后再启用）
     scheme_explanation = state.get("scheme_explanation", "")
-    if scheme_explanation:
-        sim_text = (
-            f"\n\n## 十二、数字孪生推演结论\n"
-            f"经多智能体生命仿真（ABM）验证，本方案预期效果如下：\n"
-            f"- **预期生存率**: {simulation_result['survival_rate']*100:.1f}%\n"
-            f"- **可预防死亡**: {simulation_result['preventable_deaths']:.1f}人 (需重点关注)\n"
-            f"- **平均生存质量**: {simulation_result['survival_quality']:.1f}/100\n"
-            f"- **预计完工时间**: {simulation_result['completion_time_hours']}小时\n"
-        )
-        scheme_explanation += sim_text
+    # if scheme_explanation:
+    #     sim_text = (
+    #         f"\n\n## 十二、数字孪生推演结论\n"
+    #         f"经多智能体生命仿真（ABM）验证，本方案预期效果如下：\n"
+    #         f"- **预期生存率**: {simulation_result['survival_rate']*100:.1f}%\n"
+    #         f"- **可预防死亡**: {simulation_result['preventable_deaths']:.1f}人 (需重点关注)\n"
+    #         f"- **平均生存质量**: {simulation_result['survival_quality']:.1f}/100\n"
+    #         f"- **预计完工时间**: {simulation_result['completion_time_hours']}小时\n"
+    #     )
+    #     scheme_explanation += sim_text
     
     # 更新追踪信息
     trace = state.get("trace", {})
