@@ -137,11 +137,116 @@ async def get_pending_events(
         return ApiResponse.error(500, f"获取待确认事件失败: {str(e)}")
 
 
+@router.get("/list", response_model=ApiResponse)
+async def get_event_list(
+    scenarioId: Optional[str] = Query(None, description="想定ID（可选）"),
+    status: Optional[str] = Query(None, description="状态筛选"),
+    db: AsyncSession = Depends(get_db),
+) -> ApiResponse:
+    """
+    获取事件列表（PC端灾情追踪）
+
+    返回所有事件，支持状态筛选
+    状态: pending, pre_confirmed, confirmed, planning, executing, resolved, escalated, cancelled
+    """
+    from sqlalchemy import text
+
+    logger.info(f"获取事件列表, scenarioId={scenarioId}, status={status}")
+
+    try:
+        # 直接SQL查询，支持不传scenario_id
+        sql = """
+            SELECT id, event_code, title, description, status, priority, event_type,
+                   address, estimated_victims, reported_at, confirmed_at, resolved_at,
+                   ST_X(location::geometry) as lng, ST_Y(location::geometry) as lat
+            FROM operational_v2.events_v2
+            WHERE 1=1
+        """
+        params = {}
+
+        if scenarioId:
+            sql += " AND scenario_id = :scenario_id"
+            params["scenario_id"] = scenarioId
+
+        if status:
+            sql += " AND status = :status"
+            params["status"] = status
+
+        sql += " ORDER BY reported_at DESC LIMIT 100"
+
+        result = await db.execute(text(sql), params)
+        rows = result.fetchall()
+
+        data = []
+        for row in rows:
+            data.append({
+                "eventId": str(row.id),
+                "eventCode": row.event_code,
+                "title": row.title,
+                "description": row.description,
+                "status": row.status,
+                "priority": row.priority,
+                "eventType": row.event_type,
+                "location": {
+                    "longitude": float(row.lng) if row.lng else None,
+                    "latitude": float(row.lat) if row.lat else None,
+                } if row.lng and row.lat else None,
+                "address": row.address,
+                "estimatedVictims": row.estimated_victims,
+                "reportedAt": row.reported_at.isoformat() if row.reported_at else None,
+                "confirmedAt": row.confirmed_at.isoformat() if row.confirmed_at else None,
+                "resolvedAt": row.resolved_at.isoformat() if row.resolved_at else None,
+            })
+
+        logger.info(f"返回事件数量: {len(data)}")
+        return ApiResponse.success(data)
+
+    except ValueError as e:
+        logger.warning(f"无效的ID格式: {e}")
+        return ApiResponse.error(400, f"无效的ID格式: {str(e)}")
+    except Exception as e:
+        logger.exception(f"获取事件列表失败: {e}")
+        return ApiResponse.error(500, f"获取事件列表失败: {str(e)}")
+
+
+@router.post("/resolve", response_model=ApiResponse)
+async def resolve_event(
+    eventId: str = Query(..., description="事件ID"),
+    service: EventService = Depends(get_event_service),
+) -> ApiResponse:
+    """
+    标记事件已解决
+
+    将事件状态更新为 resolved
+    """
+    logger.info(f"标记事件已解决, eventId={eventId}")
+
+    try:
+        event_uuid = UUID(eventId)
+        result = await service.resolve(event_uuid, resolution_note="PC端标记解决")
+        logger.info(f"事件已解决, eventId={eventId}")
+        return ApiResponse.success({"eventId": str(result.id), "status": result.status})
+    except ValueError as e:
+        logger.warning(f"无效的ID格式: {e}")
+        return ApiResponse.error(400, f"无效的ID格式: {str(e)}")
+    except Exception as e:
+        logger.exception(f"标记事件解决失败: {e}")
+        return ApiResponse.error(500, f"标记事件解决失败: {str(e)}")
+
+
 # ============================================================================
 # 地震事件触发（模拟仿真）
 # ============================================================================
 
 from src.domains.scenarios.service import ScenarioService
+from src.domains.frontend_api.risk_area.service import RiskAreaService
+from src.domains.frontend_api.risk_area.schemas import (
+    RiskAreaCreateRequest,
+    RiskAreaType,
+    SeverityLevel,
+    PassageStatus,
+    GeoJsonPolygon,
+)
 
 @router.post("/earthquake/trigger", response_model=ApiResponse[EarthquakeTriggerResponse])
 async def trigger_earthquake_event(
@@ -403,113 +508,135 @@ async def _create_earthquake_risk_zones(
     epicenter_name: str,
 ) -> None:
     """
-    创建地震风险区域（写入 disaster_affected_areas_v2 表）
-    
+    创建地震风险区域（通过 RiskAreaService 写入，自动触发预警通知）
+
     根据震级创建三个同心圆风险区域：
     - 核心区（红色）：risk_level=10，救援车辆可通行，普通车辆绕行
     - 影响区（橙色）：risk_level=7，所有车辆可通行但降速
     - 外围区（黄色）：risk_level=4，正常通行，提示警告
-    
+
     路径规划时根据 risk_level 和 passable_vehicle_types 判断绕行策略
     """
     import math
-    from sqlalchemy import text
-    
+
     # 根据震级计算各区域半径（单位：米）
-    # 震级每增加1级，影响范围约扩大2倍
     base_radius_m = 2000  # 4级地震核心区半径约2km
     core_radius = base_radius_m * (1.5 ** (magnitude - 4))
     impact_radius = core_radius * 2
     outer_radius = core_radius * 4
-    
+
     # 限制最大半径
     core_radius = min(core_radius, 10000)    # 最大10km
     impact_radius = min(impact_radius, 25000)  # 最大25km
     outer_radius = min(outer_radius, 50000)   # 最大50km
-    
-    # 定义三个风险区域（使用新的 passage_status 字段）
+
+    # 定义三个风险区域
     zones = [
         {
             "name": f"{epicenter_name}地震核心区",
-            "area_type": "seismic_red",
+            "area_type": RiskAreaType.SEISMIC_RED,
             "radius_m": core_radius,
-            "severity": "critical",
+            "severity": SeverityLevel.CRITICAL,
             "risk_level": 10,
-            "passable": True,  # 救援车辆可进入
+            "passable": True,
             "passable_vehicle_types": ["rescue", "ambulance", "fire_truck", "police"],
-            "speed_reduction_percent": 50,  # 降速50%
-            "passage_status": "needs_reconnaissance",  # 需侦察确认
+            "speed_reduction_percent": 50,
+            "passage_status": PassageStatus.NEEDS_RECONNAISSANCE,
             "reconnaissance_required": True,
             "description": f"震中{core_radius/1000:.1f}km范围内，需侦察确认通行性",
         },
         {
             "name": f"{epicenter_name}地震影响区",
-            "area_type": "seismic_orange",
+            "area_type": RiskAreaType.SEISMIC_ORANGE,
             "radius_m": impact_radius,
-            "severity": "high",
+            "severity": SeverityLevel.HIGH,
             "risk_level": 7,
             "passable": True,
-            "passable_vehicle_types": None,  # 所有车辆可通行
-            "speed_reduction_percent": 30,  # 降速30%
-            "passage_status": "passable_with_caution",  # 可通行但需谨慎
+            "passable_vehicle_types": [],
+            "speed_reduction_percent": 30,
+            "passage_status": PassageStatus.PASSABLE_WITH_CAUTION,
             "reconnaissance_required": False,
             "description": f"震中{impact_radius/1000:.1f}km范围内，建议减速通行",
         },
         {
             "name": f"{epicenter_name}地震外围区",
-            "area_type": "seismic_yellow",
+            "area_type": RiskAreaType.SEISMIC_YELLOW,
             "radius_m": outer_radius,
-            "severity": "medium",
+            "severity": SeverityLevel.MEDIUM,
             "risk_level": 4,
             "passable": True,
-            "passable_vehicle_types": None,  # 所有车辆可通行
-            "speed_reduction_percent": 0,  # 正常速度
-            "passage_status": "clear",  # 安全通行
+            "passable_vehicle_types": [],
+            "speed_reduction_percent": 0,
+            "passage_status": PassageStatus.CLEAR,
             "reconnaissance_required": False,
             "description": f"震中{outer_radius/1000:.1f}km范围内，注意余震风险",
         },
     ]
-    
-    # 生成圆形多边形并插入数据库
+
+    # 使用 RiskAreaService 创建风险区域（自动触发预警通知）
+    risk_service = RiskAreaService(db)
+
     for zone in zones:
-        # 生成近似圆形的多边形（32个点）
-        polygon_wkt = _create_circle_polygon_wkt(
+        # 生成 GeoJSON 格式的圆形多边形
+        polygon_coords = _create_circle_polygon_coords(
             center_lng, center_lat, zone["radius_m"], num_points=32
         )
-        
-        # 构建INSERT语句（包含新的 passage_status 字段）
-        sql = text("""
-            INSERT INTO operational_v2.disaster_affected_areas_v2 (
-                scenario_id, name, area_type, geometry, severity, risk_level,
-                passable, passable_vehicle_types, speed_reduction_percent,
-                passage_status, reconnaissance_required,
-                description, properties
-            ) VALUES (
-                :scenario_id, :name, :area_type, ST_GeogFromText(:geometry),
-                :severity, :risk_level, :passable, :passable_vehicle_types,
-                :speed_reduction_percent, :passage_status, :reconnaissance_required,
-                :description, :properties
-            )
-        """)
-        
-        await db.execute(sql, {
-            "scenario_id": str(scenario_id),
-            "name": zone["name"],
-            "area_type": zone["area_type"],
-            "geometry": polygon_wkt,
-            "severity": zone["severity"],
-            "risk_level": zone["risk_level"],
-            "passable": zone["passable"],
-            "passable_vehicle_types": zone["passable_vehicle_types"],
-            "speed_reduction_percent": zone["speed_reduction_percent"],
-            "passage_status": zone["passage_status"],
-            "reconnaissance_required": zone["reconnaissance_required"],
-            "description": zone["description"],
-            "properties": f'{{"event_id": "{event_id}", "magnitude": {magnitude}}}',
-        })
-    
-    await db.commit()
+
+        # 构建创建请求
+        create_request = RiskAreaCreateRequest(
+            scenario_id=scenario_id,
+            name=zone["name"],
+            area_type=zone["area_type"],
+            risk_level=zone["risk_level"],
+            severity=zone["severity"],
+            passage_status=zone["passage_status"],
+            geometry=GeoJsonPolygon(type="Polygon", coordinates=[polygon_coords]),
+            passable=zone["passable"],
+            passable_vehicle_types=zone["passable_vehicle_types"],
+            speed_reduction_percent=zone["speed_reduction_percent"],
+            reconnaissance_required=zone["reconnaissance_required"],
+            description=zone["description"],
+        )
+
+        # 调用 Service 创建（内部会触发 _notify_risk_area_change）
+        await risk_service.create(create_request)
+
     logger.info(f"地震风险区域已创建: 核心区{core_radius/1000:.1f}km, 影响区{impact_radius/1000:.1f}km, 外围区{outer_radius/1000:.1f}km")
+
+
+def _create_circle_polygon_coords(
+    center_lng: float,
+    center_lat: float,
+    radius_m: float,
+    num_points: int = 32,
+) -> list[list[float]]:
+    """
+    创建圆形多边形的 GeoJSON 坐标数组
+
+    Args:
+        center_lng: 圆心经度
+        center_lat: 圆心纬度
+        radius_m: 半径（米）
+        num_points: 多边形顶点数
+
+    Returns:
+        GeoJSON 格式坐标 [[lng, lat], [lng, lat], ...]
+    """
+    import math
+
+    radius_deg = radius_m / 111000
+
+    coords = []
+    for i in range(num_points):
+        angle = 2 * math.pi * i / num_points
+        lng = center_lng + radius_deg * math.cos(angle)
+        lat = center_lat + radius_deg * math.sin(angle) * 0.9
+        coords.append([round(lng, 6), round(lat, 6)])
+
+    # 闭合多边形
+    coords.append(coords[0])
+
+    return coords
 
 
 def _create_circle_polygon_wkt(
