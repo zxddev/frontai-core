@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -212,42 +212,146 @@ class RiskAreaService:
                     affected_moving_entities=affected_moving_entities,
                 )
             
-            # 3.6 生成绕行方案（如有受影响路线）
+            # 3.6 生成绕行方案
+            # 优先使用移动实体数据（它检测的是剩余路径，并有车辆当前位置）
+            # 只有当没有移动会话时，才降级使用规划路线数据
             alternative_routes = []
+            can_bypass = True
+            bypass_message = None
+            bypass_origin = None  # 绕行起点（车辆当前位置或规划起点）
+            bypass_destination = None  # 绕行终点（原规划终点）
+            vehicle_inside_risk = False  # 车辆是否已在风险区域内
+            
+            first_affected_moving = affected_moving_entities[0] if affected_moving_entities else None
             first_affected = affected_routes[0] if affected_routes else None
-            if first_affected and first_affected.get("origin") and first_affected.get("destination"):
+            
+            logger.info(
+                f"[风险区域通知] 检测结果: affected_routes={len(affected_routes)}, "
+                f"affected_moving_entities={len(affected_moving_entities)}, "
+                f"first_affected_moving={first_affected_moving is not None}, "
+                f"first_affected={first_affected is not None}"
+            )
+            
+            if first_affected_moving:
+                # 优先使用移动实体数据 - 有准确的当前位置和剩余路径检测
                 try:
-                    from src.domains.routing.alternative_routes import AlternativeRoutesService
+                    from src.domains.movement_simulation.persistence import get_persistence
+                    from src.domains.movement_simulation.interpolator import RouteInterpolator
                     from src.domains.routing.schemas import Point
                     
-                    alt_service = AlternativeRoutesService(self.db)
-                    origin = Point(
-                        lon=first_affected["origin"]["lng"],
-                        lat=first_affected["origin"]["lat"]
-                    )
-                    destination = Point(
+                    persistence = await get_persistence()
+                    session = await persistence.get_session(first_affected_moving["session_id"])
+                    
+                    if session and len(session.route) >= 2:
+                        # 计算车辆当前位置
+                        interpolator = RouteInterpolator(session.route)
+                        result = interpolator.interpolate_by_distance(session.traveled_distance_m)
+                        current_pos = result.position
+                        
+                        logger.info(
+                            f"[风险区域通知] 车辆当前位置: ({current_pos.lon:.6f}, {current_pos.lat:.6f}), "
+                            f"已行驶: {session.traveled_distance_m:.0f}m, "
+                            f"剩余路段: {len(session.route) - session.current_segment_index} 个"
+                        )
+                        
+                        # 检查车辆当前位置是否在风险区域内
+                        vehicle_inside_risk = await self._is_point_inside_risk_area(
+                            lon=current_pos.lon,
+                            lat=current_pos.lat,
+                            risk_area_id=risk_area.id,
+                        )
+                        
+                        if vehicle_inside_risk:
+                            # 车辆已在风险区域内，无法绕行
+                            can_bypass = False
+                            bypass_message = "车辆已在风险区域内，无法绕行。建议原地待命或谨慎通过。"
+                            logger.warning(
+                                f"[风险区域通知] 车辆已在风险区域内: session={session.session_id}, "
+                                f"risk_area={risk_area.id}"
+                            )
+                        else:
+                            # 使用当前位置作为绕行起点
+                            bypass_origin = Point(lon=current_pos.lon, lat=current_pos.lat)
+                            # 终点是原规划终点
+                            bypass_destination = Point(
+                                lon=session.route[-1].lon,
+                                lat=session.route[-1].lat
+                            )
+                            logger.info(
+                                f"[风险区域通知] 绕行起点使用车辆当前位置: ({bypass_origin.lon:.6f}, {bypass_origin.lat:.6f})"
+                            )
+                except Exception as e:
+                    logger.warning(f"[风险区域通知] 获取移动会话失败: {e}", exc_info=True)
+            
+            # 无移动会话时，查询队伍实时位置作为绕行起点
+            if bypass_origin is None and first_affected:
+                from src.domains.routing.schemas import Point
+                
+                team_id = first_affected.get("team_id")
+                if team_id:
+                    team_location = await self._get_team_current_location(UUID(team_id))
+                    if team_location:
+                        bypass_origin = Point(lon=team_location["lon"], lat=team_location["lat"])
+                        logger.info(
+                            f"[风险区域通知] 使用队伍实时位置: team_id={team_id}, "
+                            f"({bypass_origin.lon:.6f}, {bypass_origin.lat:.6f})"
+                        )
+                    else:
+                        logger.warning(f"[风险区域通知] 未找到队伍位置: team_id={team_id}")
+                
+                # 终点使用原规划路线终点
+                if first_affected.get("destination"):
+                    bypass_destination = Point(
                         lon=first_affected["destination"]["lng"],
                         lat=first_affected["destination"]["lat"]
                     )
+            
+            # 生成绕行方案
+            logger.info(
+                f"[风险区域通知] 绕行条件检查: can_bypass={can_bypass}, "
+                f"bypass_origin={bypass_origin is not None}, "
+                f"bypass_destination={bypass_destination is not None}, "
+                f"vehicle_inside_risk={vehicle_inside_risk}"
+            )
+            
+            if can_bypass and bypass_origin and bypass_destination:
+                try:
+                    from src.domains.routing.planned_route_service import PlannedRouteService
                     
-                    alternatives = await alt_service.generate_alternatives(
-                        origin=origin,
-                        destination=destination,
+                    # 获取 task_id 和 team_id 用于存储绕行方案
+                    resolve_task_id = None
+                    resolve_team_id = None
+                    
+                    if first_affected:
+                        resolve_task_id = first_affected.get("task_id")
+                        resolve_team_id = first_affected.get("team_id")
+                    if first_affected_moving:
+                        resolve_task_id = resolve_task_id or first_affected_moving.get("task_id")
+                        resolve_team_id = resolve_team_id or first_affected_moving.get("team_id")
+                    
+                    # 转换为 UUID
+                    task_uuid = UUID(resolve_task_id) if resolve_task_id else None
+                    team_uuid = UUID(resolve_team_id) if resolve_team_id else None
+                    
+                    route_service = PlannedRouteService(self.db)
+                    result = await route_service.generate_and_save_alternatives(
+                        task_id=task_uuid,
+                        origin=bypass_origin,
+                        destination=bypass_destination,
                         risk_area_ids=[risk_area.id],
+                        team_id=team_uuid,
                     )
                     
-                    for alt in alternatives:
-                        alternative_routes.append({
-                            "strategy": alt.strategy,
-                            "strategy_name": alt.strategy_name,
-                            "distance_m": alt.distance_m,
-                            "duration_s": alt.duration_s,
-                            "polyline": [{"lon": p.lon, "lat": p.lat} for p in alt.polyline],
-                            "description": alt.description,
-                        })
-                    logger.info(f"[风险区域通知] 生成绕行方案: {len(alternative_routes)} 条")
+                    if result.get("success") and result.get("alternatives"):
+                        alternative_routes = result["alternatives"]
+                        logger.info(
+                            f"[风险区域通知] 生成并存储绕行方案: {len(alternative_routes)} 条, "
+                            f"task_id={resolve_task_id}, team_id={resolve_team_id}"
+                        )
+                    else:
+                        logger.warning(f"[风险区域通知] 绕行方案生成失败: {result.get('error')}")
                 except Exception as alt_err:
-                    logger.warning(f"[风险区域通知] 绕行方案生成失败: {alt_err}")
+                    logger.warning(f"[风险区域通知] 绕行方案生成失败: {alt_err}", exc_info=True)
             
             # 4. 构建通知 payload（匹配前端 route-warning-modal 期望的格式）
             alert_data = {
@@ -262,11 +366,26 @@ class RiskAreaService:
                     "risk_level": risk_area.risk_level,
                     "passage_status": risk_area.passage_status,
                 }],
+                # 绕行状态
+                "can_bypass": can_bypass,
+                "bypass_message": bypass_message,
+                "vehicle_inside_risk": vehicle_inside_risk,
+                # 绕行起点（车辆当前位置或规划起点）
+                "bypass_origin": {"lon": bypass_origin.lon, "lat": bypass_origin.lat} if bypass_origin else None,
                 # 绕行方案（直接包含在广播中）
                 "alternative_routes": alternative_routes,
                 # 用于生成绕行方案的参数（备用）
-                "task_id": first_affected.get("task_id") if first_affected else None,
-                "team_id": first_affected.get("team_id") if first_affected else None,
+                # 优先使用移动会话的 task_id（更准确），其次使用规划路线的 task_id
+                "task_id": (
+                    first_affected_moving.get("task_id") if first_affected_moving else None
+                ) or (
+                    first_affected.get("task_id") if first_affected else None
+                ),
+                "team_id": (
+                    first_affected_moving.get("team_id") if first_affected_moving else None
+                ) or (
+                    first_affected.get("team_id") if first_affected else None
+                ),
                 "origin": first_affected.get("origin") if first_affected else None,
                 "destination": first_affected.get("destination") if first_affected else None,
                 # 附加信息
@@ -587,6 +706,65 @@ class RiskAreaService:
         }
         return recommendations.get(passage_status, "谨慎行驶")
 
+    async def _is_point_inside_risk_area(
+        self,
+        lon: float,
+        lat: float,
+        risk_area_id: UUID,
+    ) -> bool:
+        """
+        检查一个点是否在风险区域内
+        
+        Args:
+            lon: 经度
+            lat: 纬度
+            risk_area_id: 风险区域ID
+            
+        Returns:
+            True 如果点在风险区域内，否则 False
+        """
+        try:
+            sql = text("""
+                SELECT ST_Contains(
+                    COALESCE(
+                        (SELECT geometry::geometry FROM operational_v2.disaster_affected_areas_v2 WHERE id = :risk_area_id),
+                        (SELECT ST_GeomFromGeoJSON(geometry::text)::geography::geometry 
+                         FROM operational_v2.entities_v2 
+                         WHERE id = :risk_area_id AND type = 'danger_area')
+                    ),
+                    ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)
+                ) as is_inside
+            """)
+            result = await self.db.execute(sql, {
+                "risk_area_id": str(risk_area_id),
+                "lon": lon,
+                "lat": lat,
+            })
+            row = result.first()
+            return bool(row and row.is_inside)
+        except Exception as e:
+            logger.warning(f"[风险区域检测] 点位检测失败: {e}")
+            return False
+
+    async def _get_team_current_location(self, team_id: UUID) -> Optional[dict]:
+        """
+        获取队伍当前位置
+        优先使用 current_location（实时位置），回退到 base_location（驻地）
+        """
+        sql = text("""
+            SELECT 
+                ST_X(COALESCE(current_location, base_location)::geometry) as lon,
+                ST_Y(COALESCE(current_location, base_location)::geometry) as lat
+            FROM operational_v2.rescue_teams_v2 
+            WHERE id = :team_id
+              AND COALESCE(current_location, base_location) IS NOT NULL
+        """)
+        result = await self.db.execute(sql, {"team_id": str(team_id)})
+        row = result.first()
+        if row:
+            return {"lon": row.lon, "lat": row.lat}
+        return None
+
     async def _find_affected_routes(
         self,
         risk_area: RiskAreaResponse,
@@ -693,7 +871,10 @@ class RiskAreaService:
             persistence = await get_persistence()
             sessions = await persistence.get_active_sessions()
             
+            logger.info(f"[剩余路径检测] 活跃移动会话数: {len(sessions) if sessions else 0}")
+            
             if not sessions:
+                logger.info("[剩余路径检测] 无活跃移动会话，跳过检测")
                 return []
             
             # 获取风险区域几何（支持两种数据源）
@@ -716,12 +897,19 @@ class RiskAreaService:
                 return []
             
             for session in sessions:
+                logger.debug(
+                    f"[剩余路径检测] 检查会话: session_id={session.session_id}, "
+                    f"state={session.state}, entity_id={session.entity_id}"
+                )
+                
                 if session.state not in (MovementState.MOVING, MovementState.PAUSED):
+                    logger.debug(f"[剩余路径检测] 跳过非移动状态会话: {session.state}")
                     continue
                 
                 # 计算剩余路径：当前位置到终点
                 remaining_route = session.route[session.current_segment_index:]
                 if len(remaining_route) < 2:
+                    logger.debug(f"[剩余路径检测] 剩余路径点不足: {len(remaining_route)}")
                     continue
                 
                 # 构建剩余路径的 WKT LINESTRING
@@ -758,6 +946,8 @@ class RiskAreaService:
                             "entity_id": str(session.entity_id),
                             "entity_type": session.entity_type.value,
                             "resource_id": str(session.resource_id) if session.resource_id else None,
+                            "task_id": str(session.task_id) if session.task_id else None,
+                            "team_id": str(session.team_id) if session.team_id else None,
                             "current_segment": session.current_segment_index,
                             "total_segments": len(session.route),
                             "remaining_distance_m": session.total_distance_m - session.traveled_distance_m,

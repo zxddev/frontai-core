@@ -58,6 +58,9 @@ async def login(
             roleName=role_name,
             realName=result.user.real_name,
             permissions=result.user.permissions,
+            teamId=str(result.user.team_id) if result.user.team_id else None,
+            teamName=result.user.team_name,
+            teamPosition=result.user.team_position,
         )
         
         login_response = LoginResponse(

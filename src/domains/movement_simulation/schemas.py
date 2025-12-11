@@ -69,11 +69,13 @@ class Waypoint(BaseModel):
 class MovementSession(BaseModel):
     """移动会话状态"""
     model_config = ConfigDict(from_attributes=True)
-    
+
     session_id: str = Field(..., description="会话唯一标识")
     entity_id: UUID = Field(..., description="地图实体ID")
     entity_type: EntityType = Field(..., description="实体类型")
     resource_id: Optional[UUID] = Field(None, description="资源ID（车辆/队伍/设备）")
+    task_id: Optional[UUID] = Field(None, description="关联任务ID")
+    team_id: Optional[UUID] = Field(None, description="关联队伍ID")
     
     # 路径信息
     route: list[Point] = Field(..., description="路径点序列")
@@ -127,6 +129,8 @@ class MovementStartRequest(BaseModel):
     entity_id: UUID = Field(..., description="地图实体ID")
     entity_type: EntityType = Field(..., description="实体类型")
     resource_id: Optional[UUID] = Field(None, description="资源ID（用于获取速度）")
+    task_id: Optional[UUID] = Field(None, description="关联任务ID")
+    team_id: Optional[UUID] = Field(None, description="关联队伍ID")
     route: list[list[float]] = Field(..., min_length=2, description="路径 [[lng,lat], ...]")
     speed_mps: Optional[float] = Field(None, gt=0, description="覆盖速度（米/秒）")
     waypoints: list[Waypoint] = Field(default_factory=list, description="任务停靠点")
@@ -228,23 +232,27 @@ class LocationUpdatePayload(BaseModel):
 class TeamDispatchRequest(BaseModel):
     """救援队伍调度请求"""
     destination: list[float] = Field(
-        ..., 
-        min_length=2, 
-        max_length=2, 
+        ...,
+        min_length=2,
+        max_length=2,
         description="目标位置 [经度, 纬度]（GCJ02火星坐标系）"
     )
     waypoints: list[Waypoint] = Field(
-        default_factory=list, 
+        default_factory=list,
         description="任务停靠点列表"
     )
     speed_mps: Optional[float] = Field(
-        None, 
-        gt=0, 
+        None,
+        gt=0,
         description="覆盖速度（米/秒），不指定则使用队伍默认速度"
     )
     scenario_id: Optional[UUID] = Field(
-        None, 
+        None,
         description="场景ID，用于关联地图实体和灾害避障查询"
+    )
+    task_id: Optional[UUID] = Field(
+        None,
+        description="关联任务ID，用于风险检测时关联绕行方案"
     )
     use_internal_routing: bool = Field(
         False,

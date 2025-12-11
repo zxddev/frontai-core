@@ -368,6 +368,98 @@ CAPABILITY_COORDINATION_ADVICE: Dict[str, Dict[str, str]] = {
         "agency": "应急物资储备中心、红十字会",
         "hotline": "市应急局物资调度",
     },
+    # 疏散类 (evacuation)
+    "EVACUATION_COORDINATION": {
+        "name": "疏散协调",
+        "agency": "应急管理局、民政局、社区街道",
+        "hotline": "12345/市应急局",
+    },
+    "SHELTER_MANAGEMENT": {
+        "name": "安置点管理",
+        "agency": "民政局、红十字会",
+        "hotline": "12345/市民政局",
+    },
+    # 指挥类 (command)
+    "COMMAND_COORDINATION": {
+        "name": "指挥协调",
+        "agency": "应急指挥中心、现场指挥部",
+        "hotline": "市应急指挥热线",
+    },
+    # 搜索类补充 (search)
+    "UAV_THERMAL": {
+        "name": "无人机热成像",
+        "agency": "消防特勤站、森林消防、无人机分队",
+        "hotline": "119",
+    },
+    "LIFE_DETECTION": {
+        "name": "生命探测",
+        "agency": "消防特勤站、USAR城市搜救队",
+        "hotline": "119",
+    },
+    # 医疗类补充 (medical)
+    "CPR_AED": {
+        "name": "心肺复苏",
+        "agency": "急救中心、红十字会",
+        "hotline": "120",
+    },
+    "TRAUMA_CARE": {
+        "name": "创伤护理",
+        "agency": "三甲医院创伤中心",
+        "hotline": "120",
+    },
+    "EMERGENCY_TREATMENT": {
+        "name": "紧急救治",
+        "agency": "急救中心、现场医疗队",
+        "hotline": "120",
+    },
+    # 危化品类补充 (hazmat)
+    "CHEMICAL_FIRE": {
+        "name": "化学火灾扑救",
+        "agency": "消防特勤站、危化品专职消防队",
+        "hotline": "119",
+    },
+    "HAZMAT_CONTAINMENT": {
+        "name": "危化品围堵",
+        "agency": "危化品应急救援中心、消防特勤站",
+        "hotline": "119/12369",
+    },
+    "HAZMAT_DETECTION": {
+        "name": "危化品检测",
+        "agency": "环境监测站、危化品检测机构",
+        "hotline": "12369",
+    },
+    "DECONTAMINATION": {
+        "name": "洗消去污",
+        "agency": "疾控中心、专业洗消队伍、环保部门",
+        "hotline": "12369/12320",
+    },
+    # 救援类补充 (rescue)
+    "STRUCTURAL_RESCUE": {
+        "name": "结构救援",
+        "agency": "消防特勤站、USAR城市搜救队",
+        "hotline": "119",
+    },
+    # 保障类补充 (logistics)
+    "SUPPLY_TRANSPORT": {
+        "name": "物资运输",
+        "agency": "应急物资储备中心、交通运输局",
+        "hotline": "市应急局物资调度",
+    },
+    "COMMUNICATION_SUPPORT": {
+        "name": "通信保障",
+        "agency": "无线电管理局、通信管理局",
+        "hotline": "市应急通信保障热线",
+    },
+    "POWER_EMERGENCY": {
+        "name": "应急供电",
+        "agency": "供电公司应急抢修队",
+        "hotline": "95598",
+    },
+    "LIGHTING_MOBILE": {
+        "name": "移动照明",
+        "agency": "消防救援支队、供电公司",
+        "hotline": "119/95598",
+    },
 }
 
 
@@ -1368,6 +1460,7 @@ def _run_nsga2_optimization(
                 "resource_id": cand["resource_id"],
                 "resource_name": cand["resource_name"],
                 "resource_type": cand["resource_type"],
+                "base_address": cand.get("base_address", ""),
                 "assigned_capabilities": list(assignable_caps) if assignable_caps else cand["capabilities"],
                 "match_score": cand["match_score"],
                 "distance_km": cand["distance_km"],
@@ -1375,8 +1468,8 @@ def _run_nsga2_optimization(
                 "rescue_capacity": cand_capacity,
                 "task_start": (event_lng, event_lat),
                 "resource_state": {
-                    "current_position": (cand.get("base_lng", 0), cand.get("base_lat", 0)),
-                    "home_position": (cand.get("base_lng", 0), cand.get("base_lat", 0)),
+                    "current_position": (cand.get("base_lng") or 0, cand.get("base_lat") or 0),
+                    "home_position": (cand.get("base_lng") or 0, cand.get("base_lat") or 0),
                     "remaining_capacity": float(cand_capacity),
                     "max_range": 100.0,
                     "current_task_progress": 0.0,
@@ -1902,6 +1995,8 @@ def _calculate_match_scores(
             "vehicle_name": team.get("vehicle_name"),
             "capability_level": capability_level,
             "base_address": team.get("base_address", ""),
+            "base_lng": team.get("base_lng"),
+            "base_lat": team.get("base_lat"),
             "personnel": team.get("available_personnel") or team.get("total_personnel", 0),
         }
         candidates.append(candidate)
@@ -2111,15 +2206,17 @@ def _enrich_allocations_with_task_descriptions(
         tasks = resource_tasks.get(resource_id, [])
         
         if tasks:
-            # 生成任务描述：如 "负责危化品泄漏侦检(EM20)、堵漏处置(EM21)"
-            task_parts = [f"{t['task_name']}({t['task_id']})" for t in tasks]
+            # 生成任务描述：如 "负责危化品泄漏侦检、堵漏处置"
+            task_parts = [t['task_name'] for t in tasks]
             alloc["task_description"] = "负责" + "、".join(task_parts)
             alloc["assigned_tasks"] = [{"task_id": t["task_id"], "task_name": t["task_name"]} for t in tasks]
         else:
             # 没有分配任务的队伍（可能是能力冗余备份）
             caps = alloc.get("assigned_capabilities", [])
             if caps:
-                alloc["task_description"] = f"提供{caps[0]}等能力支援"
+                # 将能力代码转换为中文名称（最多显示3个）
+                cap_names = [_get_capability_name(c) for c in caps[:3]]
+                alloc["task_description"] = f"提供{'、'.join(cap_names)}能力支援"
             else:
                 alloc["task_description"] = "综合救援支援"
             alloc["assigned_tasks"] = []
@@ -2209,6 +2306,7 @@ def _generate_greedy_solution(
                 "resource_id": candidate["resource_id"],
                 "resource_name": candidate["resource_name"],
                 "resource_type": candidate["resource_type"],
+                "base_address": candidate.get("base_address", ""),
                 "assigned_capabilities": list(effective_caps),
                 "match_score": candidate["match_score"],
                 "distance_km": candidate["distance_km"],
@@ -2216,8 +2314,8 @@ def _generate_greedy_solution(
                 "rescue_capacity": candidate_capacity,
                 "task_start": (event_lng, event_lat),
                 "resource_state": {
-                    "current_position": (candidate.get("base_lng", 0), candidate.get("base_lat", 0)),
-                    "home_position": (candidate.get("base_lng", 0), candidate.get("base_lat", 0)),
+                    "current_position": (candidate.get("base_lng") or 0, candidate.get("base_lat") or 0),
+                    "home_position": (candidate.get("base_lng") or 0, candidate.get("base_lat") or 0),
                     "remaining_capacity": float(candidate_capacity),
                     "max_range": 100.0,
                     "current_task_progress": 0.0,
@@ -2279,6 +2377,7 @@ def _generate_greedy_solution(
                     "resource_id": candidate["resource_id"],
                     "resource_name": candidate["resource_name"],
                     "resource_type": candidate["resource_type"],
+                    "base_address": candidate.get("base_address", ""),
                     "assigned_capabilities": list(can_backup),
                     "match_score": candidate["match_score"],
                     "distance_km": candidate["distance_km"],
@@ -2286,8 +2385,8 @@ def _generate_greedy_solution(
                     "rescue_capacity": candidate_capacity,
                     "task_start": (event_lng, event_lat),
                     "resource_state": {
-                        "current_position": (candidate.get("base_lng", 0), candidate.get("base_lat", 0)),
-                        "home_position": (candidate.get("base_lng", 0), candidate.get("base_lat", 0)),
+                        "current_position": (candidate.get("base_lng") or 0, candidate.get("base_lat") or 0),
+                        "home_position": (candidate.get("base_lng") or 0, candidate.get("base_lat") or 0),
                         "remaining_capacity": float(candidate_capacity),
                         "max_range": 100.0,
                         "current_task_progress": 0.0,

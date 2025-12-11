@@ -333,6 +333,62 @@ class SafePointFacilities(BaseModel):
     ground_stability: str = "unknown"
 
 
+class ScoreBreakdown(BaseModel):
+    """
+    评分详情
+
+    基于 GIS-AHP-TOPSIS 多准则决策方法的5维度评分
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    hazard_risk: float = Field(
+        0.0,
+        ge=0,
+        le=1,
+        description="灾害风险评分 (0-1)，权重35%"
+    )
+    terrain: float = Field(
+        0.0,
+        ge=0,
+        le=1,
+        description="地形安全评分 (0-1)，权重25%"
+    )
+    accessibility: float = Field(
+        0.0,
+        ge=0,
+        le=1,
+        description="可达性评分 (0-1)，权重20%"
+    )
+    facility: float = Field(
+        0.0,
+        ge=0,
+        le=1,
+        description="设施条件评分 (0-1)，权重15%"
+    )
+    communication: float = Field(
+        0.0,
+        ge=0,
+        le=1,
+        description="通信质量评分 (0-1)，权重5%"
+    )
+
+
+class HazardDistances(BaseModel):
+    """
+    到各类灾害区的距离
+
+    分类记录到不同类型灾害区域的最近距离
+    """
+    model_config = ConfigDict(populate_by_name=True)
+
+    landslide: Optional[float] = Field(None, description="距滑坡区距离(m)")
+    debris_flow: Optional[float] = Field(None, description="距泥石流区距离(m)")
+    flooded: Optional[float] = Field(None, description="距洪水区距离(m)")
+    fire: Optional[float] = Field(None, description="距火灾区距离(m)")
+    dammed_lake: Optional[float] = Field(None, description="距堰塞湖影响区距离(m)")
+    other_danger: Optional[float] = Field(None, description="距其他危险区距离(m)")
+
+
 class SafePointResult(BaseModel):
     """安全点位结果"""
     model_config = ConfigDict(populate_by_name=True)
@@ -351,6 +407,20 @@ class SafePointResult(BaseModel):
     facilities: SafePointFacilities = Field(default_factory=SafePointFacilities)
     nearest_supply_depot_m: Optional[float] = None
     nearest_medical_point_m: Optional[float] = None
+
+    # 新增字段 - 评分详情和风险提示
+    score_breakdown: Optional[ScoreBreakdown] = Field(
+        None,
+        description="各维度评分详情"
+    )
+    risk_warnings: List[str] = Field(
+        default_factory=list,
+        description="风险提示列表"
+    )
+    hazard_distances: Optional[HazardDistances] = Field(
+        None,
+        description="到各类灾害区的距离"
+    )
 
 
 class FindSafePointResponse(BaseModel):

@@ -250,6 +250,40 @@ class EntityRepository:
             return json.loads(geojson_str)
         return {}
     
+    async def find_by_task_and_type(
+        self,
+        task_id: UUID,
+        entity_type: str,
+        team_id: Optional[UUID] = None,
+    ) -> Optional[Entity]:
+        """
+        根据 task_id 和实体类型查询实体
+        
+        通过 properties JSONB 字段中的 task_id 匹配
+        
+        Args:
+            task_id: 任务ID
+            entity_type: 实体类型（如 planned_route）
+            team_id: 队伍ID（可选，用于精确匹配）
+            
+        Returns:
+            匹配的实体，如果有多个返回最新创建的
+        """
+        query = (
+            select(Entity)
+            .where(Entity.deleted_at.is_(None))
+            .where(Entity.type == entity_type)
+            .where(Entity.properties["task_id"].astext == str(task_id))
+        )
+        
+        if team_id:
+            query = query.where(Entity.properties["team_id"].astext == str(team_id))
+        
+        query = query.order_by(Entity.created_at.desc())
+        
+        result = await self._db.execute(query)
+        return result.scalar_one_or_none()
+    
     # ==================== 轨迹相关方法 ====================
     
     async def add_track_point(

@@ -308,5 +308,6 @@ class TaskService:
             completion_summary=assignment.completion_summary,
             assigned_at=assignment.assigned_at,
             accepted_at=assignment.accepted_at,
+            started_at=assignment.started_at,
             completed_at=assignment.completed_at,
         )

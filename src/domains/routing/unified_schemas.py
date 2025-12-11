@@ -187,7 +187,8 @@ class GenerateAlternativesResponse(BaseModel):
 class ConfirmRouteByIdRequest(BaseModel):
     """按ID确认路径请求"""
     route_id: UUID = Field(..., description="选中的路径ID")
-    task_id: UUID = Field(..., description="任务ID")
+    task_id: Optional[UUID] = Field(default=None, description="任务ID（可选，无任务场景时为空）")
+    team_id: Optional[UUID] = Field(default=None, description="队伍ID（可选，用于精确匹配多队伍任务的路径实体）")
 
 
 class PlannedRouteResponse(BaseModel):

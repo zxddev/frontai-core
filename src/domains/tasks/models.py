@@ -92,6 +92,7 @@ class Task(Base):
         String(50), 
         nullable=False, 
         default='created',
+        # 状态流转：created -> assigned -> accepted -> in_progress -> paused/completed/failed/cancelled
         comment="状态: created/assigned/accepted/in_progress/paused/completed/failed/cancelled"
     )
     
@@ -245,6 +246,7 @@ class TaskAssignment(Base):
         String(50), 
         nullable=False, 
         default='pending',
+        # 状态流转：pending -> accepted -> in_progress -> completed/failed/cancelled；或 pending -> rejected
         comment="状态: pending/accepted/rejected/in_progress/completed/cancelled"
     )
     rejection_reason: Optional[str] = Column(

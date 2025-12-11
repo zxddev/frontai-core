@@ -16,7 +16,7 @@ from src.core.exceptions import NotFoundError, ValidationError, ConflictError
 
 from .models import User, Organization, OperationLog
 from .repository import UserRepository, OrganizationRepository, OperationLogRepository
-from .schemas import UserCreate, UserUpdate, UserResponse, UserListResponse, CurrentUserResponse
+from .schemas import UserCreate, UserUpdate, UserResponse, UserListResponse, CurrentUserResponse, DeviceTokenRegister, DeviceTokenResponse
 from src.domains.auth.repository import RoleRepository, UserRoleRepository, PermissionRepository
 from src.domains.auth.schemas import RoleInfo
 
@@ -267,11 +267,11 @@ class UserService:
         user = await self.user_repo.get_by_id(user_id)
         if not user:
             raise NotFoundError(message="用户不存在")
-        
+
         user.status = 'active'
         user = await self.user_repo.update(user)
         await self.session.commit()
-        
+
         await self._log_operation(
             user_id=enabled_by,
             module='users',
@@ -280,8 +280,57 @@ class UserService:
             resource_id=user.id,
             description=f"启用用户: {user.username}",
         )
-        
+
         return await self._build_user_response(user)
+
+    async def register_device_token(
+        self,
+        data: DeviceTokenRegister,
+    ) -> DeviceTokenResponse:
+        """
+        注册设备推送Token
+
+        将设备Token存储到数据库，用于后续发送原生推送通知
+        使用UPSERT逻辑：同一用户+平台只保留最新Token
+        """
+        from sqlalchemy import text
+
+        logger.info(
+            f"[UserService] 注册设备Token: user_id={data.user_id}, "
+            f"platform={data.platform}, device={data.device_name}"
+        )
+
+        try:
+            upsert_sql = text("""
+                INSERT INTO operational_v2.user_device_tokens (
+                    user_id, expo_push_token, device_token, platform, device_name, updated_at
+                ) VALUES (
+                    :user_id, :expo_push_token, :device_token, :platform, :device_name, now()
+                )
+                ON CONFLICT (user_id, platform)
+                DO UPDATE SET
+                    expo_push_token = EXCLUDED.expo_push_token,
+                    device_token = EXCLUDED.device_token,
+                    device_name = EXCLUDED.device_name,
+                    updated_at = now()
+            """)
+
+            await self.session.execute(upsert_sql, {
+                "user_id": str(data.user_id),
+                "expo_push_token": data.expo_push_token,
+                "device_token": data.device_token,
+                "platform": data.platform,
+                "device_name": data.device_name,
+            })
+            await self.session.commit()
+
+            logger.info(f"[UserService] 设备Token注册成功: user_id={data.user_id}")
+            return DeviceTokenResponse(success=True, message="设备Token注册成功")
+
+        except Exception as e:
+            logger.error(f"[UserService] 设备Token注册失败: user_id={data.user_id}, error={e}")
+            await self.session.rollback()
+            return DeviceTokenResponse(success=False, message=f"注册失败: {str(e)}")
     
     async def _build_user_response(self, user: User) -> UserResponse:
         """构建用户响应"""

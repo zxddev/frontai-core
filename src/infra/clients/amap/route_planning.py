@@ -363,7 +363,9 @@ async def amap_route_planning_with_avoidance_async(
     }
     
     if avoid_polygons:
-        params["avoidpolygons"] = _format_avoidpolygons(avoid_polygons)
+        avoidpolygons_str = _format_avoidpolygons(avoid_polygons)
+        params["avoidpolygons"] = avoidpolygons_str
+        logger.info(f"[高德避障] avoidpolygons参数: {avoidpolygons_str[:200]}...")  # 打印前200字符
     
     if waypoints:
         wp_str = ";".join([f"{lon:.6f},{lat:.6f}" for lon, lat in waypoints[:16]])

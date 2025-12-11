@@ -217,7 +217,8 @@ class TaskRepository:
         return assignment
     
     async def start_assignment(self, assignment: TaskAssignment) -> TaskAssignment:
-        assignment.status = "executing"
+        # 与任务状态保持一致，使用 in_progress 而非 executing
+        assignment.status = "in_progress"
         assignment.started_at = datetime.utcnow()
         await self.db.flush()
         await self.db.refresh(assignment)

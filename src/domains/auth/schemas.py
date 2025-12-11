@@ -57,7 +57,7 @@ class RoleInfo(BaseModel):
 class UserInfo(BaseModel):
     """用户信息（Token中携带）"""
     model_config = ConfigDict(from_attributes=True)
-    
+
     id: UUID
     username: str
     real_name: str
@@ -68,6 +68,7 @@ class UserInfo(BaseModel):
     # 所属队伍信息（通过手机号匹配team_members_v2.contact_phone）
     team_id: Optional[UUID] = Field(None, description="所属队伍ID")
     team_name: Optional[str] = Field(None, description="所属队伍名称")
+    team_position: Optional[str] = Field(None, description="在队伍中的职位（如队长/副队长/队员）")
 
 
 class RoleCategory(str, Enum):

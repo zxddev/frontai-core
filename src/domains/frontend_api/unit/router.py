@@ -230,13 +230,20 @@ async def get_batch_task_status(
         if not team_uuids:
             return ApiResponse.success(BatchTaskStatusResponse(items=[]))
         
-        # 查询队伍基本信息
+        # 查询队伍基本信息（包含联系人）
         team_info_sql = text("""
-            SELECT id, name FROM operational_v2.rescue_teams_v2
+            SELECT id, name, contact_person, contact_phone
+            FROM operational_v2.rescue_teams_v2
             WHERE id = ANY(:team_ids)
         """)
         team_result = await db.execute(team_info_sql, {"team_ids": team_uuids})
-        team_map = {str(row[0]): row[1] for row in team_result.fetchall()}
+        team_map = {}
+        for row in team_result.fetchall():
+            team_map[str(row[0])] = {
+                "name": row[1] or "",
+                "contact_name": row[2] or "",
+                "contact_phone": row[3] or "",
+            }
         
         # 查询队伍当前执行的任务（pending/accepted/in_progress 状态）
         task_sql = text("""
@@ -272,13 +279,15 @@ async def get_batch_task_status(
         # 构建响应
         items = []
         for tid in request.teamIds:
-            team_name = team_map.get(tid, "")
+            team_info = team_map.get(tid, {})
             current_task = team_task_map.get(tid)
             items.append(TeamTaskStatus(
                 teamId=tid,
-                teamName=team_name,
+                teamName=team_info.get("name", ""),
                 hasTask=current_task is not None,
                 currentTask=current_task,
+                contactName=team_info.get("contact_name", ""),
+                contactPhone=team_info.get("contact_phone", ""),
             ))
         
         return ApiResponse.success(BatchTaskStatusResponse(items=items))

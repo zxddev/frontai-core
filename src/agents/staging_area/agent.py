@@ -120,17 +120,18 @@ class StagingAreaAgent:
     
     async def _run_graph(self, state: StagingAreaAgentState) -> StagingAreaAgentState:
         """
-        手动执行Graph流程（6节点完整版）
-        
+        手动执行Graph流程（7节点完整版）
+
         由于LangGraph节点需要db参数，这里手动编排执行。
-        
+
         流程（修正版）：
-        understand → search_candidates → [terrain | communication | safety] → evaluate → explain
-                                         ↑__________ 并行执行 __________↑
+        understand → poi_collection → search_candidates → [terrain | communication | safety] → evaluate → explain
+                                                          ↑__________ 并行执行 __________↑
         """
         import asyncio
         from src.agents.staging_area.nodes import (
             understand_disaster,
+            collect_poi_candidates,
             analyze_terrain,
             analyze_communication,
             analyze_safety,
@@ -142,15 +143,20 @@ class StagingAreaAgent:
         logger.info("[StagingAreaAgent] 执行灾情理解节点")
         understand_result = await understand_disaster(state, self._db)
         state = {**state, **understand_result}
-        
+
         # 检查是否继续
         errors = state.get("errors", [])
         critical_errors = [e for e in errors if "缺少" in e and ("scenario" in e or "震中" in e)]
         if critical_errors:
             logger.warning(f"[StagingAreaAgent] 关键参数缺失，终止流程: {critical_errors}")
             return state
-        
-        # 2. 先搜索候选点（为分析节点提供数据）
+
+        # 2. POI动态采集（当数据库候选点不足时自动从高德API采集）
+        logger.info("[StagingAreaAgent] 执行POI动态采集节点")
+        poi_result = await collect_poi_candidates(state, self._db)
+        state = {**state, **poi_result}
+
+        # 3. 搜索候选点（从数据库查询，与POI采集结果合并）
         logger.info("[StagingAreaAgent] 搜索候选点")
         candidate_sites = await self._search_candidate_sites(state)
         if candidate_sites:
@@ -159,7 +165,7 @@ class StagingAreaAgent:
         else:
             logger.warning("[StagingAreaAgent] 未找到候选点，跳过分析节点")
         
-        # 3. 并行执行分析节点（如果未跳过LLM分析且有候选点）
+        # 4. 并行执行分析节点（如果未跳过LLM分析且有候选点）
         if not state.get("skip_llm_analysis", False) and candidate_sites:
             logger.info("[StagingAreaAgent] 并行执行分析节点: terrain, communication, safety")
             
@@ -200,7 +206,7 @@ class StagingAreaAgent:
             else:
                 logger.info("[StagingAreaAgent] 无候选点，跳过分析节点")
         
-        # 4. 评估排序
+        # 5. 评估排序
         logger.info("[StagingAreaAgent] 执行评估排序节点")
         evaluate_result = await evaluate_candidates(state, self._db)
         state = {**state, **evaluate_result}
@@ -210,7 +216,7 @@ class StagingAreaAgent:
             logger.warning("[StagingAreaAgent] 无候选点，终止流程")
             return state
         
-        # 5. 决策解释
+        # 6. 决策解释
         logger.info("[StagingAreaAgent] 执行决策解释节点")
         explain_result = await explain_decision(state, self._db)
         state = {**state, **explain_result}

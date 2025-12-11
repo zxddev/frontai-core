@@ -740,8 +740,6 @@ async def car_start(
     from sqlalchemy import text
     from uuid import uuid5, NAMESPACE_DNS
     from src.core.coord_transform import wgs84_to_gcj02
-    from src.domains.routing.service import RoutePlanningService
-    from src.domains.routing.schemas import Point as RoutingPoint
     from src.domains.movement_simulation.service import get_movement_manager
     from src.domains.movement_simulation.schemas import MovementStartRequest, EntityType
     
@@ -780,29 +778,7 @@ async def car_start(
         logger.info(f"[car_start] 目的地: {dest_gcj}")
         
         # 3. 路径规划
-        routing_service = RoutePlanningService(db)
         origin_gcj = wgs84_to_gcj02(104.0668, 30.5728)  # 起点：成都市中心
-        origin = RoutingPoint(lon=origin_gcj[0], lat=origin_gcj[1])
-        destination = RoutingPoint(lon=dest_gcj[0], lat=dest_gcj[1])
-        
-        route: List[List[float]] = []
-        polyline: List[Dict[str, float]] = []
-        try:
-            route_result = await routing_service.plan_route(origin, destination)
-            if route_result.success and route_result.polyline:
-                route = [[p.lon, p.lat] for p in route_result.polyline]
-                polyline = [{"lon": p.lon, "lat": p.lat} for p in route_result.polyline]
-                logger.info(f"[car_start] 路径规划成功: {len(route)} 点, {route_result.total_distance_m/1000:.1f}km")
-        except Exception as route_err:
-            logger.error(f"[car_start] 路径规划失败: {route_err}")
-            return ApiResponse.error(40004, f"路径规划失败: {route_err}")
-        
-        if not route or len(route) < 2:
-            return ApiResponse.error(40005, "路径规划返回空路径")
-        
-        # 3.5 创建路径实体（让前端显示路径线）
-        from src.domains.map_entities.service import EntityService
-        from src.domains.map_entities.schemas import EntityCreate as MapEntityCreate, GeoJsonGeometry, EntityType as MapEntityType, EntitySource
         
         # 获取活动想定ID
         scenario_result = await db.execute(text("""
@@ -811,31 +787,40 @@ async def car_start(
         scenario_row = scenario_result.fetchone()
         scenario_id = scenario_row.id if scenario_row else None
         
+        # 3.5 使用 PlannedRouteService 规划并存储路径（支持风险检测和绕行）
+        from src.domains.routing.planned_route_service import PlannedRouteService
+        from src.domains.routing.schemas import Point as RoutePoint
+        
+        route_service = PlannedRouteService(db)
+        route: List[List[float]] = []
+        polyline: List[Dict[str, float]] = []
+        route_distance_m = 0.0
+        
         try:
-            entity_service = EntityService(db)
-            route_entity = await entity_service.create(MapEntityCreate(
-                type=MapEntityType.planned_route,
-                layer_code="layer.path",
-                geometry=GeoJsonGeometry(
-                    type="LineString",
-                    coordinates=route,
-                ),
-                properties={
-                    "name": "车队出发路径",
-                    "type": "rescue",
-                    "isSelect": "1",
-                    "deviceType": "car",
-                    "routeType": "rescue",
-                    "distance_m": route_result.total_distance_m,
-                    "event_id": str(event_id),
-                },
-                source=EntitySource.system,
-                visible_on_map=True,
+            plan_result = await route_service.plan_and_save(
+                device_id=vehicles[0].id,  # 使用第一辆车作为设备ID
+                origin=RoutePoint(lon=origin_gcj[0], lat=origin_gcj[1]),
+                destination=RoutePoint(lon=dest_gcj[0], lat=dest_gcj[1]),
+                vehicle_id=vehicles[0].id,
                 scenario_id=scenario_id,
-            ))
-            logger.info(f"[car_start] 路径实体已创建: entity_id={route_entity.id}")
-        except Exception as entity_err:
-            logger.warning(f"[car_start] 创建路径实体失败（不影响移动）: {entity_err}")
+            )
+            
+            if plan_result.get("success") and plan_result.get("route", {}).get("polyline"):
+                route_data = plan_result["route"]["polyline"]
+                route = [[p["lon"], p["lat"]] for p in route_data]
+                polyline = route_data
+                route_distance_m = plan_result["route"].get("total_distance_m", 0)
+                logger.info(f"[car_start] 路径规划成功: {len(route)} 点, {route_distance_m/1000:.1f}km, route_id={plan_result.get('route_id')}")
+            else:
+                error_msg = plan_result.get("error", "未知错误")
+                logger.error(f"[car_start] 路径规划失败: {error_msg}")
+                return ApiResponse.error(40004, f"路径规划失败: {error_msg}")
+        except Exception as route_err:
+            logger.error(f"[car_start] 路径规划失败: {route_err}")
+            return ApiResponse.error(40004, f"路径规划失败: {route_err}")
+        
+        if not route or len(route) < 2:
+            return ApiResponse.error(40005, "路径规划返回空路径")
         
         # 4. 直接启动移动仿真（跳过动员服务）
         manager = await get_movement_manager()

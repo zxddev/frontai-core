@@ -94,6 +94,8 @@ class TeamTaskStatus(BaseModel):
     teamName: str = Field("", description="队伍名称")
     hasTask: bool = Field(False, description="是否有执行中的任务")
     currentTask: Optional[CurrentTaskInfo] = Field(None, description="当前任务信息")
+    contactName: str = Field("", description="联系人姓名")
+    contactPhone: str = Field("", description="联系人电话")
 
 
 class BatchTaskStatusResponse(BaseModel):

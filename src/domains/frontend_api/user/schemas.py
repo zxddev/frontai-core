@@ -28,6 +28,9 @@ class UserInfo(BaseModel):
     roleName: str = Field(..., description="角色名称")
     realName: Optional[str] = Field(None, description="真实姓名")
     permissions: list[str] = Field(default_factory=list, description="权限列表")
+    teamId: Optional[str] = Field(None, description="所属队伍ID")
+    teamName: Optional[str] = Field(None, description="所属队伍名称")
+    teamPosition: Optional[str] = Field(None, description="在队伍中的职位")
 
 
 class LoginResponse(BaseModel):

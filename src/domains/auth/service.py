@@ -29,27 +29,67 @@ from src.domains.users.repository import UserRepository
 logger = logging.getLogger(__name__)
 
 
-async def _get_team_by_phone(session: AsyncSession, phone: str) -> tuple[Optional[UUID], Optional[str]]:
+async def _get_team_by_phone(session: AsyncSession, phone: str) -> tuple[Optional[UUID], Optional[str], Optional[str]]:
     """
-    通过手机号查询所属队伍
-    
-    查询逻辑：team_members_v2.contact_phone → team_id → rescue_teams_v2.name
-    
+    通过手机号查询所属队伍及职位
+
+    查询优先级:
+    1. team_members_v2.contact_phone (队员表，优先匹配)
+    2. rescue_teams_v2.contact_phone (队伍联系人，即队长)
+
     Returns:
-        (team_id, team_name) 或 (None, None)
+        (team_id, team_name, position) 或 (None, None, None)
     """
-    sql = text("""
-        SELECT t.id, t.name 
+    # 优先查询队员表
+    sql_member = text("""
+        SELECT t.id, t.name, m.position
         FROM operational_v2.team_members_v2 m
         JOIN operational_v2.rescue_teams_v2 t ON m.team_id = t.id
         WHERE m.contact_phone = :phone
         LIMIT 1
     """)
-    result = await session.execute(sql, {"phone": phone})
+    result = await session.execute(sql_member, {"phone": phone})
     row = result.fetchone()
     if row:
-        return row.id, row.name
-    return None, None
+        logger.debug(f"通过 team_members_v2 匹配到队伍: phone={phone}, team={row.name}, position={row.position}")
+        return row.id, row.name, row.position
+
+    # 查询队伍联系人（队长）
+    sql_leader = text("""
+        SELECT id, name
+        FROM operational_v2.rescue_teams_v2
+        WHERE contact_phone = :phone
+        LIMIT 1
+    """)
+    result = await session.execute(sql_leader, {"phone": phone})
+    row = result.fetchone()
+    if row:
+        logger.debug(f"通过 rescue_teams_v2.contact_phone 匹配到队伍: phone={phone}, team={row.name}")
+        return row.id, row.name, "队长"
+
+    return None, None, None
+
+
+async def _get_team_by_user(session: AsyncSession, user_id: UUID, phone: Optional[str]) -> tuple[Optional[UUID], Optional[str], Optional[str]]:
+    """
+    通过用户ID或手机号查询所属队伍及职位
+
+    查询优先级:
+    1. 通过手机号匹配 team_members_v2.contact_phone
+    2. 通过手机号匹配 rescue_teams_v2.contact_phone（队长）
+
+    Args:
+        session: 数据库会话
+        user_id: 用户ID
+        phone: 用户手机号
+
+    Returns:
+        (team_id, team_name, position) 或 (None, None, None)
+    """
+    if not phone:
+        return None, None, None
+
+    return await _get_team_by_phone(session, phone)
 
 
 class AuthService:
@@ -65,30 +105,30 @@ class AuthService:
     async def login(self, username: str, password: str) -> TokenResponse:
         """
         用户登录
-        
+
         Raises:
             AuthenticationError: AU4001 用户名或密码错误
             AuthorizationError: AU4002 用户已禁用
         """
         user = await self.user_repo.get_by_username(username)
-        
+
         if not user:
             logger.warning(f"登录失败：用户不存在 {username}")
             raise AuthenticationError(code="AU4001", message="用户名或密码错误")
-        
+
         if user.status != 'active':
             logger.warning(f"登录失败：用户已禁用 {username}")
             raise AuthorizationError(code="AU4002", message="用户已禁用")
-        
+
         if not user.password_hash or not verify_password(password, user.password_hash):
             logger.warning(f"登录失败：密码错误 {username}")
             raise AuthenticationError(code="AU4001", message="用户名或密码错误")
-        
+
         # 获取用户角色和权限
         roles = await self.role_repo.get_user_roles(user.id)
         role_codes = [r.code for r in roles]
         permissions = await self.perm_repo.get_user_permissions(user.id)
-        
+
         # 生成Token
         access_token = create_access_token(
             user_id=user.id,
@@ -97,21 +137,33 @@ class AuthService:
             permissions=permissions,
         )
         refresh_token = create_refresh_token(user_id=user.id)
-        
+
         # 更新最后登录时间
         await self.user_repo.update_last_login(user.id)
         await self.session.commit()
-        
+
+        # 查询所属队伍（通过手机号匹配team_members_v2.contact_phone）
+        team_id, team_name, team_position = await _get_team_by_user(self.session, user.id, user.phone)
+        if team_id:
+            logger.info(f"用户 {username} 所属队伍: {team_name} ({team_id}), 职位: {team_position}")
+        else:
+            logger.debug(f"用户 {username} 未关联队伍")
+
         # 构造响应
         role_infos = [RoleInfo(id=r.id, code=r.code, name=r.name) for r in roles]
         user_info = UserInfo(
             id=user.id,
             username=user.username,
             real_name=user.real_name,
+            phone=user.phone,
+            user_type=user.user_type,
             roles=role_infos,
             permissions=permissions,
+            team_id=team_id,
+            team_name=team_name,
+            team_position=team_position,
         )
-        
+
         return TokenResponse(
             access_token=access_token,
             refresh_token=refresh_token,
@@ -186,12 +238,12 @@ class AuthService:
         await self.session.commit()
         
         # 查询所属队伍（通过手机号匹配team_members_v2.contact_phone）
-        team_id, team_name = await _get_team_by_phone(self.session, phone)
+        team_id, team_name, team_position = await _get_team_by_phone(self.session, phone)
         if team_id:
-            logger.info(f"用户 {phone} 所属队伍: {team_name} ({team_id})")
+            logger.info(f"用户 {phone} 所属队伍: {team_name} ({team_id}), 职位: {team_position}")
         else:
             logger.info(f"用户 {phone} 未关联队伍（team_members表无匹配记录）")
-        
+
         # 构造响应
         role_infos = [RoleInfo(id=r.id, code=r.code, name=r.name) for r in roles]
         user_info = UserInfo(
@@ -204,9 +256,10 @@ class AuthService:
             permissions=permissions,
             team_id=team_id,
             team_name=team_name,
+            team_position=team_position,
         )
-        
-        logger.info(f"手机号登录成功: {user.id}, phone={phone}, team={team_name or '无'}")
+
+        logger.info(f"手机号登录成功: {user.id}, phone={phone}, team={team_name or '无'}, position={team_position or '无'}")
         return TokenResponse(
             access_token=access_token,
             refresh_token=refresh_token,
@@ -251,22 +304,29 @@ class AuthService:
         }
     
     async def get_user_info(self, user_id: UUID) -> UserInfo:
-        """获取用户信息"""
+        """获取用户信息（含队伍关联）"""
         user = await self.user_repo.get_by_id(user_id)
         if not user:
             raise NotFoundError(message="用户不存在")
-        
+
         roles = await self.role_repo.get_user_roles(user.id)
         permissions = await self.perm_repo.get_user_permissions(user.id)
-        
         role_infos = [RoleInfo(id=r.id, code=r.code, name=r.name) for r in roles]
-        
+
+        # 查询所属队伍
+        team_id, team_name, team_position = await _get_team_by_user(self.session, user.id, user.phone)
+
         return UserInfo(
             id=user.id,
             username=user.username,
             real_name=user.real_name,
+            phone=user.phone,
+            user_type=user.user_type,
             roles=role_infos,
             permissions=permissions,
+            team_id=team_id,
+            team_name=team_name,
+            team_position=team_position,
         )
     
     async def assign_role(

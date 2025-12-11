@@ -294,24 +294,56 @@ async def _get_latest_plan_content(
     "/modules",
     response_model=ModulesResponse,
     summary="获取AI生成的8个模块内容",
-    description="同步调用AI生成总体救灾方案的8个模块内容，自动获取当前生效的想定",
+    description="同步调用AI生成总体救灾方案的8个模块内容，自动获取当前生效的想定。支持refresh参数强制重新生成。",
 )
 async def get_modules(
+    refresh: bool = False,
     db: AsyncSession = Depends(get_db),
     agent: OverallPlanAgent = Depends(get_agent),
 ) -> ModulesResponse:
     """同步生成8个模块内容
-    
+
     业务流程：
     1. 自动获取当前生效的想定（status='active'）
-    2. 调用AI生成8个模块内容
-    3. 等待生成完成（最多10分钟）
-    4. 返回modules数组供前端展示和编辑
+    2. 如果refresh=False且存在缓存，直接返回缓存数据
+    3. 如果refresh=True或无缓存，调用AI生成8个模块内容
+    4. 等待生成完成（最多10分钟）
+    5. 生成完成后自动保存到数据库
+    6. 返回modules数组供前端展示和编辑
+
+    Args:
+        refresh: 是否强制重新生成（默认False，优先使用缓存）
     """
     import asyncio
-    
+
     scenario_id = await get_active_scenario_id(db)
-    logger.info(f"Generating modules for active scenario {scenario_id}")
+
+    # 如果不是强制刷新，先尝试从数据库获取缓存
+    if not refresh:
+        cached_result = await _get_latest_overall_plan(db, scenario_id)
+        if cached_result:
+            plan_id, plan_data, created_at = cached_result
+            modules_data = plan_data.get("modules", [])
+            if modules_data:
+                logger.info(
+                    f"[OverallPlan] 返回缓存数据",
+                    extra={"plan_id": plan_id, "scenario_id": scenario_id, "created_at": created_at},
+                )
+                # 转换为PlanModuleItem格式
+                modules = [
+                    PlanModuleItem(
+                        index=idx,
+                        title=m.get("title", f"模块{idx}"),
+                        value=m.get("value", ""),
+                    )
+                    for idx, m in enumerate(modules_data)
+                ]
+                return ModulesResponse(
+                    modules=modules,
+                    scenario_id=scenario_id,
+                )
+
+    logger.info(f"Generating modules for active scenario {scenario_id} (refresh={refresh})")
     
     try:
         # 调用agent触发生成
@@ -330,11 +362,22 @@ async def get_modules(
             if status_result.status == "awaiting_approval":
                 logger.info(f"Modules ready for scenario {scenario_id}")
                 if status_result.modules:
+                    # 自动保存AI生成的结果到数据库
+                    modules_to_save = [
+                        {"title": m.title, "value": m.value}
+                        for m in status_result.modules
+                    ]
+                    try:
+                        await _save_overall_plan(db, scenario_id, modules_to_save)
+                        logger.info(f"[OverallPlan] AI生成结果已自动保存到数据库")
+                    except Exception as save_err:
+                        logger.warning(f"[OverallPlan] 自动保存失败: {save_err}")
+
                     return ModulesResponse(
                         modules=status_result.modules,
                         scenario_id=scenario_id,
                     )
-            
+
             # 如果失败，立即返回错误
             if status_result.status == "failed":
                 errors = status_result.errors or ["Unknown error"]
@@ -342,10 +385,21 @@ async def get_modules(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"生成失败: {'; '.join(errors)}",
                 )
-            
+
             # 如果已完成，返回modules
             if status_result.status == "completed":
                 if status_result.modules:
+                    # 自动保存AI生成的结果到数据库
+                    modules_to_save = [
+                        {"title": m.title, "value": m.value}
+                        for m in status_result.modules
+                    ]
+                    try:
+                        await _save_overall_plan(db, scenario_id, modules_to_save)
+                        logger.info(f"[OverallPlan] AI生成结果已自动保存到数据库")
+                    except Exception as save_err:
+                        logger.warning(f"[OverallPlan] 自动保存失败: {save_err}")
+
                     return ModulesResponse(
                         modules=status_result.modules,
                         scenario_id=scenario_id,

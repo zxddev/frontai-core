@@ -134,6 +134,10 @@ class RiskDetectionService:
             logger.error(f"风险区域检测失败: {e}", exc_info=True)
             return []
     
+    # 高德API避障区域限制
+    MAX_AVOID_AREA_KM2: float = 80.0  # 每个区域最大81平方公里，保守取80
+    MAX_POLYGON_POINTS: int = 16  # 每个多边形最多16个顶点
+    
     async def get_risk_area_polygons(
         self,
         risk_area_ids: List[UUID],
@@ -141,6 +145,12 @@ class RiskDetectionService:
     ) -> List[List[tuple[float, float]]]:
         """
         获取风险区域的多边形坐标（用于避障规划）
+        
+        只查询 disaster_affected_areas_v2 表（风险区域唯一数据源）
+        
+        高德API限制：
+        - 每个避障区域不能超过81平方公里
+        - 每个多边形最多16个顶点
         
         Args:
             risk_area_ids: 风险区域ID列表
@@ -152,26 +162,42 @@ class RiskDetectionService:
         if not risk_area_ids:
             return []
         
-        # 根据是否有缓冲区选择不同的 SQL
+        # 查询多边形及其面积（平方公里）
         if buffer_meters > 0:
-            # 使用 ST_Buffer 扩大区域（需要先转换到投影坐标系）
-            # 注意：geometry 列是 geography 类型，需要先转换为 geometry
             sql = text("""
-                SELECT ST_AsText(
-                    ST_Transform(
-                        ST_Buffer(
-                            ST_Transform(geometry::geometry, 3857),
-                            :buffer_meters
-                        ),
-                        4326
-                    )
-                ) as wkt
+                SELECT 
+                    id,
+                    name,
+                    ST_AsText(
+                        ST_Transform(
+                            ST_Buffer(
+                                ST_Transform(geometry::geometry, 3857),
+                                :buffer_meters
+                            ),
+                            4326
+                        )
+                    ) as wkt,
+                    ST_Area(
+                        ST_Transform(
+                            ST_Buffer(
+                                ST_Transform(geometry::geometry, 3857),
+                                :buffer_meters
+                            ),
+                            4326
+                        )::geography
+                    ) / 1000000 as area_km2,
+                    ST_NPoints(geometry::geometry) as num_points
                 FROM operational_v2.disaster_affected_areas_v2
                 WHERE id = ANY(:ids)
             """)
         else:
             sql = text("""
-                SELECT ST_AsText(geometry::geometry) as wkt
+                SELECT 
+                    id,
+                    name,
+                    ST_AsText(geometry::geometry) as wkt,
+                    ST_Area(geometry::geography) / 1000000 as area_km2,
+                    ST_NPoints(geometry::geometry) as num_points
                 FROM operational_v2.disaster_affected_areas_v2
                 WHERE id = ANY(:ids)
             """)
@@ -184,16 +210,63 @@ class RiskDetectionService:
             rows = result.fetchall()
             
             polygons = []
-            for row in rows:
-                coords = self._parse_polygon_wkt(row.wkt)
-                if coords:
-                    polygons.append(coords)
+            skipped_count = 0
             
+            for row in rows:
+                area_km2 = row.area_km2 or 0
+                num_points = row.num_points or 0
+                
+                # 检查面积是否超过高德限制
+                if area_km2 > self.MAX_AVOID_AREA_KM2:
+                    logger.warning(
+                        f"[避障区域] 跳过超大区域: {row.name}, "
+                        f"面积={area_km2:.1f}km² (限制{self.MAX_AVOID_AREA_KM2}km²)"
+                    )
+                    skipped_count += 1
+                    continue
+                
+                coords = self._parse_polygon_wkt(row.wkt)
+                if not coords:
+                    continue
+                
+                # 如果顶点数超过限制，简化多边形（保留首尾和均匀采样）
+                if len(coords) > self.MAX_POLYGON_POINTS:
+                    logger.info(
+                        f"[避障区域] 简化多边形: {row.name}, "
+                        f"顶点数 {len(coords)} -> {self.MAX_POLYGON_POINTS}"
+                    )
+                    coords = self._simplify_polygon(coords, self.MAX_POLYGON_POINTS)
+                
+                polygons.append(coords)
+                logger.info(
+                    f"[避障区域] 添加: {row.name}, "
+                    f"面积={area_km2:.2f}km², 顶点数={len(coords)}"
+                )
+            
+            logger.info(
+                f"获取风险区域多边形: ids={len(risk_area_ids)}, "
+                f"有效={len(polygons)}, 跳过超大={skipped_count}"
+            )
             return polygons
             
         except Exception as e:
             logger.error(f"获取风险区域多边形失败: {e}", exc_info=True)
             return []
+    
+    @staticmethod
+    def _simplify_polygon(coords: List[tuple[float, float]], max_points: int) -> List[tuple[float, float]]:
+        """
+        简化多边形，保留首尾点和均匀采样的中间点
+        """
+        if len(coords) <= max_points:
+            return coords
+        
+        # 保留第一个点，均匀采样中间点，确保最后一个点（闭合）
+        step = (len(coords) - 1) / (max_points - 1)
+        indices = [int(i * step) for i in range(max_points - 1)]
+        indices.append(len(coords) - 1)  # 确保最后一个点
+        
+        return [coords[i] for i in indices]
     
     @staticmethod
     def _parse_polygon_wkt(wkt: str) -> List[tuple[float, float]]:

@@ -74,6 +74,7 @@ class EventCreate(BaseModel):
     media_attachments: Optional[list[dict[str, Any]]] = None
     confirmation_score: Optional[float] = Field(None, ge=0, le=1)
     is_main_event: bool = Field(False, description="是否为想定主事件")
+    auto_confirm: bool = Field(False, description="是否自动确认（前端手动创建的事件设为True）")
 
 
 class EventUpdate(BaseModel):

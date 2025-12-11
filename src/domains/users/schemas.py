@@ -131,7 +131,7 @@ class UserListResponse(BaseModel):
 class CurrentUserResponse(BaseModel):
     """当前用户响应"""
     model_config = ConfigDict(from_attributes=True)
-    
+
     id: UUID
     username: str
     real_name: str
@@ -144,3 +144,18 @@ class CurrentUserResponse(BaseModel):
     roles: list[RoleInfo]
     permissions: list[str]
     last_login_at: Optional[datetime]
+
+
+class DeviceTokenRegister(BaseModel):
+    """设备推送Token注册请求"""
+    user_id: UUID = Field(..., description="用户ID")
+    expo_push_token: Optional[str] = Field(None, max_length=500, description="Expo推送Token")
+    device_token: Optional[str] = Field(None, max_length=500, description="原生设备Token(FCM/APNs)")
+    platform: str = Field(..., max_length=20, description="平台类型: ios/android")
+    device_name: Optional[str] = Field(None, max_length=100, description="设备名称")
+
+
+class DeviceTokenResponse(BaseModel):
+    """设备Token响应"""
+    success: bool
+    message: str

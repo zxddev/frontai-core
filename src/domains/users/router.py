@@ -17,7 +17,7 @@ from src.core.dependencies import get_current_user, require_permission
 
 from .schemas import (
     UserCreate, UserUpdate, UserResponse, UserListResponse,
-    CurrentUserResponse, PasswordChange
+    CurrentUserResponse, PasswordChange, DeviceTokenRegister, DeviceTokenResponse
 )
 from .service import UserService
 
@@ -187,3 +187,28 @@ async def enable_user(
         user_id=user_id,
         enabled_by=UUID(current_user["sub"]),
     )
+
+
+@router.post(
+    "/device-token",
+    response_model=DeviceTokenResponse,
+    summary="注册设备推送Token",
+    description="APP端注册设备推送Token，用于原生推送通知",
+)
+async def register_device_token(
+    data: DeviceTokenRegister,
+    current_user: dict = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> DeviceTokenResponse:
+    """
+    注册设备推送Token
+
+    APP端调用此接口上报设备Token，后端存储后用于发送原生推送通知。
+    只允许为当前登录用户注册Token，防止越权注册。
+    """
+    current_user_id = UUID(current_user["sub"])
+    if data.user_id != current_user_id:
+        return DeviceTokenResponse(success=False, message="只能为当前登录用户注册设备Token")
+
+    service = UserService(session)
+    return await service.register_device_token(data)

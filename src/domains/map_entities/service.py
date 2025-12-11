@@ -105,51 +105,64 @@ class EntityService:
         scenario_id: Optional[UUID]
     ) -> None:
         """
-        当前端创建危险区域时，触发风险检测通知
-        
-        检测所有活跃路线和移动中的车辆是否穿过该危险区域
+        当前端创建危险区域时：
+        1. 同步到 disaster_affected_areas_v2 表（风险区域主表）
+        2. 触发风险检测通知
         """
         try:
-            from src.domains.frontend_api.risk_area.schemas import RiskAreaResponse
+            from src.domains.frontend_api.risk_area.schemas import (
+                RiskAreaResponse, RiskAreaCreateRequest, GeoJsonPolygon,
+                RiskAreaType, SeverityLevel, PassageStatus
+            )
+            from src.domains.frontend_api.risk_area.repository import RiskAreaRepository
             from src.domains.frontend_api.risk_area.service import RiskAreaService
             
-            # 构建一个类似 RiskAreaResponse 的对象
-            # 从 entity 的 properties 中提取风险信息
             props = entity.properties or {}
-            
-            # 创建一个模拟的 RiskAreaResponse
             risk_level = props.get('risk_level', 7)  # 默认高风险
-            passage_status = props.get('passage_status', 'needs_reconnaissance')
+            passage_status_str = props.get('passage_status', 'needs_reconnaissance')
             
-            # 根据风险等级确定严重程度
+            # 1. 将圆形（center + radius）转换为多边形
+            polygon_coords = self._circle_to_polygon(entity.geometry, props)
+            if not polygon_coords:
+                logger.warning(f"[危险区域同步] 无法转换几何数据: entity_id={entity.id}")
+                return
+            
+            # 2. 确定严重程度
             if risk_level >= 9:
-                severity = "critical"
+                severity = SeverityLevel.CRITICAL
             elif risk_level >= 7:
-                severity = "high"
+                severity = SeverityLevel.HIGH
             elif risk_level >= 5:
-                severity = "medium"
+                severity = SeverityLevel.MEDIUM
             else:
-                severity = "low"
+                severity = SeverityLevel.LOW
             
-            risk_area = RiskAreaResponse(
-                id=entity.id,
+            # 3. 写入 disaster_affected_areas_v2 表
+            repo = RiskAreaRepository(self._db)
+            request = RiskAreaCreateRequest(
                 scenario_id=scenario_id,
-                name=props.get('name', '前端绘制的危险区域'),
-                area_type=props.get('area_type', 'other'),
+                name=props.get('name') or props.get('locationName') or '前端绘制的危险区域',
+                area_type=RiskAreaType.DANGER_ZONE,
                 risk_level=risk_level,
                 severity=severity,
-                passage_status=passage_status,
-                passable=passage_status not in ('confirmed_blocked',),
-                passable_vehicle_types=None,
-                speed_reduction_percent=50 if passage_status == 'passable_with_caution' else 100,
-                reconnaissance_required=passage_status == 'needs_reconnaissance',
-                geometry_geojson=entity.geometry.model_dump() if entity.geometry else None,
+                passage_status=PassageStatus(passage_status_str) if passage_status_str in [e.value for e in PassageStatus] else PassageStatus.NEEDS_RECONNAISSANCE,
+                geometry=GeoJsonPolygon(type="Polygon", coordinates=[polygon_coords]),
+                passable=passage_status_str not in ('confirmed_blocked',),
+                passable_vehicle_types=[],
+                speed_reduction_percent=50 if passage_status_str == 'passable_with_caution' else 100,
+                reconnaissance_required=passage_status_str == 'needs_reconnaissance',
                 description=props.get('description', ''),
-                created_at=entity.created_at,
-                updated_at=entity.updated_at,
             )
             
-            # 调用风险区域服务的通知方法
+            risk_area_data = await repo.create(request)
+            risk_area = RiskAreaResponse(**risk_area_data)
+            
+            logger.info(
+                f"[危险区域同步] 已写入 disaster_affected_areas_v2: "
+                f"entity_id={entity.id}, risk_area_id={risk_area.id}"
+            )
+            
+            # 4. 触发风险检测通知
             risk_service = RiskAreaService(self._db)
             await risk_service._notify_risk_area_change(
                 risk_area=risk_area,
@@ -158,12 +171,64 @@ class EntityService:
             
             logger.info(
                 f"[危险区域风险检测] 已触发: entity_id={entity.id}, "
-                f"scenario_id={scenario_id}"
+                f"risk_area_id={risk_area.id}, scenario_id={scenario_id}"
             )
             
         except Exception as e:
-            # 风险检测失败不阻塞实体创建
-            logger.warning(f"[危险区域风险检测] 触发失败: {e}", exc_info=True)
+            # 同步失败不阻塞实体创建
+            logger.warning(f"[危险区域同步] 失败: {e}", exc_info=True)
+    
+    def _circle_to_polygon(
+        self, 
+        geometry: Optional[GeoJsonGeometry], 
+        props: dict,
+        num_points: int = 32
+    ) -> Optional[list]:
+        """
+        将圆形（center + radius）转换为近似多边形
+        
+        Args:
+            geometry: 几何对象（Point 类型，coordinates 为圆心）
+            props: 属性字典，包含 range（半径，米）
+            num_points: 多边形边数，默认32边形
+            
+        Returns:
+            多边形坐标列表 [[lng, lat], ...] 或 None
+        """
+        import math
+        
+        if not geometry:
+            return None
+        
+        geom_dict = geometry.model_dump() if hasattr(geometry, 'model_dump') else geometry
+        coords = geom_dict.get('coordinates', [])
+        radius = props.get('range', 0)
+        
+        # 如果已经是 Polygon，直接返回外环坐标
+        if geom_dict.get('type') == 'Polygon' and coords:
+            return coords[0] if coords else None
+        
+        # Point 类型，需要转换
+        if not coords or len(coords) < 2 or not radius:
+            logger.warning(f"[圆形转多边形] 参数不完整: coords={coords}, radius={radius}")
+            return None
+        
+        center_lng, center_lat = coords[0], coords[1]
+        
+        # 生成近似圆的多边形
+        points = []
+        for i in range(num_points):
+            angle = 2 * math.pi * i / num_points
+            # 米转经纬度（约111000米/度，经度需要考虑纬度因子）
+            dlng = (radius / 111000) * math.cos(angle) / math.cos(math.radians(center_lat))
+            dlat = (radius / 111000) * math.sin(angle)
+            points.append([center_lng + dlng, center_lat + dlat])
+        
+        # 闭合多边形
+        points.append(points[0])
+        
+        logger.info(f"[圆形转多边形] 转换完成: center=({center_lng}, {center_lat}), radius={radius}m, points={num_points}")
+        return points
     
     async def get_by_id(self, entity_id: UUID) -> EntityResponse:
         """根据ID获取实体"""
@@ -269,6 +334,30 @@ class EntityService:
             ))
         
         return results
+    
+    async def find_route_entity_by_task(
+        self,
+        task_id: UUID,
+        team_id: Optional[UUID] = None,
+    ) -> Optional[EntityResponse]:
+        """
+        根据 task_id 查找路径实体
+        
+        Args:
+            task_id: 任务ID
+            team_id: 队伍ID（可选，用于精确匹配多队伍任务）
+            
+        Returns:
+            路径实体响应，如果不存在返回 None
+        """
+        entity = await self._entity_repo.find_by_task_and_type(
+            task_id=task_id,
+            entity_type="planned_route",
+            team_id=team_id,
+        )
+        if not entity:
+            return None
+        return await self._to_response(entity)
     
     async def update(self, entity_id: UUID, data: EntityUpdate) -> EntityResponse:
         """更新实体"""

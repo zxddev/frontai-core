@@ -154,6 +154,8 @@ class TeamDispatchService:
             entity_id=entity_id,
             entity_type=MovementEntityType.TEAM,
             resource_id=team_id,
+            task_id=request.task_id,
+            team_id=team_id,
             route=route_points,
             speed_mps=request.speed_mps,
             waypoints=request.waypoints,

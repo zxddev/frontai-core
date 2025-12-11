@@ -460,11 +460,12 @@ async def confirm_route_by_id(
     - 原有 active 路径设为 replaced
     - 其他 alternative 路径设为 cancelled
     """
-    logger.info(f"确认路径: route_id={request.route_id}, task_id={request.task_id}")
+    logger.info(f"确认路径: route_id={request.route_id}, task_id={request.task_id}, team_id={request.team_id}")
     
     result = await service.confirm_route(
         route_id=request.route_id,
         task_id=request.task_id,
+        team_id=request.team_id,
     )
     
     return ConfirmRouteResponse(

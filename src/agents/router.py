@@ -469,21 +469,22 @@ async def emergency_analyze(
 ) -> EmergencyAnalyzeTaskResponse:
     """
     提交应急AI分析任务
-    
+
     使用AI+规则混合架构进行灾情分析：
     - 阶段1: LLM灾情理解 + RAG案例增强
     - 阶段2: 知识图谱规则查询 + TRR引擎匹配
     - 阶段3: CSP资源匹配 + NSGA-II优化
     - 阶段4: 硬/软规则过滤 + LLM方案解释
-    
+
     Args:
         request: 分析请求
-        
+
     Returns:
         任务提交响应，包含task_id用于查询结果
     """
     task_id = f"emergency-{request.event_id}"
-    
+    created_at = datetime.utcnow()
+
     logger.info(
         "收到应急AI分析请求",
         extra={
@@ -492,17 +493,29 @@ async def emergency_analyze(
             "scenario_id": str(request.scenario_id),
         },
     )
-    
+
+    # 立即保存processing状态到缓存，让by-event接口能查到正在执行的任务
+    processing_state = {
+        "task_id": task_id,
+        "event_id": str(request.event_id),
+        "scenario_id": str(request.scenario_id),
+        "status": "processing",
+        "created_at": created_at.isoformat() + "Z",
+    }
+    _task_results[task_id] = processing_state
+    await _save_result_to_redis(task_id, processing_state)
+    logger.info(f"[EmergencyAI] 已保存processing状态 task_id={task_id}")
+
     # 提交后台任务
     background_tasks.add_task(_run_emergency_analysis, task_id, request)
-    
+
     return EmergencyAnalyzeTaskResponse(
         success=True,
         task_id=task_id,
         event_id=str(request.event_id),
         status="processing",
         message="应急AI分析任务已提交，预计完成时间5-15秒",
-        created_at=datetime.utcnow(),
+        created_at=created_at,
     )
 
 
@@ -843,11 +856,11 @@ async def confirm_emergency_scheme(
             insert_scheme = text("""
                 INSERT INTO operational_v2.schemes_v2 (
                     id, scenario_id, event_id, scheme_code, scheme_type,
-                    title, status, source, ai_reasoning,
+                    title, objective, status, source, ai_reasoning,
                     created_at, updated_at
                 ) VALUES (
-                    :id, :scenario_id, :event_id, :scheme_code, 'rescue',
-                    :title, 'approved', 'ai_generated', :ai_reasoning,
+                    :id, :scenario_id, :event_id, :scheme_code, 'search_rescue',
+                    :title, :objective, 'approved', 'ai_generated', :ai_reasoning,
                     now(), now()
                 )
             """)
@@ -857,6 +870,7 @@ async def confirm_emergency_scheme(
                 "event_id": str(event_id),
                 "scheme_code": scheme_code,
                 "title": f"{event_title} - 救援方案",
+                "objective": f"针对{event_title}事件，快速响应并完成救援任务",
                 "ai_reasoning": scheme_explanation[:2000],
             })
             logger.info(f"[EmergencyConfirm] 创建方案 scheme_id={scheme_id}, scheme_code={scheme_code}")
@@ -1102,12 +1116,14 @@ async def confirm_emergency_scheme(
             dispatch_service = TeamDispatchService(db)
             movement_sessions = []
             for route in route_results:
-                dest = team_destination_map.get(route["team_id"], {"lat": event_lat, "lng": event_lng})
+                dest = team_destination_map.get(route["team_id"], {"lat": event_lat, "lng": event_lng, "task_id": first_task_id})
                 try:
                     # 使用已规划的路径启动移动
+                    task_id_for_dispatch = UUID(dest["task_id"]) if dest.get("task_id") else None
                     dispatch_request = TeamDispatchRequest(
                         destination=[dest["lng"], dest["lat"]],
                         scenario_id=scenario_id,
+                        task_id=task_id_for_dispatch,
                         speed_mps=15.0,  # 救援车辆默认速度 54km/h
                     )
                     dispatch_response = await dispatch_service.dispatch_team(
@@ -1168,6 +1184,158 @@ async def confirm_emergency_scheme(
                 logger.info("[EmergencyConfirm] WebSocket推送成功")
             except Exception as ws_err:
                 logger.warning(f"[EmergencyConfirm] WebSocket推送失败: {ws_err}")
+
+            # ========== 10. APP用户任务推送 ==========
+            # 推送目标: 1) 所有internal用户(admin/commander等) 2) 任务分配队伍的队长
+            # 消息格式: 符合APP端TaskPushMessage接口
+            try:
+                from src.core.stomp.broker import stomp_broker
+                import re
+                import asyncio
+
+                def normalize_phone(phone: str) -> str:
+                    """规范化手机号，去除空格、连字符、前导+86等"""
+                    if not phone:
+                        return ""
+                    normalized = re.sub(r'[\s\-+]', '', phone)
+                    if normalized.startswith('86') and len(normalized) > 11:
+                        normalized = normalized[2:]
+                    return normalized
+
+                async def send_with_retry(
+                    user_id: str,
+                    destination: str,
+                    data: dict,
+                    max_retries: int = 3
+                ) -> bool:
+                    """带重试的推送，失败时最多重试max_retries次"""
+                    for attempt in range(max_retries):
+                        try:
+                            await stomp_broker.send_to_user(user_id, destination, data)
+                            logger.debug(f"[TaskPush] 推送成功: user_id={user_id}, attempt={attempt+1}")
+                            return True
+                        except Exception as e:
+                            logger.warning(f"[TaskPush] 推送失败(attempt={attempt+1}): user_id={user_id}, error={e}")
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(0.5 * (attempt + 1))
+                    return False
+
+                # 查询所有 internal 用户（前突指挥车队人员，需要收到所有任务通知）
+                internal_users_sql = text("""
+                    SELECT id, username, real_name
+                    FROM operational_v2.users_v2
+                    WHERE user_type = 'internal' AND status = 'active'
+                """)
+                internal_result = await db.execute(internal_users_sql)
+                internal_users = internal_result.fetchall()
+
+                # 查询任务分配队伍的队长（通过规范化手机号匹配）
+                # deployed_info 结构: {"id": team_id, "name": team_name}
+                team_ids = [team.get("id") for team in deployed_info if team.get("id")]
+                leader_users: list[Any] = []
+                if team_ids:
+                    team_ids_str = ",".join([f"'{tid}'" for tid in team_ids])
+                    # 使用REGEXP_REPLACE规范化手机号进行匹配
+                    leader_sql = text(f"""
+                        SELECT u.id, u.username, u.real_name, t.id as team_id, t.name as team_name
+                        FROM operational_v2.users_v2 u
+                        JOIN operational_v2.rescue_teams_v2 t
+                            ON REGEXP_REPLACE(u.phone, '[\\s\\-+]', '', 'g') =
+                               REGEXP_REPLACE(t.contact_phone, '[\\s\\-+]', '', 'g')
+                        WHERE t.id IN ({team_ids_str})
+                        AND u.status = 'active'
+                        AND u.phone IS NOT NULL
+                        AND t.contact_phone IS NOT NULL
+                    """)
+                    leader_result = await db.execute(leader_sql)
+                    leader_users = leader_result.fetchall()
+                    logger.info(f"[TaskPush] 队长匹配结果: team_ids={team_ids}, leaders={len(leader_users)}")
+
+                # 构建任务ID到队伍的映射
+                task_to_teams: dict[str, list[dict]] = {}
+                for task in created_tasks:
+                    task_id = task.get("task_id")
+                    if task_id and task_id in task_team_map:
+                        task_to_teams[task_id] = task_team_map[task_id]
+
+                # 为每个任务构建符合APP端TaskPushMessage格式的消息
+                notified_user_ids: set[str] = set()
+                push_success_count = 0
+                push_fail_count = 0
+
+                for task in created_tasks:
+                    task_id = task.get("task_id")
+                    task_code = task.get("task_code", "")
+                    location = task.get("location", {})
+                    point_name = task.get("rescue_point_name", "")
+
+                    # 获取该任务分配的队伍
+                    assigned_teams = task_to_teams.get(task_id, [])
+                    units = [
+                        {"team_id": str(t.get("team_id") or t.get("id")), "team_name": t.get("team_name") or t.get("name", "")}
+                        for t in assigned_teams
+                    ]
+
+                    # 构建符合APP端TaskPushMessage接口的消息
+                    task_push_message = {
+                        "task_id": task_id,
+                        "event_id": str(event_id),
+                        "task_code": task_code,
+                        "title": f"{event_title} - {point_name}" if point_name else event_title,
+                        "priority": event_priority,
+                        "target_location": {"longitude": location.get("lng"), "latitude": location.get("lat")} if location else None,
+                        "target_address": point_name or "",
+                        "units": units,
+                        "created_at": datetime.utcnow().isoformat() + "Z",
+                        "scenario_id": str(scenario_id),
+                    }
+
+                    # 推送给 internal 用户
+                    for user in internal_users:
+                        user_id_str = str(user.id)
+                        if user_id_str not in notified_user_ids:
+                            success = await send_with_retry(user_id_str, "/task/assigned", task_push_message)
+                            if success:
+                                push_success_count += 1
+                            else:
+                                push_fail_count += 1
+                            notified_user_ids.add(user_id_str)
+
+                    # 推送给该任务分配队伍的队长
+                    assigned_team_ids = {str(t.get("team_id") or t.get("id")) for t in assigned_teams}
+                    for leader in leader_users:
+                        leader_team_id = str(leader.team_id)
+                        if leader_team_id in assigned_team_ids:
+                            user_id_str = str(leader.id)
+                            if user_id_str not in notified_user_ids:
+                                success = await send_with_retry(user_id_str, "/task/assigned", task_push_message)
+                                if success:
+                                    push_success_count += 1
+                                else:
+                                    push_fail_count += 1
+                                notified_user_ids.add(user_id_str)
+
+                # 更新 task_assignments_v2.notified_at
+                if team_ids:
+                    for task in created_tasks:
+                        task_id = task.get("task_id")
+                        if task_id:
+                            update_notified = text("""
+                                UPDATE operational_v2.task_assignments_v2
+                                SET notified_at = now()
+                                WHERE task_id = :task_id AND notified_at IS NULL
+                            """)
+                            await db.execute(update_notified, {"task_id": task_id})
+                    await db.commit()
+
+                logger.info(
+                    f"[EmergencyConfirm] APP用户推送完成: "
+                    f"internal={len(internal_users)}, leaders={len(leader_users)}, "
+                    f"total_notified={len(notified_user_ids)}, "
+                    f"success={push_success_count}, fail={push_fail_count}"
+                )
+            except Exception as push_err:
+                logger.warning(f"[EmergencyConfirm] APP用户推送失败: {push_err}")
             
             # 构建返回结果
             primary_task = created_tasks[0] if created_tasks else {}

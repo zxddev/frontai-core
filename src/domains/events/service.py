@@ -84,8 +84,12 @@ class EventService:
     async def create(self, data: EventCreate, reported_by: Optional[UUID] = None) -> EventResponse:
         event_code = await self.repo.get_next_event_code(data.scenario_id)
         event = await self.repo.create(data, event_code, reported_by)
-        
-        if data.confirmation_score is not None:
+
+        # 前端手动创建的事件直接确认（跳过人工审核流程）
+        if data.auto_confirm:
+            event = await self.repo.confirm(event, reported_by, auto=True)
+            logger.info(f"事件自动确认: event_id={event.id}, auto_confirm=True")
+        elif data.confirmation_score is not None:
             score = Decimal(str(data.confirmation_score))
             if score >= AUTO_CONFIRM_THRESHOLD:
                 event = await self.repo.confirm(event, auto=True)
@@ -172,6 +176,13 @@ class EventService:
             import asyncio
             from src.agents.router import _run_emergency_analysis
             from src.agents.schemas import EmergencyAnalyzeRequest
+
+            # 更新事件状态为 planning（方案规划中）
+            await self.repo.update_status(
+                await self.repo.get_by_id(event.id),
+                "planning"
+            )
+            logger.info(f"事件状态更新为planning: event_id={event.id}")
 
             # 构建灾情描述
             disaster_description = f"{event.title}"

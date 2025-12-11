@@ -226,19 +226,28 @@ class StompBroker:
             if self._match_pattern(pattern, destination):
                 session_ids.update(subs)
         
+        logger.info(f"[_deliver_local] destination={destination}, 匹配到 {len(session_ids)} 个会话")
+        
         # 如果指定了场景，过滤只发给该场景的连接
         if scenario_id:
             scenario_sessions = self.scenario_subscribers.get(scenario_id, set())
             session_ids = session_ids & scenario_sessions
+            logger.info(f"[_deliver_local] 场景过滤后: {len(session_ids)} 个会话")
         
         # 投递
+        delivered_count = 0
         for session_id in session_ids:
             conn = self.connections.get(session_id)
             if conn and conn.is_connected:
                 try:
                     await conn.send_message(destination, body)
+                    delivered_count += 1
                 except Exception as e:
                     logger.error(f"Failed to deliver to {session_id}: {e}")
+            else:
+                logger.warning(f"[_deliver_local] 会话 {session_id} 不存在或已断开")
+        
+        logger.info(f"[_deliver_local] 成功投递: {delivered_count}/{len(session_ids)}")
     
     async def _redis_listener(self):
         """Redis消息监听器"""

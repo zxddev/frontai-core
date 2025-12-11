@@ -66,7 +66,7 @@ CREATE (c:Capability {
 });
 
 CREATE (c:Capability {
-    code: 'PATIENT_TRANSPORT',
+    code: 'MEDICAL_TRANSPORT',
     name: '伤员转运',
     category: 'medical',
     description: '将伤员安全转运至医疗机构',
@@ -543,7 +543,7 @@ CREATE (r)-[:REQUIRES_CAPABILITY {priority: 'critical'}]->(c);
 MATCH (r:TRRRule {rule_id: 'TRR-EQ-004'}), (c:Capability {code: 'EMERGENCY_TREATMENT'})
 CREATE (r)-[:REQUIRES_CAPABILITY {priority: 'critical'}]->(c);
 
-MATCH (r:TRRRule {rule_id: 'TRR-EQ-004'}), (c:Capability {code: 'PATIENT_TRANSPORT'})
+MATCH (r:TRRRule {rule_id: 'TRR-EQ-004'}), (c:Capability {code: 'MEDICAL_TRANSPORT'})
 CREATE (r)-[:REQUIRES_CAPABILITY {priority: 'high'}]->(c);
 
 // TRR-EQ-005 需要的能力
@@ -604,7 +604,7 @@ CREATE (c)-[:PROVIDED_BY]->(rt);
 MATCH (c:Capability {code: 'EMERGENCY_TREATMENT'}), (rt:ResourceType {code: 'MEDICAL_TEAM'})
 CREATE (c)-[:PROVIDED_BY]->(rt);
 
-MATCH (c:Capability {code: 'PATIENT_TRANSPORT'}), (rt:ResourceType {code: 'AMBULANCE'})
+MATCH (c:Capability {code: 'MEDICAL_TRANSPORT'}), (rt:ResourceType {code: 'AMBULANCE'})
 CREATE (c)-[:PROVIDED_BY]->(rt);
 
 MATCH (c:Capability {code: 'FIRE_SUPPRESSION'}), (rt:ResourceType {code: 'FIRE_TEAM'})

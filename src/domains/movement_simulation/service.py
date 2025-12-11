@@ -205,6 +205,8 @@ class MovementSimulationManager:
             entity_id=request.entity_id,
             entity_type=request.entity_type,
             resource_id=request.resource_id,
+            task_id=request.task_id,
+            team_id=request.team_id,
             route=route,
             total_distance_m=interpolator.total_distance_m,
             segment_distances=interpolator.segment_distances,

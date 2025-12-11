@@ -133,6 +133,7 @@ class AssignmentResponse(BaseModel):
     completion_summary: Optional[str]
     assigned_at: datetime
     accepted_at: Optional[datetime]
+    started_at: Optional[datetime]
     completed_at: Optional[datetime]
 
     class Config:
@@ -180,3 +181,40 @@ class MyTasksResponse(BaseModel):
     """执行者的任务列表"""
     items: list[TaskResponse]
     total: int
+
+
+class TeamRealtimeStatus(BaseModel):
+    """队伍实时状态"""
+    team_id: UUID
+    team_name: str
+    location: Optional[Location] = None
+    eta_minutes: float = 0
+    communication_status: str = "unknown"
+    movement_status: str = "unknown"
+    last_update: Optional[datetime] = None
+    mission_detail: Optional[dict] = None  # 一线队员任务详情（AI生成）
+
+
+class TaskDetailResponse(TaskResponse):
+    """任务详情响应（含队伍实时状态）"""
+    team_realtime: list[TeamRealtimeStatus] = []
+
+
+class EventBasedTaskResponse(BaseModel):
+    """
+    基于事件ID查询的响应
+
+    当事件已有任务时返回任务详情，否则返回事件信息（包装成任务结构）
+    """
+    has_task: bool
+    task: Optional[TaskDetailResponse] = None
+    event_id: UUID
+    event_title: str
+    event_description: Optional[str] = None
+    event_type: str
+    event_status: str
+    event_priority: str
+    event_address: Optional[str] = None
+    event_location: Optional[Location] = None
+    estimated_victims: int = 0
+    reported_at: Optional[datetime] = None
