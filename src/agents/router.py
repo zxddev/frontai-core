@@ -33,6 +33,8 @@ from src.agents.schemas import (
 from src.domains.audit import AuditService, OperatorInfo, ActionInfo
 from .route_planning import invoke as route_planning_invoke
 from .emergency_ai.agent import get_emergency_ai_agent
+from .task_coordinator.agent import run_task_coordinator
+from .task_coordinator.schemas import TaskAllocation, TeamInfo
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,113 @@ async def _get_result_from_redis(task_id: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.warning(f"[EmergencyAI] Redis读取失败: {e}")
         return None
+
+
+async def _run_task_coordinator_for_result(
+    event_id: str,
+    ai_result: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    从 emergency_ai 结果中提取队伍信息，调用 task_coordinator 生成步骤级协作方案
+
+    Args:
+        event_id: 事件ID
+        ai_result: emergency_ai 的分析结果
+
+    Returns:
+        task_coordinator 输出（dict格式），失败时返回 None
+    """
+    # 提取灾害类型
+    understanding = ai_result.get("understanding", {})
+    parsed_disaster = understanding.get("parsed_disaster", {})
+    disaster_type = parsed_disaster.get("disaster_type", "unknown")
+    scene_code = parsed_disaster.get("scene_code")
+
+    # 提取队伍列表
+    recommended_scheme = ai_result.get("recommended_scheme", {})
+    allocations = recommended_scheme.get("allocations", [])
+
+    if not allocations:
+        logger.info(f"[TaskCoordinator] 无队伍分配，跳过协调: event_id={event_id}")
+        return None
+
+    # 构建 TeamInfo 列表（所有队伍作为一个整体）
+    team_infos = []
+    for alloc in allocations:
+        team_id = alloc.get("resource_id", "")
+        if not team_id:
+            continue
+        team_infos.append(TeamInfo(
+            team_id=str(team_id),
+            team_name=alloc.get("resource_name", ""),
+            capabilities=alloc.get("assigned_capabilities", []),
+            equipment=[e.get("name", "") for e in alloc.get("equipments", []) if e.get("name")],
+        ))
+
+    if not team_infos:
+        logger.info(f"[TaskCoordinator] 无有效队伍，跳过协调: event_id={event_id}")
+        return None
+
+    # 构建 TaskAllocation
+    task_allocation = TaskAllocation(
+        task_id=f"task-{event_id[:8]}",
+        task_name=ai_result.get("event_title", "救援任务"),
+        disaster_type=disaster_type,
+        scene_code=scene_code,
+        allocated_teams=team_infos,
+    )
+
+    logger.info(
+        f"[TaskCoordinator] 开始协调: event_id={event_id}, "
+        f"teams={len(team_infos)}, disaster_type={disaster_type}"
+    )
+
+    # 调用 task_coordinator
+    output = await run_task_coordinator(
+        event_id=event_id,
+        task_allocation=task_allocation,
+        disaster_info={"disaster_type": disaster_type, "scene_code": scene_code},
+    )
+
+    # 转换为 dict 格式
+    result = {
+        "task_id": output.task_id,
+        "task_name": output.task_name,
+        "sop_template": output.sop_template,
+        "total_steps": output.total_steps,
+        "estimated_duration_minutes": output.estimated_duration_minutes,
+        "step_instructions": [
+            {
+                "step_id": inst.step_id,
+                "step_name": inst.step_name,
+                "sequence": inst.sequence,
+                "teams": [
+                    {
+                        "team_id": t.team_id,
+                        "team_name": t.team_name,
+                        "role": t.role.value if hasattr(t.role, 'value') else str(t.role),
+                        "responsibilities": t.responsibilities,
+                        "equipment": t.equipment,
+                    }
+                    for t in inst.teams
+                ],
+                "cooperation_mode": inst.cooperation_mode,
+                "depends_on": inst.depends_on,
+                "estimated_duration": inst.estimated_duration,
+                "completion_criteria": inst.completion_criteria,
+                "safety_notes": inst.safety_notes,
+            }
+            for inst in output.step_instructions
+        ],
+        "warnings": output.warnings,
+    }
+
+    logger.info(
+        f"[TaskCoordinator] 协调完成: event_id={event_id}, "
+        f"steps={output.total_steps}, duration={output.estimated_duration_minutes}min"
+    )
+
+    return result
 
 
 
@@ -339,9 +448,24 @@ async def _run_emergency_analysis(
             constraints=request.constraints,
             optimization_weights=request.optimization_weights,
         )
-        
-        logger.info(f"[EmergencyAI] 分析完成，保存结果 task_id={task_id}")
-        
+
+        logger.info(f"[EmergencyAI] 分析完成，准备调用 task_coordinator task_id={task_id}")
+
+        # 调用 task_coordinator 生成步骤级协作方案（优雅降级：失败不阻塞主流程）
+        if result.get("success"):
+            try:
+                coordinator_result = await _run_task_coordinator_for_result(
+                    event_id=str(request.event_id),
+                    ai_result=result,
+                )
+                if coordinator_result:
+                    result["task_coordinator"] = coordinator_result
+                    logger.info(f"[EmergencyAI] task_coordinator 结果已合并 task_id={task_id}")
+            except Exception as coord_err:
+                logger.warning(f"[EmergencyAI] task_coordinator 调用失败（不影响主流程）: {coord_err}")
+
+        logger.info(f"[EmergencyAI] 保存结果到 Redis task_id={task_id}")
+
         # 保存到内存和Redis
         _task_results[task_id] = result
         _cleanup_task_cache()
