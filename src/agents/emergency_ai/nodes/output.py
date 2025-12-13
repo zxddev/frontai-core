@@ -581,7 +581,16 @@ async def generate_output(state: EmergencyAIState) -> Dict[str, Any]:
             "capacity_warning": recommended_scheme.get("capacity_warning") if recommended_scheme else None,
             "transport_warnings": state.get("transport_warnings", []),
         },
-        
+
+        # 🚨 巨灾模式标记（供前端识别并显示特殊UI）
+        "catastrophe_mode": {
+            "enabled": state.get("requires_reinforcement", False),
+            "reinforcement_level": recommended_scheme.get("reinforcement_level") if recommended_scheme else None,
+            "capacity_gap": recommended_scheme.get("capacity_gap") if recommended_scheme else None,
+            "hard_rules_bypassed": state.get("requires_reinforcement", False),
+            "requires_commander_signature": state.get("requires_reinforcement", False),
+        },
+
         # 追踪信息
         "trace": state.get("trace", {}),
         

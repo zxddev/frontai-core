@@ -110,6 +110,7 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
             min_risk_level=None,
             passage_status=None,
         )
+        logger.info(f"[Recon] 加载风险区域数量: {len(risk_list.items)}")
 
         # 加载所有可用的无人设备（drone/dog/ship），筛选逻辑后置
         all_devices: List[Dict[str, Any]] = []
@@ -153,26 +154,81 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
                         )
                     )
             
+            # 统计设备类型和环境类型
+            device_type_counts = {}
+            env_type_counts = {}
+            for d in device_list:
+                dt = d.get("device_type", "unknown")
+                et = d.get("env_type", "unknown")
+                device_type_counts[dt] = device_type_counts.get(dt, 0) + 1
+                env_type_counts[et] = env_type_counts.get(et, 0) + 1
+            
             logger.info(
-                f"[Recon] 加载设备: 总计{len(all_devices)}台, 侦察设备{len(device_list)}台 (基于base_capabilities)"
+                f"[Recon] 加载设备: 总计{len(all_devices)}台, 侦察设备{len(device_list)}台 (基于base_capabilities), "
+                f"设备类型={device_type_counts}, 环境类型={env_type_counts}"
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("[Recon] 加载设备列表失败，将仅输出目标优先级", extra={"error": str(e)})
             all_devices = []
             device_list = []
 
-        # 加载POI (重点设施) - 不限想定，加载所有数据
+        # 加载POI (重点设施) - 只加载距离事件位置50km以内的POI
+        # 50km = 50000m，这是合理的侦察范围
+        MAX_DISTANCE_TO_EVENT_M = 50000
         pois: List[Dict[str, Any]] = []
+        
+        # 先获取事件位置
+        event_location = None
+        if event_id:
+            try:
+                event_result = await session.execute(text("""
+                    SELECT ST_X(location::geometry) as lon, ST_Y(location::geometry) as lat
+                    FROM operational_v2.events_v2
+                    WHERE id = :event_id
+                """), {"event_id": event_id})
+                event_row = event_result.fetchone()
+                if event_row and event_row.lon and event_row.lat:
+                    event_location = (event_row.lon, event_row.lat)
+                    logger.info(f"[Recon] 事件位置: ({event_row.lon:.4f}, {event_row.lat:.4f})")
+            except Exception as e:
+                logger.warning(f"[Recon] 获取事件位置失败: {e}")
+        
         try:
-            poi_result = await session.execute(text("""
-                SELECT id, name, poi_type, risk_level, 
-                       ST_X(location::geometry) as lon, ST_Y(location::geometry) as lat,
-                       estimated_population, distance_to_epicenter_m, status,
-                       last_reconnaissance_at, reconnaissance_priority
-                FROM operational_v2.poi_v2
-                WHERE status != 'destroyed'
-                ORDER BY reconnaissance_priority DESC, distance_to_epicenter_m ASC
-            """))
+            if event_location:
+                # 使用 PostGIS 计算距离，只加载50km以内的POI
+                poi_result = await session.execute(text("""
+                    SELECT id, name, poi_type, risk_level, 
+                           ST_X(location::geometry) as lon, ST_Y(location::geometry) as lat,
+                           estimated_population, 
+                           ST_Distance(
+                               location::geography, 
+                               ST_SetSRID(ST_MakePoint(:event_lon, :event_lat), 4326)::geography
+                           ) as distance_to_event_m,
+                           status, last_reconnaissance_at, reconnaissance_priority
+                    FROM operational_v2.poi_v2
+                    WHERE status != 'destroyed'
+                      AND ST_DWithin(
+                          location::geography,
+                          ST_SetSRID(ST_MakePoint(:event_lon, :event_lat), 4326)::geography,
+                          :max_distance
+                      )
+                    ORDER BY reconnaissance_priority DESC, distance_to_event_m ASC
+                """), {
+                    "event_lon": event_location[0],
+                    "event_lat": event_location[1],
+                    "max_distance": MAX_DISTANCE_TO_EVENT_M
+                })
+            else:
+                # 没有事件位置，加载所有POI（回退到旧逻辑）
+                poi_result = await session.execute(text("""
+                    SELECT id, name, poi_type, risk_level, 
+                           ST_X(location::geometry) as lon, ST_Y(location::geometry) as lat,
+                           estimated_population, distance_to_epicenter_m as distance_to_event_m,
+                           status, last_reconnaissance_at, reconnaissance_priority
+                    FROM operational_v2.poi_v2
+                    WHERE status != 'destroyed'
+                    ORDER BY reconnaissance_priority DESC, distance_to_epicenter_m ASC
+                """))
             for row in poi_result.fetchall():
                 pois.append({
                     "id": str(row.id),
@@ -182,11 +238,11 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
                     "lon": row.lon,
                     "lat": row.lat,
                     "estimated_population": row.estimated_population or 0,
-                    "distance_to_epicenter_m": float(row.distance_to_epicenter_m or 0),
+                    "distance_to_epicenter_m": float(row.distance_to_event_m or 0),
                     "status": row.status,
                     "last_reconnaissance_at": row.last_reconnaissance_at,
                 })
-            logger.info(f"[Recon] 加载POI数量: {len(pois)}")
+            logger.info(f"[Recon] 加载POI数量: {len(pois)} (距离事件{MAX_DISTANCE_TO_EVENT_M/1000:.0f}km以内)")
         except Exception as e:  # noqa: BLE001
             logger.warning("[Recon] 加载POI列表失败", extra={"error": str(e)})
 
@@ -223,9 +279,11 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
 
         now = datetime.now(timezone.utc)
 
+        skipped_risk_areas = 0
         for item in risk_list.items:
             # 只对需要侦察或风险较高的区域进行打分
             if not item.reconnaissance_required and item.risk_level < 5:
+                skipped_risk_areas += 1
                 continue
 
             info_age_hours = _compute_info_age_hours(item.last_verified_at, now)
@@ -287,6 +345,8 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
             }
             risk_areas.append(risk_area_data)
             all_targets_meta[str(item.id)] = risk_area_data
+
+        logger.info(f"[Recon] 风险区域处理: 总计{len(risk_list.items)}个, 跳过{skipped_risk_areas}个(不需侦察且风险<5), 纳入{len(risk_areas)}个")
 
         # 2. 为POI构造打分上下文
         for poi in pois:
@@ -409,13 +469,17 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
     targets.sort(key=lambda t: t.get("score", 0.0), reverse=True)
 
     # 智能设备分配：根据目标特征匹配最适合的设备类型
+    logger.info(f"[Recon] 开始设备分配: 目标数={len(targets)}, 可用设备数={len(device_list)}")
+    
     assignments: List[DeviceAssignment] = []
     used_device_ids: set = set()
+    unmatched_targets = []
     
     for target in targets:
+        available_devices = [d for d in device_list if d["device_id"] not in used_device_ids]
         best_device, reason = _match_device_for_target(
             target=target,
-            available_devices=[d for d in device_list if d["device_id"] not in used_device_ids],
+            available_devices=available_devices,
             risk_info=all_targets_meta.get(target["target_id"], {}),
         )
         if best_device:
@@ -431,17 +495,16 @@ async def score_targets(state: ReconState) -> Dict[str, Any]:
                     reason=reason,
                 )
             )
+            logger.debug(f"[Recon] 分配: {best_device['name']} -> {target['name']}")
+        else:
+            unmatched_targets.append(target["name"])
+    
+    if unmatched_targets:
+        logger.warning(f"[Recon] 未分配设备的目标: {len(unmatched_targets)}个 (前5个: {unmatched_targets[:5]})")
 
     explanation = _build_explanation(targets, assignments)
 
-    logger.info(
-        "[Recon] 侦察目标打分完成",
-        extra={
-            "scenario_id": scenario_id,
-            "targets": len(targets),
-            "assignments": len(assignments),
-        },
-    )
+    logger.info(f"[Recon] 侦察目标打分完成: 目标数={len(targets)}, 分配数={len(assignments)}, 未分配={len(unmatched_targets)}")
 
     return {
         "risk_areas": risk_areas,
@@ -621,8 +684,9 @@ def _match_device_for_target(
     
     if not compatible_devices:
         # 没有兼容设备，记录日志并返回空
-        logger.debug(
-            f"[Recon] 目标 {target.get('name')} (env={target_env}) 无兼容设备"
+        logger.warning(
+            f"[Recon] 目标 {target.get('name')} (area_type={area_type}, env={target_env}) 无兼容设备, "
+            f"可用设备数={len(available_devices)}, 设备env类型={[d.get('env_type') for d in available_devices[:5]]}"
         )
         return None, ""
     

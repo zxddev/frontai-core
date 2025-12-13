@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import logging
 import uuid as uuid_lib
 from datetime import datetime
@@ -25,12 +26,22 @@ from src.domains.tasks.service import TaskService
 from src.domains.frontend_api.common import ApiResponse
 from src.agents import get_frontline_rescue_agent
 from src.infra.clients.amap.geocode import amap_regeo_async
+from src.infra.clients.amap.route_planning import amap_route_planning_async
 from .schemas import (
     FrontendTask, TaskLogData, TaskLogCommitRequest,
     RescueTask, RescueDetailResponse, Location,
     RescuePoint, MultiRescueTaskDetail,
     UnitTask, EquipmentTask, TaskSendRequest,
     BatchRescueTaskRequest, BatchRescueTaskResponse, TaskCreateResult,
+    GenerateActionPlanRequest, ActionPlanResponse,
+    TeamRoleInfo, StepInstructionInfo,
+)
+from src.agents.task_coordinator.schemas import TaskAllocation, TeamInfo
+from src.agents.task_coordinator.agent import run_task_coordinator
+from src.domains.movement_simulation.service import get_movement_manager
+from src.domains.movement_simulation.schemas import (
+    MovementStartRequest,
+    EntityType as MovementEntityType,
 )
 
 
@@ -323,22 +334,652 @@ STATUS_MAP_FROM_FRONTEND = {
 }
 
 
+def _parse_plan_data(value: Any) -> Dict[str, Any]:
+    """Normalize recon_plans.plan_data from DB to a dict."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    try:
+        return dict(value)
+    except Exception:
+        return {}
+
+
+def _collect_lng_lat_points(coords: Any, out: list[tuple[float, float]]) -> None:
+    """Recursively collect (lng, lat) points from GeoJSON coordinates."""
+    if coords is None:
+        return
+    if isinstance(coords, (list, tuple)):
+        if (
+            len(coords) >= 2
+            and isinstance(coords[0], (int, float))
+            and isinstance(coords[1], (int, float))
+        ):
+            lng = float(coords[0])
+            lat = float(coords[1])
+            if math.isfinite(lng) and math.isfinite(lat):
+                out.append((lng, lat))
+            return
+        for item in coords:
+            _collect_lng_lat_points(item, out)
+
+
+def _waypoints_from_geometry(geometry: Any) -> list[dict[str, float]]:
+    """Build waypoints from GeoJSON geometry.
+
+    对于多边形：沿着多边形边界飞行（实际航线）
+    对于点：生成小矩形循环
+    """
+    if not isinstance(geometry, dict):
+        logger.warning(f"[_waypoints_from_geometry] geometry不是dict: {type(geometry)}")
+        return []
+
+    geom_type = geometry.get("type", "").lower()
+    coords = geometry.get("coordinates")
+    logger.info(f"[_waypoints_from_geometry] geom_type={geom_type}, coords类型={type(coords)}, coords长度={len(coords) if isinstance(coords, list) else 'N/A'}")
+    
+    if not coords:
+        return []
+
+    # 处理多边形 - 沿边界飞行
+    if geom_type == "polygon" and isinstance(coords, list) and len(coords) > 0:
+        # Polygon coordinates: [外环, 内环1, 内环2, ...]
+        # 取外环作为航线
+        outer_ring = coords[0] if isinstance(coords[0], list) else coords
+        waypoints = []
+        for point in outer_ring:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                lng, lat = float(point[0]), float(point[1])
+                if math.isfinite(lng) and math.isfinite(lat):
+                    waypoints.append({"lng": lng, "lat": lat})
+        if len(waypoints) >= 2:
+            return waypoints
+
+    # 处理 MultiPolygon - 取第一个多边形
+    if geom_type == "multipolygon" and isinstance(coords, list) and len(coords) > 0:
+        first_polygon = coords[0]
+        if isinstance(first_polygon, list) and len(first_polygon) > 0:
+            outer_ring = first_polygon[0] if isinstance(first_polygon[0], list) else first_polygon
+            waypoints = []
+            for point in outer_ring:
+                if isinstance(point, (list, tuple)) and len(point) >= 2:
+                    lng, lat = float(point[0]), float(point[1])
+                    if math.isfinite(lng) and math.isfinite(lat):
+                        waypoints.append({"lng": lng, "lat": lat})
+            if len(waypoints) >= 2:
+                return waypoints
+
+    # 处理 LineString - 直接作为航线
+    if geom_type == "linestring" and isinstance(coords, list):
+        waypoints = []
+        for point in coords:
+            if isinstance(point, (list, tuple)) and len(point) >= 2:
+                lng, lat = float(point[0]), float(point[1])
+                if math.isfinite(lng) and math.isfinite(lat):
+                    waypoints.append({"lng": lng, "lat": lat})
+        if len(waypoints) >= 2:
+            return waypoints
+
+    # Fallback: 收集所有点
+    points: list[tuple[float, float]] = []
+    _collect_lng_lat_points(coords, points)
+
+    # 去重
+    deduped: list[tuple[float, float]] = []
+    seen: set[tuple[int, int]] = set()
+    for lng, lat in points:
+        key = (int(round(lng * 1_000_000)), int(round(lat * 1_000_000)))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((lng, lat))
+
+    if not deduped:
+        return []
+
+    # 单点：只返回目标点坐标（航线由调用方添加起点）
+    if len(deduped) == 1:
+        lng, lat = deduped[0]
+        return [{"lng": lng, "lat": lat}]
+
+    # 多点：按顺序连接成航线
+    return [{"lng": p[0], "lat": p[1]} for p in deduped]
+
+
+def _build_fallback_flight_plans_from_initial_scan(
+    plan_data: Dict[str, Any],
+    command_vehicle_position: Optional[tuple[float, float]] = None,
+) -> list[dict[str, Any]]:
+    """Build flight_plans for /tasks/send when plan_data has only missions.
+
+    initial_scan saves plan_data.recon_plan.missions, but /tasks/send requires
+    per-device waypoints to start movement simulation.
+    
+    Args:
+        plan_data: 侦察方案数据
+        command_vehicle_position: 指挥车位置 (lng, lat)，所有设备从此位置出发
+    """
+    recon_plan = plan_data.get("recon_plan") or plan_data.get("reconPlan") or {}
+    missions = recon_plan.get("missions") if isinstance(recon_plan, dict) else None
+    if not isinstance(missions, list) or not missions:
+        return []
+
+    targets = plan_data.get("targets")
+    if not isinstance(targets, list) or not targets:
+        return []
+
+    target_by_id: Dict[str, Dict[str, Any]] = {}
+    target_by_name: Dict[str, Dict[str, Any]] = {}
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        target_id = target.get("id")
+        target_name = target.get("name")
+        if target_id is not None:
+            target_by_id[str(target_id)] = target
+        if target_name:
+            target_by_name[str(target_name)] = target
+
+    flight_plans: list[dict[str, Any]] = []
+
+    for mission in missions:
+        if not isinstance(mission, dict):
+            continue
+
+        device_id = mission.get("deviceId") or mission.get("device_id")
+        device_name = mission.get("deviceName") or mission.get("device_name") or ""
+        device_type = mission.get("deviceType") or mission.get("device_type") or ""
+        target_id = mission.get("targetId") or mission.get("target_id")
+        target_name = mission.get("targetName") or mission.get("target_name")
+
+        # 只处理无人机和机器狗
+        if device_type not in ("drone", "dog"):
+            continue
+
+        target = None
+        if target_id is not None:
+            target = target_by_id.get(str(target_id))
+        if not target and target_name:
+            target = target_by_name.get(str(target_name))
+
+        geometry = target.get("geometry") if isinstance(target, dict) else None
+        target_waypoints = _waypoints_from_geometry(geometry)
+        
+        if not target_waypoints:
+            logger.warning(f"[tasks_send] 目标 {target_name} 无法生成航点")
+            continue
+
+        # 根据设备类型构建航线（所有设备都从指挥车位置出发）
+        waypoints = []
+        
+        if device_type == "drone":
+            # 无人机：从指挥车位置起飞 → 目标区域 → 返回指挥车
+            if command_vehicle_position:
+                waypoints.append({"lng": command_vehicle_position[0], "lat": command_vehicle_position[1]})
+            waypoints.extend(target_waypoints)
+            if command_vehicle_position:
+                waypoints.append({"lng": command_vehicle_position[0], "lat": command_vehicle_position[1]})
+        else:
+            # 机器狗：从指挥车位置出发 → 目标位置 → 在目标位置巡逻
+            # 1. 添加起点（指挥车位置）
+            if command_vehicle_position:
+                waypoints.append({"lng": command_vehicle_position[0], "lat": command_vehicle_position[1]})
+            
+            # 2. 添加目标位置
+            if len(target_waypoints) == 1:
+                # 单点目标：先到达目标点，然后围绕目标巡逻
+                center = target_waypoints[0]
+                lng, lat = center["lng"], center["lat"]
+                waypoints.append({"lng": lng, "lat": lat})  # 到达目标点
+                # 围绕目标巡逻（约50m范围）
+                delta = 0.0005  # 约50m
+                waypoints.extend([
+                    {"lng": lng + delta, "lat": lat},
+                    {"lng": lng, "lat": lat + delta},
+                    {"lng": lng - delta, "lat": lat},
+                    {"lng": lng, "lat": lat - delta},
+                    {"lng": lng, "lat": lat},  # 回到目标中心
+                ])
+            else:
+                # 多点目标（如多边形）：沿边界巡逻
+                waypoints.extend(target_waypoints)
+        
+        logger.info(f"[tasks_send] 设备 {device_name} ({device_type}) 目标 {target_name}: 航点数={len(waypoints)}")
+        
+        if len(waypoints) < 2:
+            continue
+
+        flight_plans.append(
+            {
+                "device_id": str(device_id) if device_id is not None else None,
+                "device_name": device_name,
+                "device_type": device_type,
+                "task_name": device_name or "侦察任务",
+                "target_name": target_name,
+                "waypoints": waypoints,
+            }
+        )
+
+    return flight_plans
+
+
 @router.post("/send", response_model=ApiResponse)
 async def tasks_send(
     request: TaskSendRequest,
-    service: TaskService = Depends(get_task_service),
+    db: AsyncSession = Depends(get_db),
 ) -> ApiResponse:
     """
     侦察任务指令下发
-    
-    将生成的侦察任务下发给相应设备执行
+
+    业务逻辑：
+    1. 从 recon_plans 查询最新的侦察方案
+    2. 提取 flight_plans 中的 waypoints
+    3. 为每个设备任务启动移动仿真
     """
-    logger.info(f"任务下发, schemeId={request.id}, eventId={request.eventId}")
-    
+    logger.info(f"[tasks_send] 任务下发, schemeId={request.id}, eventId={request.eventId}")
+
     task_count = sum(len(t.taskList) for t in request.task)
-    logger.info(f"下发任务数量: {task_count}")
-    
-    return ApiResponse.success({"taskCount": task_count}, "任务下发成功")
+    logger.info(f"[tasks_send] 下发任务数量: {task_count}")
+
+    # 1. 查询最新侦察方案
+    plan_query = text("""
+        SELECT plan_data FROM operational_v2.recon_plans
+        WHERE incident_id = :event_id
+          AND plan_type = 'recon'
+        ORDER BY created_at DESC LIMIT 1
+    """)
+    result = await db.execute(plan_query, {"event_id": request.eventId})
+    row = result.fetchone()
+
+    if not row or not row.plan_data:
+        logger.warning(f"[tasks_send] 未找到事件 {request.eventId} 的侦察方案，跳过仿真启动")
+        return ApiResponse.success({"taskCount": task_count}, "任务下发成功（无仿真）")
+
+    plan_data = _parse_plan_data(row.plan_data)
+    if not plan_data:
+        logger.warning(f"[tasks_send] 侦察方案数据解析失败，跳过仿真启动: eventId={request.eventId}")
+        return ApiResponse.success({"taskCount": task_count}, "任务下发成功（无仿真）")
+
+    # 2. 查询指挥车位置（所有设备从指挥车出发）
+    command_vehicle_position: Optional[tuple[float, float]] = None
+    try:
+        cmd_vehicle_query = text("""
+            SELECT 
+                ST_X(current_location::geometry) as lng,
+                ST_Y(current_location::geometry) as lat,
+                name
+            FROM operational_v2.vehicles_v2
+            WHERE vehicle_type::text = 'command'
+              AND current_location IS NOT NULL
+            LIMIT 1
+        """)
+        cmd_result = await db.execute(cmd_vehicle_query)
+        cmd_row = cmd_result.fetchone()
+        if cmd_row and cmd_row.lng and cmd_row.lat:
+            command_vehicle_position = (cmd_row.lng, cmd_row.lat)
+            logger.info(f"[tasks_send] 指挥车位置: {cmd_row.name} ({cmd_row.lng:.6f}, {cmd_row.lat:.6f})")
+        else:
+            # 如果没有指挥车位置，使用事件位置作为默认起点
+            event_query = text("""
+                SELECT 
+                    ST_X(location::geometry) as lng,
+                    ST_Y(location::geometry) as lat
+                FROM operational_v2.events_v2
+                WHERE id = :event_id
+            """)
+            event_result = await db.execute(event_query, {"event_id": request.eventId})
+            event_row = event_result.fetchone()
+            if event_row and event_row.lng and event_row.lat:
+                command_vehicle_position = (event_row.lng, event_row.lat)
+                logger.info(f"[tasks_send] 使用事件位置作为起点: ({event_row.lng:.6f}, {event_row.lat:.6f})")
+    except Exception as e:
+        logger.warning(f"[tasks_send] 查询指挥车/事件位置失败: {e}")
+
+    # 尝试多种路径获取 flight_plans
+    flight_plans = (
+        plan_data.get("recon_plan", {}).get("flight_plans", [])
+        or plan_data.get("flight_plans", [])
+    )
+
+    if not flight_plans:
+        # fallback: initial_scan plan only contains missions, without waypoints
+        flight_plans = _build_fallback_flight_plans_from_initial_scan(plan_data, command_vehicle_position)
+        if flight_plans:
+            logger.info(
+                f"[tasks_send] 侦察方案缺少航线计划，已基于 missions/targets 构建fallback航线: {len(flight_plans)}"
+            )
+        else:
+            logger.warning(f"[tasks_send] 侦察方案无航线计划，跳过仿真启动")
+            return ApiResponse.success({"taskCount": task_count}, "任务下发成功（无航线）")
+
+    # 2. 构建 device_id -> flight_plan 的索引
+    # 同时构建 device_name -> flight_plan 作为备用匹配
+    fp_by_device_id: Dict[str, Any] = {}
+    fp_by_device_name: Dict[str, Any] = {}
+    for fp in flight_plans:
+        device_id = fp.get("device_id")
+        device_name = fp.get("device_name") or fp.get("task_name")
+        if device_id:
+            fp_by_device_id[str(device_id)] = fp
+        if device_name:
+            fp_by_device_name[device_name] = fp
+
+    logger.info(f"[tasks_send] 航线计划索引: by_id={len(fp_by_device_id)}, by_name={len(fp_by_device_name)}")
+
+    # 3. 为每个设备任务启动仿真（只处理无人机和机器狗）
+    movement_manager = await get_movement_manager()
+    started_count = 0
+
+    # 设备类型到前端type的映射
+    device_type_to_frontend = {
+        "drone": "realTime_uav",
+        "uav": "realTime_uav",
+        "dog": "realTime_robotic_dog",
+        "robotic_dog": "realTime_robotic_dog",
+        "vehicle": "realTime_vehicle",
+        "car": "realTime_vehicle",
+        "truck": "realTime_vehicle",
+        "rescue": "realTime_vehicle",
+        "command": "realTime_vehicle",
+        "medical": "realTime_vehicle",
+        "transport": "realTime_vehicle",
+    }
+
+    # 无人设备类型（使用预设航线）
+    unmanned_device_types = {"drone", "uav", "dog", "robotic_dog"}
+    # 车辆类型（使用高德路径规划）
+    vehicle_types = {"vehicle", "car", "truck", "rescue", "command", "medical", "transport"}
+    # 所有支持的设备类型
+    supported_device_types = unmanned_device_types | vehicle_types
+
+    for task_type in request.task:
+        for task_item in task_type.taskList:
+            device_id = task_item.deviceId
+            device_name = task_item.deviceName
+            device_type = task_item.deviceType
+
+            # 跳过不支持的设备类型
+            if device_type not in supported_device_types:
+                logger.info(f"[tasks_send] 跳过不支持的设备类型: {device_name}({device_type})")
+                continue
+
+            # ========== 车辆处理逻辑（使用高德API） ==========
+            if device_type in vehicle_types:
+                try:
+                    # 车辆需要目标位置，从任务中获取或使用事件位置
+                    # 这里假设车辆从指挥车位置出发，前往事件位置
+                    if not command_vehicle_position:
+                        logger.warning(f"[tasks_send] 车辆 {device_name} 无起点位置，跳过")
+                        continue
+                    
+                    # 获取事件位置作为目标
+                    event_query = text("""
+                        SELECT 
+                            ST_X(location::geometry) as lng,
+                            ST_Y(location::geometry) as lat
+                        FROM operational_v2.events_v2
+                        WHERE id = :event_id
+                    """)
+                    event_result = await db.execute(event_query, {"event_id": request.eventId})
+                    event_row = event_result.fetchone()
+                    
+                    if not event_row or not event_row.lng or not event_row.lat:
+                        logger.warning(f"[tasks_send] 车辆 {device_name} 无目标位置，跳过")
+                        continue
+                    
+                    dest_position = (event_row.lng, event_row.lat)
+                    
+                    # 调用高德API获取真实路径
+                    logger.info(f"[tasks_send] 车辆 {device_name} 调用高德路径规划: {command_vehicle_position} -> {dest_position}")
+                    try:
+                        amap_result = await amap_route_planning_async(
+                            origin_lon=command_vehicle_position[0],
+                            origin_lat=command_vehicle_position[1],
+                            dest_lon=dest_position[0],
+                            dest_lat=dest_position[1],
+                            strategy=32,  # 躲避拥堵+速度优先
+                        )
+                        
+                        if amap_result.get("success") and amap_result.get("path_points"):
+                            route = [[p[0], p[1]] for p in amap_result["path_points"]]
+                            distance_m = amap_result.get("distance_m", 0)
+                            duration_s = amap_result.get("duration_s", 0)
+                            logger.info(f"[tasks_send] 车辆 {device_name} 高德路径: {len(route)}点, {distance_m/1000:.1f}km, {duration_s/60:.0f}分钟")
+                        else:
+                            # 高德API失败，使用直线路径
+                            logger.warning(f"[tasks_send] 车辆 {device_name} 高德API失败，使用直线路径")
+                            route = [
+                                [command_vehicle_position[0], command_vehicle_position[1]],
+                                [dest_position[0], dest_position[1]]
+                            ]
+                    except Exception as amap_err:
+                        logger.error(f"[tasks_send] 车辆 {device_name} 高德API异常: {amap_err}，使用直线路径")
+                        route = [
+                            [command_vehicle_position[0], command_vehicle_position[1]],
+                            [dest_position[0], dest_position[1]]
+                        ]
+                    
+                    # 生成entity_id
+                    if device_id:
+                        try:
+                            entity_id = UUID(str(device_id))
+                        except (ValueError, TypeError):
+                            entity_id = uuid_lib.uuid4()
+                    else:
+                        entity_id = uuid_lib.uuid4()
+                    
+                    # 车辆速度（默认60km/h = 16.67m/s）
+                    speed_mps = 16.67
+                    
+                    # 获取前端设备类型
+                    frontend_type = device_type_to_frontend.get(device_type, "realTime_vehicle")
+                    
+                    # 1. 创建路径实体
+                    route_entity_id = f"route-{entity_id}"
+                    route_with_height = [[p[0], p[1], 0] for p in route]
+                    
+                    await stomp_broker.broadcast_entity_create({
+                        "id": route_entity_id,
+                        "type": "planned_route",
+                        "layerCode": "layer.path",
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": route_with_height
+                        },
+                        "properties": {
+                            "name": f"{device_name}路线",
+                            "deviceType": device_type,
+                            "routeType": "vehicle",
+                            "isSelect": "1",
+                        },
+                        "styleOverrides": {
+                            "width": 4,
+                            "color": "#FF6B35",  # 橙色表示车辆路线
+                        }
+                    })
+                    logger.info(f"[tasks_send] 车辆 {device_name} 路径实体已创建: {route_entity_id}")
+                    
+                    # 2. 创建车辆初始位置实体
+                    initial_position = route[0]
+                    await stomp_broker.broadcast_location({
+                        "id": str(entity_id),
+                        "type": frontend_type,
+                        "layerCode": "layer.realTimeEquipment",
+                        "geometry": {
+                            "coordinates": [initial_position[0], initial_position[1], 0]
+                        },
+                        "properties": {
+                            "state": "moving",
+                            "name": device_name,
+                            "heading": 0,
+                            "speed": f"{speed_mps * 3.6:.0f}km/h",
+                            "model": device_type,
+                        },
+                        "styleOverrides": {}
+                    })
+                    logger.info(f"[tasks_send] 车辆 {device_name} 初始位置已推送")
+                    
+                    # 3. 启动移动仿真
+                    move_request = MovementStartRequest(
+                        entity_id=entity_id,
+                        entity_type=MovementEntityType.VEHICLE,
+                        route=route,
+                        speed_mps=float(speed_mps),
+                    )
+                    await movement_manager.start_movement(move_request, db)
+                    started_count += 1
+                    logger.info(f"[tasks_send] 车辆 {device_name} 仿真已启动, entity_id={entity_id}, 航点数={len(route)}")
+                    
+                except Exception as e:
+                    logger.error(f"[tasks_send] 车辆 {device_name} 仿真启动失败: {e}")
+                continue
+
+            # ========== 无人设备处理逻辑（使用预设航线） ==========
+            # 优先按 device_id 匹配，备用按 device_name 匹配
+            fp = fp_by_device_id.get(device_id) if device_id else None
+            if not fp and device_name:
+                fp = fp_by_device_name.get(device_name)
+
+            if not fp:
+                logger.warning(f"[tasks_send] 设备 {device_name}({device_id}) 无对应航线计划")
+                continue
+
+            waypoints = fp.get("waypoints", [])
+            if not waypoints:
+                logger.warning(f"[tasks_send] 设备 {device_name} 航线无航点")
+                continue
+
+            # 转换航点格式: [{lat, lng}] -> [[lng, lat]]
+            target_route = []
+            for wp in waypoints:
+                lng = wp.get("lng") or wp.get("lon") or wp.get("longitude")
+                lat = wp.get("lat") or wp.get("latitude")
+                if lng is not None and lat is not None:
+                    target_route.append([float(lng), float(lat)])
+
+            if not target_route:
+                logger.warning(f"[tasks_send] 设备 {device_name} 无有效航点")
+                continue
+
+            # 航线已经在 _build_fallback_flight_plans_from_initial_scan 中包含了起点
+            route = target_route
+            logger.info(f"[tasks_send] 设备 {device_name} 航线: {len(route)} 个航点")
+
+            if len(route) < 2:
+                logger.warning(f"[tasks_send] 设备 {device_name} 有效航点不足: {len(route)}")
+                continue
+
+            # 映射设备类型
+            entity_type_map = {
+                "drone": MovementEntityType.UAV,
+                "uav": MovementEntityType.UAV,
+                "dog": MovementEntityType.ROBOTIC_DOG,
+                "robotic_dog": MovementEntityType.ROBOTIC_DOG,
+            }
+            entity_type = entity_type_map.get(device_type, MovementEntityType.UAV)
+
+            # 获取速度参数
+            flight_params = fp.get("flight_parameters", {})
+            speed_mps = flight_params.get("speed_ms") or flight_params.get("speed_mps") or 10.0
+
+            # 启动移动仿真
+            try:
+                # 生成或解析 entity_id
+                entity_id = None
+                fp_device_id = fp.get("device_id")
+                if fp_device_id:
+                    try:
+                        entity_id = UUID(str(fp_device_id))
+                    except (ValueError, TypeError):
+                        entity_id = uuid_lib.uuid4()
+                else:
+                    entity_id = uuid_lib.uuid4()
+
+                # 获取前端设备类型
+                frontend_type = device_type_to_frontend.get(device_type, "realTime_uav")
+                
+                # 1. 先创建路径实体，让前端渲染路径线
+                route_entity_id = f"route-{entity_id}"
+                # 无人机路径需要添加高度
+                route_with_height = []
+                for point in route:
+                    if device_type in ["drone", "uav"]:
+                        # 无人机默认飞行高度100米
+                        route_with_height.append([point[0], point[1], 100])
+                    else:
+                        route_with_height.append([point[0], point[1], 0])
+                
+                # 使用 planned_route 类型，前端 handleEntity.js 会处理
+                await stomp_broker.broadcast_entity_create({
+                    "id": route_entity_id,
+                    "type": "planned_route",  # 前端识别的路径类型
+                    "layerCode": "layer.path",  # 对应前端 pathLayer
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": route_with_height
+                    },
+                    "properties": {
+                        "name": f"{device_name}航线",
+                        "deviceType": device_type,
+                        "routeType": "reconn",  # 侦察路线
+                        "isSelect": "1",
+                    },
+                    "styleOverrides": {
+                        "width": 3,
+                        "color": "#00ffff" if device_type in ["drone", "uav"] else "#3CD660",
+                    }
+                })
+                logger.info(f"[tasks_send] 设备 {device_name} 路径实体已创建: {route_entity_id}")
+
+                # 2. 创建设备初始位置实体
+                initial_position = route[0]
+                await stomp_broker.broadcast_location({
+                    "id": str(entity_id),
+                    "type": frontend_type,
+                    "layerCode": "layer.realTimeEquipment",
+                    "geometry": {
+                        "coordinates": [initial_position[0], initial_position[1], 100 if device_type in ["drone", "uav"] else 0]
+                    },
+                    "properties": {
+                        "state": "moving",
+                        "name": device_name,
+                        "heading": 0,
+                        "speed": f"{speed_mps * 3.6:.0f}km/h",
+                        "model": device_type,
+                        "battery": "100%",
+                    },
+                    "styleOverrides": {}
+                })
+                logger.info(f"[tasks_send] 设备 {device_name} 初始位置已推送")
+
+                # 3. 启动移动仿真
+                move_request = MovementStartRequest(
+                    entity_id=entity_id,
+                    entity_type=entity_type,
+                    route=route,
+                    speed_mps=float(speed_mps),
+                )
+                await movement_manager.start_movement(move_request, db)
+                started_count += 1
+                logger.info(
+                    f"[tasks_send] 设备 {device_name} 仿真已启动, "
+                    f"entity_id={entity_id}, 航点数={len(route)}, 速度={speed_mps}m/s"
+                )
+            except Exception as e:
+                logger.error(f"[tasks_send] 设备 {device_name} 仿真启动失败: {e}")
+
+    logger.info(f"[tasks_send] 任务下发完成: 总数={task_count}, 启动仿真={started_count}")
+    return ApiResponse.success(
+        {"taskCount": task_count, "simulationStarted": started_count},
+        f"任务下发成功，已启动 {started_count} 个设备仿真"
+    )
 
 
 @router.post("/task-list-detail", response_model=ApiResponse[list[FrontendTask]])
@@ -546,15 +1187,102 @@ async def rescue_task(
                 team_names = ", ".join([u.name for u in task_item.units if u.name])
                 task_description = event_description or f"针对事件'{event_title}'的救援任务"
                 
+                # ========== 4.1 调用 task_coordinator 生成步骤级协作方案 ==========
+                instructions_json = None
+                try:
+                    # 构建队伍信息
+                    valid_units = [u for u in task_item.units if u.id]
+                    if valid_units:
+                        from src.agents.task_coordinator.schemas import TaskAllocation, TeamInfo
+                        from src.agents.task_coordinator.agent import run_task_coordinator
+
+                        # 从 Redis 获取 AI 分析结果（获取灾害类型）
+                        disaster_type = "earthquake"  # 默认
+                        scene_code = None
+                        ai_result = await _get_ai_result_from_redis(event_id)
+                        if ai_result and ai_result.get("success"):
+                            understanding = ai_result.get("understanding", {})
+                            parsed = understanding.get("parsed_disaster", {})
+                            disaster_type = parsed.get("disaster_type", "earthquake")
+                            scene_code = parsed.get("scene_code")
+
+                        team_infos = [
+                            TeamInfo(
+                                team_id=u.id,
+                                team_name=u.name,
+                                capabilities=[],
+                                equipment=[],
+                            )
+                            for u in valid_units
+                        ]
+
+                        task_allocation = TaskAllocation(
+                            task_id=str(new_task_id),
+                            task_name=task_title,
+                            disaster_type=disaster_type,
+                            scene_code=scene_code,
+                            allocated_teams=team_infos,
+                        )
+
+                        coordinator_output = await run_task_coordinator(
+                            event_id=event_id,
+                            task_allocation=task_allocation,
+                            disaster_info={"disaster_type": disaster_type, "scene_code": scene_code},
+                        )
+
+                        # 构建 instructions JSON
+                        step_instructions_data = []
+                        for inst in coordinator_output.step_instructions:
+                            teams_data = [
+                                {
+                                    "team_id": t.team_id,
+                                    "team_name": t.team_name,
+                                    "role": t.role.value if hasattr(t.role, 'value') else str(t.role),
+                                    "responsibilities": t.responsibilities,
+                                    "equipment": t.equipment,
+                                }
+                                for t in inst.teams
+                            ]
+                            step_instructions_data.append({
+                                "step_id": inst.step_id,
+                                "step_name": inst.step_name,
+                                "sequence": inst.sequence,
+                                "teams": teams_data,
+                                "cooperation_mode": inst.cooperation_mode,
+                                "depends_on": inst.depends_on,
+                                "estimated_duration": inst.estimated_duration,
+                                "completion_criteria": inst.completion_criteria,
+                                "safety_notes": inst.safety_notes,
+                            })
+
+                        instructions_json = json.dumps({
+                            "sop_template": coordinator_output.sop_template,
+                            "total_steps": coordinator_output.total_steps,
+                            "estimated_duration_minutes": coordinator_output.estimated_duration_minutes,
+                            "step_instructions": step_instructions_data,
+                            "warnings": coordinator_output.warnings,
+                        }, ensure_ascii=False)
+
+                        logger.info(
+                            f"[rescueTask] 事件 {event_id} 步骤协作方案生成: "
+                            f"steps={coordinator_output.total_steps}, "
+                            f"duration={coordinator_output.estimated_duration_minutes}min"
+                        )
+
+                except Exception as coord_err:
+                    # 优雅降级：task_coordinator 失败不阻塞任务创建
+                    logger.warning(f"[rescueTask] 事件 {event_id} 步骤协作方案生成失败: {coord_err}")
+
                 insert_task = text("""
                     INSERT INTO operational_v2.tasks_v2 (
                         id, scenario_id, event_id, task_code, task_type,
                         title, description, status, priority,
-                        target_location, created_at, updated_at
+                        target_location, instructions, created_at, updated_at
                     ) VALUES (
                         :id, :scenario_id, :event_id, :task_code, 'rescue',
                         :title, :description, 'assigned', :priority,
                         ST_SetSRID(ST_MakePoint(:lng, :lat), 4326),
+                        :instructions,
                         now(), now()
                     )
                 """)
@@ -568,6 +1296,7 @@ async def rescue_task(
                     "priority": event_priority,
                     "lng": event_lng,
                     "lat": event_lat,
+                    "instructions": instructions_json,
                 })
                 
                 logger.info(f"[rescueTask] 创建任务 task_id={new_task_id}, task_code={task_code}")
@@ -635,6 +1364,20 @@ async def rescue_task(
                     """)
                     user_result = await db.execute(user_query, {"team_id": unit.id})
                     user_rows = user_result.fetchall()
+
+                    # 查询队伍联系电话（用于日志）
+                    team_phone_query = text("""
+                        SELECT contact_phone FROM operational_v2.rescue_teams_v2 WHERE id = :team_id
+                    """)
+                    team_phone_result = await db.execute(team_phone_query, {"team_id": unit.id})
+                    team_phone_row = team_phone_result.fetchone()
+                    team_contact_phone = team_phone_row.contact_phone if team_phone_row else "未知"
+
+                    if not user_rows:
+                        logger.warning(
+                            f"[rescueTask] 队伍 {unit.name} ({unit.id}) 的联系人手机号 {team_contact_phone} "
+                            f"在 users_v2 表中无匹配用户，无法推送任务。请确认队长已用APP登录过。"
+                        )
 
                     if user_rows:
                         task_push_data = {
@@ -1263,9 +2006,106 @@ async def multi_rescue_task(
             )
             source = "no_resource"
 
+        # ========== 调用 task_coordinator 生成步骤级协作方案 ==========
+        sop_template = ""
+        sop_name = ""
+        total_steps = 0
+        estimated_duration_minutes = 0
+        step_instructions: list[StepInstructionInfo] = []
+
+        # 只有有效队伍时才调用 task_coordinator
+        valid_units = [u for u in unit_tasks if u.id]
+        if valid_units and source != "no_resource":
+            try:
+                # 从 AI 结果或事件类型推断灾害类型
+                disaster_type = "unknown"
+                scene_code = None
+                ai_result = ai_results_cache.get(ev_id)
+                if ai_result:
+                    understanding = ai_result.get("understanding", {})
+                    parsed = understanding.get("parsed_disaster", {})
+                    disaster_type = parsed.get("disaster_type", "unknown")
+                    scene_code = parsed.get("scene_code")
+
+                # 从事件类型推断（备用）
+                if disaster_type == "unknown":
+                    event_type = str(ev.get("event_type", ""))
+                    event_type_map = {
+                        "trapped_person": "earthquake",
+                        "building_collapse": "earthquake",
+                        "fire": "fire",
+                        "flood": "flood",
+                        "hazmat_leak": "hazmat",
+                    }
+                    disaster_type = event_type_map.get(event_type, "unknown")
+
+                # 构建 TaskAllocation
+                team_infos = [
+                    TeamInfo(
+                        team_id=u.id,
+                        team_name=u.name,
+                        capabilities=[],  # 可从数据库查询，此处简化
+                        equipment=u.equipments,
+                    )
+                    for u in valid_units
+                ]
+
+                task_allocation = TaskAllocation(
+                    task_id=f"task-{ev_id[:8]}",
+                    task_name=str(ev.get("title", "救援任务")),
+                    disaster_type=disaster_type,
+                    scene_code=scene_code,
+                    allocated_teams=team_infos,
+                )
+
+                # 调用 task_coordinator
+                coordinator_output = await run_task_coordinator(
+                    event_id=ev_id,
+                    task_allocation=task_allocation,
+                    disaster_info={"disaster_type": disaster_type, "scene_code": scene_code},
+                )
+
+                # 提取结果
+                sop_template = coordinator_output.sop_template
+                total_steps = coordinator_output.total_steps
+                estimated_duration_minutes = coordinator_output.estimated_duration_minutes
+
+                # 转换 step_instructions 格式
+                for inst in coordinator_output.step_instructions:
+                    teams = [
+                        TeamRoleInfo(
+                            team_id=t.team_id,
+                            team_name=t.team_name,
+                            role=t.role.value if hasattr(t.role, 'value') else str(t.role),
+                            responsibilities=t.responsibilities,
+                            equipment=t.equipment,
+                        )
+                        for t in inst.teams
+                    ]
+                    step_instructions.append(StepInstructionInfo(
+                        step_id=inst.step_id,
+                        step_name=inst.step_name,
+                        sequence=inst.sequence,
+                        teams=teams,
+                        cooperation_mode=inst.cooperation_mode,
+                        depends_on=inst.depends_on,
+                        estimated_duration=inst.estimated_duration,
+                        completion_criteria=inst.completion_criteria,
+                        safety_notes=inst.safety_notes,
+                    ))
+
+                logger.info(
+                    f"[multiRescueTask] 事件 {ev_id} 步骤协作方案生成: "
+                    f"steps={total_steps}, duration={estimated_duration_minutes}min"
+                )
+
+            except Exception as coord_err:
+                # 优雅降级：task_coordinator 失败不阻塞整个接口
+                logger.warning(f"[multiRescueTask] 事件 {ev_id} 步骤协作方案生成失败: {coord_err}")
+
         detail = MultiRescueTaskDetail(
-            event_id=ev_id,  # 新增：关联事件ID
-            source=source,   # 新增：方案来源
+            event_id=ev_id,
+            source=source,
             level=level,
             title=str(ev.get("title", "")),
             rescueTask=[
@@ -1274,6 +2114,12 @@ async def multi_rescue_task(
                     equipmentList=[],
                 )
             ],
+            # 步骤级协作方案
+            sop_template=sop_template,
+            sop_name=sop_name,
+            total_steps=total_steps,
+            estimated_duration_minutes=estimated_duration_minutes,
+            step_instructions=step_instructions,
         )
         details.append(detail)
 
@@ -1282,3 +2128,161 @@ async def multi_rescue_task(
         details,
         "救援任务草案已生成。请审核后点击【指令下发】正式执行。",
     )
+
+
+@router.post("/generate-action-plan", response_model=ApiResponse[ActionPlanResponse])
+async def generate_action_plan(
+    request: GenerateActionPlanRequest,
+) -> ApiResponse[ActionPlanResponse]:
+    """
+    生成步骤级行动方案
+
+    调用 task_coordinator agent，将队伍分配转换为步骤级协作指令。
+
+    业务逻辑：
+    1. 从 Redis 获取 emergency_ai 分析结果（获取灾害类型）
+    2. 构建 TaskAllocation 输入
+    3. 调用 task_coordinator 生成步骤级指令
+    4. 返回可展开的步骤详情面板数据
+
+    Args:
+        request: 包含 event_id 和 teams 列表
+
+    Returns:
+        ActionPlanResponse 包含步骤级协作方案
+    """
+    logger.info(f"[generateActionPlan] 生成行动方案, event_id={request.event_id}")
+
+    # 1. 获取事件信息和 AI 分析结果
+    ai_result = await _get_ai_result_from_redis(request.event_id)
+
+    # 提取灾害类型
+    disaster_type = "unknown"
+    scene_code = None
+    if ai_result and ai_result.get("success"):
+        understanding = ai_result.get("understanding", {})
+        parsed = understanding.get("parsed_disaster", {})
+        disaster_type = parsed.get("disaster_type", "unknown")
+        scene_code = parsed.get("scene_code")
+
+    # 2. 查询事件基本信息
+    event_title = "救援任务"
+    async with AsyncSessionLocal() as db:
+        event_query = text("""
+            SELECT title, event_type FROM operational_v2.events_v2
+            WHERE id = :event_id
+        """)
+        result = await db.execute(event_query, {"event_id": request.event_id})
+        row = result.fetchone()
+        if row:
+            event_title = row.title or "救援任务"
+            # 如果没有从 AI 获取到灾害类型，从事件类型推断
+            if disaster_type == "unknown" and row.event_type:
+                event_type_map = {
+                    "trapped_person": "earthquake",
+                    "building_collapse": "earthquake",
+                    "fire": "fire",
+                    "flood": "flood",
+                    "hazmat_leak": "hazmat",
+                }
+                disaster_type = event_type_map.get(row.event_type, "unknown")
+
+    # 3. 构建 TaskAllocation
+    from src.agents.task_coordinator.schemas import TaskAllocation, TeamInfo
+    from src.agents.task_coordinator.agent import run_task_coordinator
+
+    # 转换队伍信息
+    team_infos = []
+    for unit in request.teams:
+        # 查询队伍能力和设备
+        team_caps = []
+        team_equips = []
+        try:
+            async with AsyncSessionLocal() as db:
+                # 查询能力
+                caps_sql = text("""
+                    SELECT capability_code FROM operational_v2.team_capabilities_v2
+                    WHERE team_id = :team_id
+                """)
+                caps_result = await db.execute(caps_sql, {"team_id": unit.id})
+                team_caps = [r.capability_code for r in caps_result.fetchall()]
+
+                # 查询设备
+                equips_sql = text("""
+                    SELECT e.name FROM operational_v2.team_equipment_v2 te
+                    JOIN operational_v2.equipment_v2 e ON te.equipment_id = e.id
+                    WHERE te.team_id = :team_id
+                """)
+                equips_result = await db.execute(equips_sql, {"team_id": unit.id})
+                team_equips = [r.name for r in equips_result.fetchall()]
+        except Exception as e:
+            logger.warning(f"[generateActionPlan] 查询队伍信息失败: {e}")
+
+        team_infos.append(TeamInfo(
+            team_id=unit.id,
+            team_name=unit.name,
+            capabilities=team_caps,
+            equipment=team_equips,
+        ))
+
+    task_allocation = TaskAllocation(
+        task_id=f"task-{request.event_id[:8]}",
+        task_name=event_title,
+        disaster_type=disaster_type,
+        scene_code=scene_code,
+        allocated_teams=team_infos,
+    )
+
+    # 4. 调用 task_coordinator
+    try:
+        output = await run_task_coordinator(
+            event_id=request.event_id,
+            task_allocation=task_allocation,
+            disaster_info={"disaster_type": disaster_type, "scene_code": scene_code},
+        )
+    except Exception as e:
+        logger.exception(f"[generateActionPlan] task_coordinator 执行失败: {e}")
+        return ApiResponse.error(500, f"生成行动方案失败: {str(e)}")
+
+    # 5. 转换为前端响应格式
+    step_instructions = []
+    for inst in output.step_instructions:
+        teams = [
+            TeamRoleInfo(
+                team_id=t.team_id,
+                team_name=t.team_name,
+                role=t.role.value if hasattr(t.role, 'value') else str(t.role),
+                responsibilities=t.responsibilities,
+                equipment=t.equipment,
+            )
+            for t in inst.teams
+        ]
+        step_instructions.append(StepInstructionInfo(
+            step_id=inst.step_id,
+            step_name=inst.step_name,
+            sequence=inst.sequence,
+            teams=teams,
+            cooperation_mode=inst.cooperation_mode,
+            depends_on=inst.depends_on,
+            estimated_duration=inst.estimated_duration,
+            completion_criteria=inst.completion_criteria,
+            safety_notes=inst.safety_notes,
+        ))
+
+    response = ActionPlanResponse(
+        event_id=request.event_id,
+        task_id=output.task_id,
+        task_name=output.task_name,
+        sop_template=output.sop_template,
+        sop_name="",  # 可从 Neo4j 查询
+        total_steps=output.total_steps,
+        estimated_duration_minutes=output.estimated_duration_minutes,
+        step_instructions=step_instructions,
+        warnings=output.warnings,
+    )
+
+    logger.info(
+        f"[generateActionPlan] 生成完成: steps={output.total_steps}, "
+        f"duration={output.estimated_duration_minutes}min"
+    )
+    return ApiResponse.success(response, "行动方案生成成功")

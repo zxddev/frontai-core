@@ -136,7 +136,9 @@ async def get_task_by_event(
                     ms.status as movement_status,
                     ms.eta,
                     ms.updated_at as last_update,
-                    rt.status as team_status
+                    rt.status as team_status,
+                    rt.contact_person,
+                    rt.contact_phone
                 FROM operational_v2.task_assignments_v2 ta
                 LEFT JOIN operational_v2.movement_sessions_v2 ms
                     ON ms.team_id = ta.assignee_id
@@ -178,13 +180,58 @@ async def get_task_by_event(
                     movement_status=movement_status,
                     last_update=row.last_update,
                     mission_detail=mission_detail,
+                    contact_person=row.contact_person,
+                    contact_phone=row.contact_phone,
                 ))
         except Exception as e:
             logger.warning(f"[by-event] 查询队伍实时状态失败: task_id={task_id}, error={e}")
 
+        # ========== 解析 instructions 字段获取步骤级协作方案 ==========
+        from .schemas import ActionPlan, StepInstruction, StepTeamRole
+        import json
+
+        action_plan = None
+        try:
+            if base_response.instructions:
+                instructions_data = json.loads(base_response.instructions)
+                step_instructions = []
+                for step_data in instructions_data.get("step_instructions", []):
+                    teams = [
+                        StepTeamRole(
+                            team_id=t.get("team_id", ""),
+                            team_name=t.get("team_name", ""),
+                            role=t.get("role", ""),
+                            responsibilities=t.get("responsibilities", []),
+                            equipment=t.get("equipment", []),
+                        )
+                        for t in step_data.get("teams", [])
+                    ]
+                    step_instructions.append(StepInstruction(
+                        step_id=step_data.get("step_id", ""),
+                        step_name=step_data.get("step_name", ""),
+                        sequence=step_data.get("sequence", 0),
+                        teams=teams,
+                        cooperation_mode=step_data.get("cooperation_mode", "sequential"),
+                        depends_on=step_data.get("depends_on", []),
+                        estimated_duration=step_data.get("estimated_duration", 30),
+                        completion_criteria=step_data.get("completion_criteria"),
+                        safety_notes=step_data.get("safety_notes"),
+                    ))
+                action_plan = ActionPlan(
+                    sop_template=instructions_data.get("sop_template", ""),
+                    total_steps=instructions_data.get("total_steps", 0),
+                    estimated_duration_minutes=instructions_data.get("estimated_duration_minutes", 0),
+                    step_instructions=step_instructions,
+                    warnings=instructions_data.get("warnings", []),
+                )
+                logger.info(f"[by-event] task_id={task_id}, 步骤级方案: steps={action_plan.total_steps}")
+        except Exception as e:
+            logger.warning(f"[by-event] 解析步骤级方案失败: task_id={task_id}, error={e}")
+
         task_detail = TaskDetailResponse(
             **base_response.model_dump(),
             team_realtime=team_realtime,
+            action_plan=action_plan,
         )
 
         return EventBasedTaskResponse(
@@ -227,13 +274,17 @@ async def get_task(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    获取任务详情（含队伍实时状态）
+    获取任务详情（含队伍实时状态和步骤级协作方案）
 
-    返回任务基本信息和分配队伍的实时位置、ETA、通信状态
+    返回任务基本信息、分配队伍的实时位置、ETA、通信状态，以及步骤级协作方案
     """
+    from .schemas import ActionPlan, StepInstruction, StepTeamRole
+    import json
+
     base_response = await service.get_by_id(task_id)
 
     team_realtime: list[TeamRealtimeStatus] = []
+    action_plan = None
 
     try:
         realtime_sql = text("""
@@ -247,7 +298,9 @@ async def get_task(
                 ms.status as movement_status,
                 ms.eta,
                 ms.updated_at as last_update,
-                rt.status as team_status
+                rt.status as team_status,
+                rt.contact_person,
+                rt.contact_phone
             FROM operational_v2.task_assignments_v2 ta
             LEFT JOIN operational_v2.movement_sessions_v2 ms
                 ON ms.team_id = ta.assignee_id
@@ -289,6 +342,8 @@ async def get_task(
                 movement_status=movement_status,
                 last_update=row.last_update,
                 mission_detail=mission_detail,
+                contact_person=row.contact_person,
+                contact_phone=row.contact_phone,
             ))
 
         logger.info(f"[TaskDetail] task_id={task_id}, 队伍实时状态数={len(team_realtime)}")
@@ -296,9 +351,48 @@ async def get_task(
     except Exception as e:
         logger.warning(f"[TaskDetail] 查询队伍实时状态失败: task_id={task_id}, error={e}")
 
+    # ========== 解析 instructions 字段获取步骤级协作方案 ==========
+    try:
+        if base_response.instructions:
+            instructions_data = json.loads(base_response.instructions)
+            step_instructions = []
+            for step_data in instructions_data.get("step_instructions", []):
+                teams = [
+                    StepTeamRole(
+                        team_id=t.get("team_id", ""),
+                        team_name=t.get("team_name", ""),
+                        role=t.get("role", ""),
+                        responsibilities=t.get("responsibilities", []),
+                        equipment=t.get("equipment", []),
+                    )
+                    for t in step_data.get("teams", [])
+                ]
+                step_instructions.append(StepInstruction(
+                    step_id=step_data.get("step_id", ""),
+                    step_name=step_data.get("step_name", ""),
+                    sequence=step_data.get("sequence", 0),
+                    teams=teams,
+                    cooperation_mode=step_data.get("cooperation_mode", "sequential"),
+                    depends_on=step_data.get("depends_on", []),
+                    estimated_duration=step_data.get("estimated_duration", 30),
+                    completion_criteria=step_data.get("completion_criteria"),
+                    safety_notes=step_data.get("safety_notes"),
+                ))
+            action_plan = ActionPlan(
+                sop_template=instructions_data.get("sop_template", ""),
+                total_steps=instructions_data.get("total_steps", 0),
+                estimated_duration_minutes=instructions_data.get("estimated_duration_minutes", 0),
+                step_instructions=step_instructions,
+                warnings=instructions_data.get("warnings", []),
+            )
+            logger.info(f"[TaskDetail] task_id={task_id}, 步骤级方案: steps={action_plan.total_steps}")
+    except Exception as e:
+        logger.warning(f"[TaskDetail] 解析步骤级方案失败: task_id={task_id}, error={e}")
+
     return TaskDetailResponse(
         **base_response.model_dump(),
         team_realtime=team_realtime,
+        action_plan=action_plan,
     )
 
 

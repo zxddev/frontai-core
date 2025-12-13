@@ -132,6 +132,61 @@ class EarthquakeTriggerResponse(BaseModel):
     message: str = Field(..., description="推送的消息内容")
     animation_sent: bool = Field(..., alias="animationSent", description="动画是否已推送")
     duplicate: bool = Field(default=False, description="是否为重复事件（幂等返回）")
-    
+
+    class Config:
+        populate_by_name = True
+
+
+# ============================================================================
+# 事件详情和更新（前端适配层）
+# ============================================================================
+
+class EventDetailResponse(BaseModel):
+    """
+    事件详情响应（前端 camelCase 格式）
+
+    用于 GET /events/detail 接口
+    """
+    event_id: str = Field(..., alias="eventId")
+    scenario_id: str = Field(..., alias="scenarioId")
+    event_code: str = Field(..., alias="eventCode")
+    event_type: str = Field(..., alias="eventType")
+    source_type: str = Field(..., alias="sourceType")
+    title: str
+    description: Optional[str] = None
+    location: dict = Field(..., description="位置 {longitude, latitude}")
+    address: Optional[str] = None
+    status: str
+    priority: str
+    estimated_victims: int = Field(default=0, alias="estimatedVictims")
+    rescued_count: int = Field(default=0, alias="rescuedCount")
+    casualty_count: int = Field(default=0, alias="casualtyCount")
+    is_time_critical: bool = Field(default=False, alias="isTimeCritical")
+    golden_hour_deadline: Optional[str] = Field(None, alias="goldenHourDeadline")
+    reported_at: Optional[str] = Field(None, alias="reportedAt")
+    confirmed_at: Optional[str] = Field(None, alias="confirmedAt")
+    resolved_at: Optional[str] = Field(None, alias="resolvedAt")
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    updated_at: Optional[str] = Field(None, alias="updatedAt")
+
+    class Config:
+        populate_by_name = True
+
+
+class EventUpdateRequest(BaseModel):
+    """
+    事件更新请求（前端 camelCase 格式）
+
+    用于 POST /events/update 接口
+    """
+    event_id: str = Field(..., alias="eventId", description="事件ID")
+    title: Optional[str] = Field(None, description="标题")
+    description: Optional[str] = Field(None, description="描述")
+    priority: Optional[str] = Field(None, description="优先级: critical/high/medium/low")
+    estimated_victims: Optional[int] = Field(None, alias="estimatedVictims", description="预估受灾人数")
+    rescued_count: Optional[int] = Field(None, alias="rescuedCount", description="已救援人数")
+    casualty_count: Optional[int] = Field(None, alias="casualtyCount", description="伤亡人数")
+    is_time_critical: Optional[bool] = Field(None, alias="isTimeCritical", description="是否时间紧急")
+
     class Config:
         populate_by_name = True

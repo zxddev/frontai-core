@@ -193,11 +193,45 @@ class TeamRealtimeStatus(BaseModel):
     movement_status: str = "unknown"
     last_update: Optional[datetime] = None
     mission_detail: Optional[dict] = None  # 一线队员任务详情（AI生成）
+    contact_person: Optional[str] = None   # 队长/联系人姓名
+    contact_phone: Optional[str] = None    # 队长/联系人电话
+
+
+class StepTeamRole(BaseModel):
+    """步骤中的队伍角色"""
+    team_id: str
+    team_name: str
+    role: str  # 主攻/配合/保障/待命
+    responsibilities: list[str] = []
+    equipment: list[str] = []
+
+
+class StepInstruction(BaseModel):
+    """步骤级指令"""
+    step_id: str
+    step_name: str
+    sequence: int
+    teams: list[StepTeamRole] = []
+    cooperation_mode: str = "sequential"  # sequential/parallel/support
+    depends_on: list[str] = []
+    estimated_duration: int = 30  # 分钟
+    completion_criteria: Optional[str] = None
+    safety_notes: Optional[str] = None
+
+
+class ActionPlan(BaseModel):
+    """步骤级协作方案（task_coordinator 输出）"""
+    sop_template: str = ""
+    total_steps: int = 0
+    estimated_duration_minutes: int = 0
+    step_instructions: list[StepInstruction] = []
+    warnings: list[str] = []
 
 
 class TaskDetailResponse(TaskResponse):
-    """任务详情响应（含队伍实时状态）"""
+    """任务详情响应（含队伍实时状态和步骤级协作方案）"""
     team_realtime: list[TeamRealtimeStatus] = []
+    action_plan: Optional[ActionPlan] = None  # 步骤级协作方案
 
 
 class EventBasedTaskResponse(BaseModel):

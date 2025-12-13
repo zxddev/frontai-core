@@ -30,6 +30,7 @@ from src.domains.map_entities.schemas import (
 from src.domains.frontend_api.common import ApiResponse
 from .schemas import (
     EarthquakeTriggerRequest, EarthquakeTriggerResponse, EarthquakeAnimationPayload,
+    EventDetailResponse, EventUpdateRequest,
 )
 
 
@@ -207,6 +208,115 @@ async def get_event_list(
     except Exception as e:
         logger.exception(f"获取事件列表失败: {e}")
         return ApiResponse.error(500, f"获取事件列表失败: {str(e)}")
+
+
+@router.get("/detail", response_model=ApiResponse[EventDetailResponse])
+async def get_event_detail(
+    eventId: str = Query(..., description="事件ID"),
+    service: EventService = Depends(get_event_service),
+) -> ApiResponse[EventDetailResponse]:
+    """
+    获取事件详情
+
+    返回事件的完整信息，用于前端点击事件/救援点后查看详情
+    """
+    logger.info(f"获取事件详情, eventId={eventId}")
+
+    try:
+        event_uuid = UUID(eventId)
+        event = await service.get_by_id(event_uuid)
+
+        # 转换为前端格式
+        detail = EventDetailResponse(
+            event_id=str(event.id),
+            scenario_id=str(event.scenario_id),
+            event_code=event.event_code,
+            event_type=event.event_type.value,
+            source_type=event.source_type.value,
+            title=event.title,
+            description=event.description,
+            location={
+                "longitude": event.location.longitude,
+                "latitude": event.location.latitude,
+            },
+            address=event.address,
+            status=event.status.value,
+            priority=event.priority.value,
+            estimated_victims=event.estimated_victims,
+            rescued_count=event.rescued_count,
+            casualty_count=event.casualty_count,
+            is_time_critical=event.is_time_critical,
+            golden_hour_deadline=event.golden_hour_deadline.isoformat() if event.golden_hour_deadline else None,
+            reported_at=event.reported_at.isoformat() if event.reported_at else None,
+            confirmed_at=event.confirmed_at.isoformat() if event.confirmed_at else None,
+            resolved_at=event.resolved_at.isoformat() if event.resolved_at else None,
+            created_at=event.created_at.isoformat() if event.created_at else None,
+            updated_at=event.updated_at.isoformat() if event.updated_at else None,
+        )
+
+        return ApiResponse.success(detail.model_dump(by_alias=True))
+
+    except ValueError as e:
+        logger.warning(f"无效的ID格式: {e}")
+        return ApiResponse.error(400, f"无效的ID格式: {str(e)}")
+    except Exception as e:
+        logger.exception(f"获取事件详情失败: {e}")
+        return ApiResponse.error(500, f"获取事件详情失败: {str(e)}")
+
+
+@router.post("/update", response_model=ApiResponse)
+async def update_event(
+    request: EventUpdateRequest,
+    service: EventService = Depends(get_event_service),
+) -> ApiResponse:
+    """
+    更新事件信息
+
+    支持更新标题、描述、优先级、受灾人数等字段
+    """
+    logger.info(f"更新事件, eventId={request.event_id}")
+
+    try:
+        from src.domains.events.schemas import EventUpdate
+
+        event_uuid = UUID(request.event_id)
+
+        # 构建更新数据（只包含非空字段）
+        update_data = {}
+        if request.title is not None:
+            update_data["title"] = request.title
+        if request.description is not None:
+            update_data["description"] = request.description
+        if request.priority is not None:
+            update_data["priority"] = request.priority
+        if request.estimated_victims is not None:
+            update_data["estimated_victims"] = request.estimated_victims
+        if request.rescued_count is not None:
+            update_data["rescued_count"] = request.rescued_count
+        if request.casualty_count is not None:
+            update_data["casualty_count"] = request.casualty_count
+        if request.is_time_critical is not None:
+            update_data["is_time_critical"] = request.is_time_critical
+
+        if not update_data:
+            return ApiResponse.error(400, "没有需要更新的字段")
+
+        event_update = EventUpdate(**update_data)
+        result = await service.update(event_uuid, event_update)
+
+        logger.info(f"事件更新成功, eventId={request.event_id}")
+        return ApiResponse.success({
+            "eventId": str(result.id),
+            "status": result.status.value,
+            "message": "更新成功",
+        })
+
+    except ValueError as e:
+        logger.warning(f"无效的ID格式: {e}")
+        return ApiResponse.error(400, f"无效的ID格式: {str(e)}")
+    except Exception as e:
+        logger.exception(f"更新事件失败: {e}")
+        return ApiResponse.error(500, f"更新事件失败: {str(e)}")
 
 
 @router.post("/resolve", response_model=ApiResponse)

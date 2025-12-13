@@ -523,25 +523,51 @@ class MovementSimulationManager:
             }
             frontend_type = type_map.get(session.entity_type.value, "realTime_command_vhicle")
             
+            # 设备名称映射
+            name_map = {
+                "uav": "侦察无人机",
+                "robotic_dog": "侦察机器狗",
+                "usv": "侦察无人艇",
+                "team": "救援队伍",
+                "vehicle": "指挥车",
+            }
+            device_name = name_map.get(session.entity_type.value, "设备")
+            
+            # 无人机需要高度坐标（默认100米）
+            if session.entity_type.value == "uav":
+                coordinates = [position.lon, position.lat, 100]
+            else:
+                coordinates = [position.lon, position.lat, 0]
+            
             await broker.broadcast_location({
                 "id": str(session.entity_id),
+                # 便于前端按队伍ID过滤实时位置（RouteNavigationScreen 使用 teamId 订阅）
+                "team_id": str(session.team_id) if session.team_id else None,
+                "entity_type": session.entity_type.value,
                 "type": frontend_type,
                 "layerCode": "layer.realTimeEquipment",
                 "geometry": {
-                    "coordinates": [position.lon, position.lat]
+                    "coordinates": coordinates
                 },
                 "properties": {
+                    # 兼容PC端：仅识别 moving/stopped
                     "state": "moving",
-                    "name": "救援队伍",
+                    # 供移动端/调试使用：完整状态（moving/paused/completed/...）
+                    "movement_state": session.state.value,
+                    "name": device_name,
                     "heading": int(session.current_heading),
                     "speed": f"{session.speed_mps * 3.6:.0f}km/h",
+                    "model": session.entity_type.value,
+                    "battery": "85%",
                 },
                 "styleOverrides": {}
             })
             
             # 同步更新数据库中的队伍位置，供风险检测使用
             if session.entity_type.value == "team":
-                await self._update_team_location_in_db(session.entity_id, position)
+                team_id = session.team_id or session.resource_id
+                if team_id:
+                    await self._update_team_location_in_db(team_id, position)
                 
         except Exception as e:
             logger.warning(f"广播位置失败: {e}")

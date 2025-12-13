@@ -63,6 +63,7 @@ class UnitTask(BaseModel):
 
 class EquipmentTask(BaseModel):
     """设备任务"""
+    deviceId: str = Field("", description="设备ID，用于匹配航线计划")
     deviceName: str
     deviceType: str
     carryingModule: str
@@ -123,6 +124,12 @@ class MultiRescueTaskDetail(BaseModel):
     level: int = Field(..., description="紧急级别 1-4")
     title: str = Field(..., description="事件标题")
     rescueTask: list[RescueTask] = Field(default_factory=list)
+    # 步骤级协作方案（task_coordinator 生成）
+    sop_template: str = Field("", description="SOP模板ID")
+    sop_name: str = Field("", description="SOP模板名称")
+    total_steps: int = Field(0, description="总步骤数")
+    estimated_duration_minutes: int = Field(0, description="预估总时长（分钟）")
+    step_instructions: list["StepInstructionInfo"] = Field(default_factory=list, description="步骤级协作指令")
 
 
 class MissionDetail(BaseModel):
@@ -174,3 +181,48 @@ class BatchRescueTaskResponse(BaseModel):
     created: int = Field(..., description="成功创建数")
     skipped: int = Field(0, description="跳过数（已有任务）")
     results: list[TaskCreateResult] = Field(default_factory=list)
+
+
+# ============================================================================
+# 步骤级协作方案（task_coordinator 输出）
+# ============================================================================
+
+class TeamRoleInfo(BaseModel):
+    """队伍角色信息"""
+    team_id: str = Field(..., description="队伍ID")
+    team_name: str = Field(..., description="队伍名称")
+    role: str = Field(..., description="角色：主攻/配合/保障/待命")
+    responsibilities: list[str] = Field(default_factory=list, description="职责列表")
+    equipment: list[str] = Field(default_factory=list, description="分配的设备")
+
+
+class StepInstructionInfo(BaseModel):
+    """步骤指令信息"""
+    step_id: str = Field(..., description="步骤ID")
+    step_name: str = Field(..., description="步骤名称")
+    sequence: int = Field(..., description="执行顺序")
+    teams: list[TeamRoleInfo] = Field(default_factory=list, description="参与队伍")
+    cooperation_mode: str = Field("sequential", description="协作模式：sequential/parallel/support")
+    depends_on: list[str] = Field(default_factory=list, description="依赖的步骤ID")
+    estimated_duration: int = Field(30, description="预估时长（分钟）")
+    completion_criteria: Optional[str] = Field(None, description="完成标准")
+    safety_notes: Optional[str] = Field(None, description="安全注意事项")
+
+
+class ActionPlanResponse(BaseModel):
+    """行动方案响应（步骤级协作）"""
+    event_id: str = Field(..., description="事件ID")
+    task_id: str = Field(..., description="任务ID")
+    task_name: str = Field(..., description="任务名称")
+    sop_template: str = Field(..., description="SOP模板ID")
+    sop_name: str = Field("", description="SOP模板名称")
+    total_steps: int = Field(..., description="总步骤数")
+    estimated_duration_minutes: int = Field(..., description="预估总时长")
+    step_instructions: list[StepInstructionInfo] = Field(default_factory=list, description="步骤指令列表")
+    warnings: list[str] = Field(default_factory=list, description="警告信息")
+
+
+class GenerateActionPlanRequest(BaseModel):
+    """生成行动方案请求"""
+    event_id: str = Field(..., description="事件ID")
+    teams: list[UnitTaskItem] = Field(..., description="分配的队伍列表")

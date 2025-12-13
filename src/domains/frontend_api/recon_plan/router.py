@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agents.reconnaissance import get_recon_agent
 from src.agents.recon_scheduler import get_recon_scheduler_agent
-from src.core.database import get_db
+from src.core.database import get_db, AsyncSessionLocal
 from src.domains.frontend_api.common import ApiResponse
 from src.infra.config.algorithm_config_service import ConfigurationMissingError
 from .scheduler_schemas import (
@@ -135,15 +135,15 @@ def _format_plan_content(response: ReconPlanResponse) -> str:
 
 
 async def _save_recon_plan(
-    db: AsyncSession,
     scenario_id: str,
     event_id: Optional[str],
     response: ReconPlanResponse,
 ) -> str:
     """保存侦察方案到 recon_plans 表。
     
+    注意：此函数创建新的数据库连接，因为调用方的连接可能在 LLM 调用期间超时关闭。
+    
     Args:
-        db: 数据库会话
         scenario_id: 想定ID
         event_id: 事件ID（可空）
         response: 侦察方案响应对象
@@ -192,20 +192,22 @@ async def _save_recon_plan(
         )
     """)
 
-    await db.execute(
-        sql,
-        {
-            "plan_id": plan_id,
-            "incident_id": event_id,
-            "plan_title": plan_title,
-            "plan_content": plan_content,
-            "plan_data": plan_data_json,
-            "device_count": device_count,
-            "target_count": target_count,
-            "estimated_duration": estimated_duration,
-        },
-    )
-    await db.commit()
+    # 使用新的数据库连接，避免因 LLM 调用耗时导致连接超时
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            sql,
+            {
+                "plan_id": plan_id,
+                "incident_id": event_id,
+                "plan_title": plan_title,
+                "plan_content": plan_content,
+                "plan_data": plan_data_json,
+                "device_count": device_count,
+                "target_count": target_count,
+                "estimated_duration": estimated_duration,
+            },
+        )
+        await db.commit()
 
     logger.info(
         "[ReconAPI] 侦察方案已保存",
@@ -392,7 +394,6 @@ async def initial_scan(
 
     try:
         plan_id = await _save_recon_plan(
-            db=db,
             scenario_id=scenario_id,
             event_id=request.eventId,
             response=response,

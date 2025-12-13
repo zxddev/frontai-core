@@ -403,6 +403,11 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
         recommended_scheme = solution_map.get(best_score["scheme_id"])
     elif solutions:
         # 巨灾场景：所有方案都被硬规则否决，仍需输出最佳可用方案
+        # 🚨 CRITICAL 级别日志：确保指挥员和运维人员无法忽视
+        logger.critical(
+            "🚨🚨🚨 [巨灾模式-紧急] 所有方案违反硬规则，系统被迫输出高风险方案！"
+            "指挥员必须确认风险后方可执行！"
+        )
         logger.warning("[巨灾模式] 所有方案被硬规则否决，启用紧急增援模式")
         requires_reinforcement = True
         
@@ -462,7 +467,9 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
                 f"1. 立即启动国家级应急响应\n"
                 f"2. 请求国家救援队、武警部队增援\n"
                 f"3. 协调周边省份救援力量跨区支援\n"
-                f"4. 本方案仅为首批先遣力量，必须等待增援到位后扩大救援规模"
+                f"4. 本方案仅为首批先遣力量，必须等待增援到位后扩大救援规模\n\n"
+                f"⚠️ 审计提示：本方案绕过了硬规则检查，"
+                f"指挥员必须在执行前确认风险并签字授权。"
             )
         elif capacity_rate < 0.5:
             reinforcement_level = "省级"
@@ -475,7 +482,9 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
                 f"1. 立即启动省级应急响应\n"
                 f"2. 请求省级专业救援队增援\n"
                 f"3. 协调相邻地市救援力量支援\n"
-                f"4. 本方案为首批响应力量，需省级增援补充"
+                f"4. 本方案为首批响应力量，需省级增援补充\n\n"
+                f"⚠️ 审计提示：本方案绕过了硬规则检查，"
+                f"指挥员必须在执行前确认风险并签字授权。"
             )
         else:
             reinforcement_level = "市级"
@@ -484,7 +493,9 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
                 f"被困人数: {estimated_trapped}人\n"
                 f"本地救援容量: {current_capacity}人（覆盖{capacity_rate*100:.1f}%）\n"
                 f"容量缺口: {capacity_gap}人\n\n"
-                f"建议: 向市级应急指挥部申请增援力量"
+                f"建议: 向市级应急指挥部申请增援力量\n\n"
+                f"⚠️ 审计提示：本方案绕过了硬规则检查，"
+                f"指挥员必须在执行前确认风险并签字授权。"
             )
         
         # 更新方案的容量警告
@@ -497,6 +508,22 @@ async def score_soft_rules(state: EmergencyAIState) -> Dict[str, Any]:
         logger.warning(
             f"[巨灾模式] 需要{reinforcement_level}增援，容量缺口{capacity_gap}人",
             extra={"estimated_trapped": estimated_trapped, "current_capacity": current_capacity}
+        )
+
+        # 🔒 结构化审计日志：记录巨灾模式决策的完整上下文
+        logger.warning(
+            "[巨灾模式-审计] 方案绕过硬规则检查",
+            extra={
+                "audit_type": "catastrophe_mode_bypass",
+                "event_id": state.get("event_id"),
+                "solution_id": best_solution.get("solution_id") if best_solution else None,
+                "violated_rules_count": len(high_risk_scores),
+                "capacity_gap": capacity_gap,
+                "capacity_rate": round(capacity_rate, 3),
+                "reinforcement_level": reinforcement_level,
+                "estimated_trapped": estimated_trapped,
+                "current_capacity": current_capacity,
+            }
         )
     
     # 更新追踪信息

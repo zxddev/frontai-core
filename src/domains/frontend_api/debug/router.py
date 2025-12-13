@@ -8,14 +8,18 @@
 import logging
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.database import get_db
 from src.domains.frontend_api.common import ApiResponse
 from src.domains.frontend_api.task.schemas import (
     RescueDetailResponse, RescueTask, Location,
     UnitTask, EquipmentTask,
 )
+from src.domains.events.service import EventService
 
 
 logger = logging.getLogger(__name__)
@@ -30,61 +34,78 @@ class RescueDetailRequest:
 @router.post("/rescueDetail", response_model=ApiResponse[RescueDetailResponse])
 async def rescue_detail(
     request: dict[str, Any],
+    db: AsyncSession = Depends(get_db),
 ) -> ApiResponse[RescueDetailResponse]:
     """
     生成救援方案
-    
+
     根据事件ID获取单个救援点的救援方案详情
     """
     event_id = request.get("eventId", "")
-    logger.info(f"获取救援方案详情, eventId={event_id}")
-    
-    mock_response = RescueDetailResponse(
-        time=datetime.now().isoformat(),
-        textContent="地震导致居民楼部分倒塌，预计被困人员5-10人，需紧急救援",
-        locationName="新华路123号居民楼",
-        location=Location(longitude=104.0657, latitude=30.6595),
-        origin="无人机侦察",
-        image="",
-        rescueTask=[
-            RescueTask(
-                units=[
-                    UnitTask(
-                        id="unit-fire-1",
-                        name="消防救援一中队",
-                        description="负责建筑搜救",
-                        location=Location(longitude=104.0657, latitude=30.6595),
-                        supplieList=["生命探测仪", "破拆工具", "担架", "照明设备"]
-                    ),
-                    UnitTask(
-                        id="unit-medical-1",
-                        name="医疗救护组",
-                        description="负责伤员救治",
-                        location=Location(longitude=104.0657, latitude=30.6595),
-                        supplieList=["急救包", "担架", "氧气瓶", "止血带"]
-                    ),
-                ],
-                equipmentList=[
-                    EquipmentTask(
-                        deviceName="搜救机器狗A",
-                        deviceType="四足机器人",
-                        carryingModule="生命探测仪+摄像头+通信中继",
-                        timeConsuming="45分钟",
-                        searchRoute="倒塌区域1层→2层→3层逐层搜索"
-                    ),
-                    EquipmentTask(
-                        deviceName="搜救无人机B",
-                        deviceType="多旋翼无人机",
-                        carryingModule="红外热成像+喊话器",
-                        timeConsuming="20分钟",
-                        searchRoute="建筑周边空中巡查"
-                    ),
-                ]
-            )
-        ]
-    )
-    
-    return ApiResponse.success(mock_response)
+    regenerate = request.get("regenerate", False)
+    logger.info(f"获取救援方案详情, eventId={event_id}, regenerate={regenerate}")
+
+    # 查询真实事件数据
+    event = None
+    if event_id:
+        try:
+            event_service = EventService(db)
+            event = await event_service.get_by_id(UUID(event_id))
+        except Exception as e:
+            logger.warning(f"查询事件失败: {e}")
+
+    # 如果找到事件，使用真实数据
+    if event:
+        response = RescueDetailResponse(
+            time=event.reported_at.isoformat() if event.reported_at else datetime.now().isoformat(),
+            textContent=event.description or event.title,
+            locationName=event.address or "未知位置",
+            location=Location(
+                longitude=event.location.longitude,
+                latitude=event.location.latitude
+            ),
+            origin=event.source_type.value if hasattr(event.source_type, 'value') else str(event.source_type),
+            image="",
+            # 救援任务暂时使用模板数据（后续可以根据事件类型动态生成）
+            rescueTask=[
+                RescueTask(
+                    units=[
+                        UnitTask(
+                            id=f"unit-{event_id[:8]}",
+                            name="应急救援队",
+                            description="负责现场救援",
+                            location=Location(
+                                longitude=event.location.longitude,
+                                latitude=event.location.latitude
+                            ),
+                            supplieList=["救援设备", "医疗物资", "通信设备"]
+                        ),
+                    ],
+                    equipmentList=[
+                        EquipmentTask(
+                            deviceName="侦察无人机",
+                            deviceType="多旋翼无人机",
+                            carryingModule="高清摄像头+红外热成像",
+                            timeConsuming="15分钟",
+                            searchRoute="事件区域周边巡查"
+                        ),
+                    ]
+                )
+            ]
+        )
+    else:
+        # 事件不存在时返回空数据
+        response = RescueDetailResponse(
+            time=datetime.now().isoformat(),
+            textContent="未找到事件信息",
+            locationName="未知",
+            location=Location(longitude=0, latitude=0),
+            origin="系统",
+            image="",
+            rescueTask=[]
+        )
+
+    return ApiResponse.success(response)
 
 
 @router.post("/rescue-confirm", response_model=ApiResponse)
