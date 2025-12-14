@@ -692,12 +692,16 @@ async def tasks_send(
         "transport": "realTime_vehicle",
     }
 
-    # 无人设备类型（使用预设航线）
-    unmanned_device_types = {"drone", "uav", "dog", "robotic_dog"}
+    # 无人机类型（使用预设航线，空中飞行）
+    uav_types = {"drone", "uav"}
+    # 机器狗类型（使用高德避障路径规划，地面行走）
+    dog_types = {"dog", "robotic_dog"}
     # 车辆类型（使用高德路径规划）
     vehicle_types = {"vehicle", "car", "truck", "rescue", "command", "medical", "transport"}
+    # 地面设备（使用高德路径规划）
+    ground_device_types = dog_types | vehicle_types
     # 所有支持的设备类型
-    supported_device_types = unmanned_device_types | vehicle_types
+    supported_device_types = uav_types | dog_types | vehicle_types
 
     for task_type in request.task:
         for task_item in task_type.taskList:
@@ -710,35 +714,54 @@ async def tasks_send(
                 logger.info(f"[tasks_send] 跳过不支持的设备类型: {device_name}({device_type})")
                 continue
 
-            # ========== 车辆处理逻辑（使用高德API） ==========
-            if device_type in vehicle_types:
+            # ========== 地面设备处理逻辑（机器狗/车辆，使用高德API） ==========
+            if device_type in ground_device_types:
                 try:
-                    # 车辆需要目标位置，从任务中获取或使用事件位置
-                    # 这里假设车辆从指挥车位置出发，前往事件位置
                     if not command_vehicle_position:
-                        logger.warning(f"[tasks_send] 车辆 {device_name} 无起点位置，跳过")
+                        logger.warning(f"[tasks_send] 地面设备 {device_name} 无起点位置，跳过")
                         continue
                     
-                    # 获取事件位置作为目标
-                    event_query = text("""
-                        SELECT 
-                            ST_X(location::geometry) as lng,
-                            ST_Y(location::geometry) as lat
-                        FROM operational_v2.events_v2
-                        WHERE id = :event_id
-                    """)
-                    event_result = await db.execute(event_query, {"event_id": request.eventId})
-                    event_row = event_result.fetchone()
+                    # 获取目标位置：优先从航线计划获取，否则使用事件位置
+                    dest_position = None
                     
-                    if not event_row or not event_row.lng or not event_row.lat:
-                        logger.warning(f"[tasks_send] 车辆 {device_name} 无目标位置，跳过")
+                    # 尝试从航线计划获取目标位置
+                    fp = fp_by_device_id.get(device_id) if device_id else None
+                    if not fp and device_name:
+                        fp = fp_by_device_name.get(device_name)
+                    
+                    if fp and fp.get("waypoints"):
+                        # 使用航线计划中的最后一个点作为目标
+                        waypoints = fp.get("waypoints", [])
+                        if waypoints:
+                            last_wp = waypoints[-1]
+                            lng = last_wp.get("lng") or last_wp.get("lon")
+                            lat = last_wp.get("lat")
+                            if lng and lat:
+                                dest_position = (float(lng), float(lat))
+                                logger.info(f"[tasks_send] {device_name} 使用航线目标: ({lng:.4f}, {lat:.4f})")
+                    
+                    # 如果没有航线目标，使用事件位置
+                    if not dest_position:
+                        event_query = text("""
+                            SELECT ST_X(location::geometry) as lng, ST_Y(location::geometry) as lat
+                            FROM operational_v2.events_v2 WHERE id = :event_id
+                        """)
+                        event_result = await db.execute(event_query, {"event_id": request.eventId})
+                        event_row = event_result.fetchone()
+                        if event_row and event_row.lng and event_row.lat:
+                            dest_position = (event_row.lng, event_row.lat)
+                    
+                    if not dest_position:
+                        logger.warning(f"[tasks_send] {device_name} 无目标位置，跳过")
                         continue
-                    
-                    dest_position = (event_row.lng, event_row.lat)
                     
                     # 调用高德API获取真实路径
-                    logger.info(f"[tasks_send] 车辆 {device_name} 调用高德路径规划: {command_vehicle_position} -> {dest_position}")
+                    is_dog = device_type in dog_types
+                    device_label = "机器狗" if is_dog else "车辆"
+                    logger.info(f"[tasks_send] {device_label} {device_name} 调用高德路径规划: {command_vehicle_position} -> {dest_position}")
+                    
                     try:
+                        # 机器狗和车辆都使用普通路径规划（高德步行/驾车API）
                         amap_result = await amap_route_planning_async(
                             origin_lon=command_vehicle_position[0],
                             origin_lat=command_vehicle_position[1],
@@ -750,17 +773,15 @@ async def tasks_send(
                         if amap_result.get("success") and amap_result.get("path_points"):
                             route = [[p[0], p[1]] for p in amap_result["path_points"]]
                             distance_m = amap_result.get("distance_m", 0)
-                            duration_s = amap_result.get("duration_s", 0)
-                            logger.info(f"[tasks_send] 车辆 {device_name} 高德路径: {len(route)}点, {distance_m/1000:.1f}km, {duration_s/60:.0f}分钟")
+                            logger.info(f"[tasks_send] {device_label} {device_name} 高德路径: {len(route)}点, {distance_m/1000:.1f}km")
                         else:
-                            # 高德API失败，使用直线路径
-                            logger.warning(f"[tasks_send] 车辆 {device_name} 高德API失败，使用直线路径")
+                            logger.warning(f"[tasks_send] {device_label} {device_name} 高德API失败，使用直线路径")
                             route = [
                                 [command_vehicle_position[0], command_vehicle_position[1]],
                                 [dest_position[0], dest_position[1]]
                             ]
                     except Exception as amap_err:
-                        logger.error(f"[tasks_send] 车辆 {device_name} 高德API异常: {amap_err}，使用直线路径")
+                        logger.error(f"[tasks_send] {device_label} {device_name} 高德API异常: {amap_err}，使用直线路径")
                         route = [
                             [command_vehicle_position[0], command_vehicle_position[1]],
                             [dest_position[0], dest_position[1]]
@@ -775,11 +796,17 @@ async def tasks_send(
                     else:
                         entity_id = uuid_lib.uuid4()
                     
-                    # 车辆速度（默认60km/h = 16.67m/s）
-                    speed_mps = 16.67
+                    # 设置速度（加快仿真速度）
+                    # 机器狗: 30km/h = 8.33m/s (实际约5km/h，这里加速6倍)
+                    # 车辆: 120km/h = 33.33m/s (实际约60km/h，这里加速2倍)
+                    speed_mps = 8.33 if is_dog else 33.33
                     
                     # 获取前端设备类型
-                    frontend_type = device_type_to_frontend.get(device_type, "realTime_vehicle")
+                    frontend_type = device_type_to_frontend.get(device_type, "realTime_robotic_dog" if is_dog else "realTime_vehicle")
+                    entity_type = MovementEntityType.ROBOTIC_DOG if is_dog else MovementEntityType.VEHICLE
+                    
+                    # 路线颜色：机器狗绿色，车辆橙色
+                    route_color = "#3CD660" if is_dog else "#FF6B35"
                     
                     # 1. 创建路径实体
                     route_entity_id = f"route-{entity_id}"
@@ -796,17 +823,17 @@ async def tasks_send(
                         "properties": {
                             "name": f"{device_name}路线",
                             "deviceType": device_type,
-                            "routeType": "vehicle",
+                            "routeType": "ground",
                             "isSelect": "1",
                         },
                         "styleOverrides": {
                             "width": 4,
-                            "color": "#FF6B35",  # 橙色表示车辆路线
+                            "color": route_color,
                         }
                     })
-                    logger.info(f"[tasks_send] 车辆 {device_name} 路径实体已创建: {route_entity_id}")
+                    logger.info(f"[tasks_send] {device_label} {device_name} 路径实体已创建: {route_entity_id}")
                     
-                    # 2. 创建车辆初始位置实体
+                    # 2. 创建设备初始位置实体
                     initial_position = route[0]
                     await stomp_broker.broadcast_location({
                         "id": str(entity_id),
@@ -824,24 +851,24 @@ async def tasks_send(
                         },
                         "styleOverrides": {}
                     })
-                    logger.info(f"[tasks_send] 车辆 {device_name} 初始位置已推送")
+                    logger.info(f"[tasks_send] {device_label} {device_name} 初始位置已推送")
                     
                     # 3. 启动移动仿真
                     move_request = MovementStartRequest(
                         entity_id=entity_id,
-                        entity_type=MovementEntityType.VEHICLE,
+                        entity_type=entity_type,
                         route=route,
                         speed_mps=float(speed_mps),
                     )
                     await movement_manager.start_movement(move_request, db)
                     started_count += 1
-                    logger.info(f"[tasks_send] 车辆 {device_name} 仿真已启动, entity_id={entity_id}, 航点数={len(route)}")
+                    logger.info(f"[tasks_send] {device_label} {device_name} 仿真已启动, entity_id={entity_id}, 航点数={len(route)}, 速度={speed_mps:.1f}m/s")
                     
                 except Exception as e:
-                    logger.error(f"[tasks_send] 车辆 {device_name} 仿真启动失败: {e}")
+                    logger.error(f"[tasks_send] 地面设备 {device_name} 仿真启动失败: {e}")
                 continue
 
-            # ========== 无人设备处理逻辑（使用预设航线） ==========
+            # ========== 无人机处理逻辑（使用预设航线） ==========
             # 优先按 device_id 匹配，备用按 device_name 匹配
             fp = fp_by_device_id.get(device_id) if device_id else None
             if not fp and device_name:
@@ -876,18 +903,12 @@ async def tasks_send(
                 logger.warning(f"[tasks_send] 设备 {device_name} 有效航点不足: {len(route)}")
                 continue
 
-            # 映射设备类型
-            entity_type_map = {
-                "drone": MovementEntityType.UAV,
-                "uav": MovementEntityType.UAV,
-                "dog": MovementEntityType.ROBOTIC_DOG,
-                "robotic_dog": MovementEntityType.ROBOTIC_DOG,
-            }
-            entity_type = entity_type_map.get(device_type, MovementEntityType.UAV)
+            # 映射设备类型（这里只处理无人机）
+            entity_type = MovementEntityType.UAV
 
-            # 获取速度参数
+            # 获取速度参数（加快仿真速度：默认50m/s = 180km/h）
             flight_params = fp.get("flight_parameters", {})
-            speed_mps = flight_params.get("speed_ms") or flight_params.get("speed_mps") or 10.0
+            speed_mps = flight_params.get("speed_ms") or flight_params.get("speed_mps") or 50.0
 
             # 启动移动仿真
             try:
