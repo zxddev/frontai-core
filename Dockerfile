@@ -2,7 +2,13 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# 安装系统依赖（包含GIS库所需的依赖）
+# 安装所有系统依赖（一次性搞定）
+# - GIS库: gdal, geos, proj, expat (rasterio, fiona, shapely, geopandas, pyproj)
+# - 音频库: libsndfile (soundfile)
+# - 数学库: openblas (scipy)
+# - 数据库: libpq (asyncpg, psycopg)
+# - 加密库: libffi, openssl (cryptography)
+# - 编译工具: gcc, g++ (grpcio等需要编译的包)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
@@ -11,6 +17,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgdal-dev \
     libgeos-dev \
     libproj-dev \
+    libsndfile1 \
+    libopenblas-dev \
+    libffi-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件
