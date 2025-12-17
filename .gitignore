@@ -31,8 +31,6 @@ dist/
 *.egg-info/
 
 # Environment
-.env
-.env.*
 
 # Misc
 =*
