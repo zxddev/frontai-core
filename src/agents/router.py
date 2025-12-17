@@ -1353,19 +1353,35 @@ async def confirm_emergency_scheme(
                 internal_result = await db.execute(internal_users_sql)
                 internal_users = internal_result.fetchall()
 
-                # 查询任务分配队伍的队长（通过规范化手机号匹配）
+                # 查询任务分配队伍的队员/队长（通过规范化手机号匹配）
                 # deployed_info 结构: {"id": team_id, "name": team_name}
                 team_ids = [team.get("id") for team in deployed_info if team.get("id")]
                 leader_users: list[Any] = []
                 if team_ids:
                     team_ids_str = ",".join([f"'{tid}'" for tid in team_ids])
+                    # 1) 队伍队员：team_members_v2.contact_phone
+                    member_sql = text(f"""
+                        SELECT DISTINCT u.id, u.username, u.real_name, m.team_id as team_id, t.name as team_name
+                        FROM operational_v2.users_v2 u
+                        JOIN operational_v2.team_members_v2 m
+                            ON REGEXP_REPLACE(REGEXP_REPLACE(u.phone, '[\\s\\-+]', '', 'g'), '^86', '') =
+                               REGEXP_REPLACE(REGEXP_REPLACE(m.contact_phone, '[\\s\\-+]', '', 'g'), '^86', '')
+                        JOIN operational_v2.rescue_teams_v2 t ON m.team_id = t.id
+                        WHERE m.team_id IN ({team_ids_str})
+                        AND u.status = 'active'
+                        AND u.phone IS NOT NULL
+                        AND m.contact_phone IS NOT NULL
+                    """)
+                    member_result = await db.execute(member_sql)
+                    member_users = member_result.fetchall()
+
                     # 使用REGEXP_REPLACE规范化手机号进行匹配
                     leader_sql = text(f"""
                         SELECT u.id, u.username, u.real_name, t.id as team_id, t.name as team_name
                         FROM operational_v2.users_v2 u
                         JOIN operational_v2.rescue_teams_v2 t
-                            ON REGEXP_REPLACE(u.phone, '[\\s\\-+]', '', 'g') =
-                               REGEXP_REPLACE(t.contact_phone, '[\\s\\-+]', '', 'g')
+                            ON REGEXP_REPLACE(REGEXP_REPLACE(u.phone, '[\\s\\-+]', '', 'g'), '^86', '') =
+                               REGEXP_REPLACE(REGEXP_REPLACE(t.contact_phone, '[\\s\\-+]', '', 'g'), '^86', '')
                         WHERE t.id IN ({team_ids_str})
                         AND u.status = 'active'
                         AND u.phone IS NOT NULL
@@ -1373,7 +1389,12 @@ async def confirm_emergency_scheme(
                     """)
                     leader_result = await db.execute(leader_sql)
                     leader_users = leader_result.fetchall()
-                    logger.info(f"[TaskPush] 队长匹配结果: team_ids={team_ids}, leaders={len(leader_users)}")
+                    logger.info(
+                        f"[TaskPush] 队伍用户匹配结果: team_ids={team_ids}, "
+                        f"members={len(member_users)}, leaders={len(leader_users)}"
+                    )
+                else:
+                    member_users = []
 
                 # 构建任务ID到队伍的映射
                 task_to_teams: dict[str, list[dict]] = {}
@@ -1414,6 +1435,12 @@ async def confirm_emergency_scheme(
                         "scenario_id": str(scenario_id),
                     }
 
+                    # 场景广播：让已连接且带 scenario_id 的客户端可以收到任务下发（/topic/scenario.task.triggered）
+                    try:
+                        await stomp_broker.broadcast_task(task_push_message, scenario_id)
+                    except Exception as broadcast_err:
+                        logger.warning(f"[TaskPush] 场景任务广播失败: task_id={task_id}, error={broadcast_err}")
+
                     # 推送给 internal 用户
                     for user in internal_users:
                         user_id_str = str(user.id)
@@ -1427,6 +1454,20 @@ async def confirm_emergency_scheme(
 
                     # 推送给该任务分配队伍的队长
                     assigned_team_ids = {str(t.get("team_id") or t.get("id")) for t in assigned_teams}
+
+                    # 推送给该任务分配队伍的队员
+                    for member in member_users:
+                        member_team_id = str(member.team_id)
+                        if member_team_id in assigned_team_ids:
+                            user_id_str = str(member.id)
+                            if user_id_str not in notified_user_ids:
+                                success = await send_with_retry(user_id_str, "/task/assigned", task_push_message)
+                                if success:
+                                    push_success_count += 1
+                                else:
+                                    push_fail_count += 1
+                                notified_user_ids.add(user_id_str)
+
                     for leader in leader_users:
                         leader_team_id = str(leader.team_id)
                         if leader_team_id in assigned_team_ids:
