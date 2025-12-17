@@ -335,3 +335,119 @@ class ScenarioRepository:
         """))
         row = result.fetchone()
         return row.id if row else None
+
+    async def clear_all_data(self) -> dict[str, int]:
+        """
+        全局清除所有事件、任务、实体等数据（保留场景）
+
+        基于 sql/完整sql/clear_events_tasks_entities.sql
+        按正确的外键顺序删除，恢复资源状态
+
+        Returns:
+            各类数据删除/更新数量
+        """
+        result = {
+            "deleted_events": 0,
+            "deleted_tasks": 0,
+            "deleted_schemes": 0,
+            "deleted_entities": 0,
+            "deleted_risk_areas": 0,
+            "deleted_ai_decisions": 0,
+        }
+
+        # 1. 清空任务相关子表
+        await self._db.execute(text("DELETE FROM operational_v2.task_assignments_v2"))
+        await self._db.execute(text("DELETE FROM operational_v2.task_reports_v2"))
+        await self._db.execute(text(
+            "UPDATE operational_v2.planned_routes_v2 SET task_id = NULL WHERE task_id IS NOT NULL"
+        ))
+
+        # 2. 清空任务主表（先清自引用）
+        await self._db.execute(text(
+            "UPDATE operational_v2.tasks_v2 SET parent_task_id = NULL"
+        ))
+        res = await self._db.execute(text(
+            "WITH deleted AS (DELETE FROM operational_v2.tasks_v2 RETURNING id) SELECT COUNT(*) FROM deleted"
+        ))
+        result["deleted_tasks"] = res.scalar() or 0
+
+        await self._db.execute(text("DELETE FROM operational_v2.task_requirements_v2"))
+
+        # 3. 清空方案
+        res = await self._db.execute(text(
+            "WITH deleted AS (DELETE FROM operational_v2.schemes_v2 RETURNING id) SELECT COUNT(*) FROM deleted"
+        ))
+        result["deleted_schemes"] = res.scalar() or 0
+
+        # 4. 清空事件相关子表
+        await self._db.execute(text("DELETE FROM operational_v2.event_updates_v2"))
+        await self._db.execute(text("DELETE FROM operational_v2.equipment_preparation_dispatch_v2"))
+        await self._db.execute(text("DELETE FROM operational_v2.equipment_recommendations_v2"))
+        await self._db.execute(text("DELETE FROM operational_v2.car_item_assignment"))
+        await self._db.execute(text("DELETE FROM operational_v2.rescue_points_v2"))
+        await self._db.execute(text("DELETE FROM operational_v2.evaluation_reports_v2"))
+
+        # 5. 清空事件主表（先清自引用）
+        await self._db.execute(text(
+            "UPDATE operational_v2.events_v2 SET parent_event_id = NULL, merged_into_event_id = NULL"
+        ))
+        res = await self._db.execute(text(
+            "WITH deleted AS (DELETE FROM operational_v2.events_v2 RETURNING id) SELECT COUNT(*) FROM deleted"
+        ))
+        result["deleted_events"] = res.scalar() or 0
+
+        # 6. 清空实体相关
+        await self._db.execute(text("DELETE FROM operational_v2.entity_tracks_v2"))
+        res = await self._db.execute(text(
+            "WITH deleted AS (DELETE FROM operational_v2.entities_v2 RETURNING id) SELECT COUNT(*) FROM deleted"
+        ))
+        result["deleted_entities"] = res.scalar() or 0
+
+        # 7. 清空AI决策日志
+        res = await self._db.execute(text(
+            "WITH deleted AS (DELETE FROM operational_v2.ai_decision_logs_v2 RETURNING id) SELECT COUNT(*) FROM deleted"
+        ))
+        result["deleted_ai_decisions"] = res.scalar() or 0
+
+        # 8. 清空风险区域
+        res = await self._db.execute(text(
+            "WITH deleted AS (DELETE FROM operational_v2.disaster_affected_areas_v2 RETURNING id) SELECT COUNT(*) FROM deleted"
+        ))
+        result["deleted_risk_areas"] = res.scalar() or 0
+
+        # 9. 恢复救援队伍状态
+        await self._db.execute(text("""
+            UPDATE operational_v2.rescue_teams_v2
+            SET status = 'standby',
+                current_task_id = NULL,
+                current_location = NULL,
+                last_location_update = NULL
+            WHERE status != 'standby' OR current_task_id IS NOT NULL
+        """))
+
+        # 10. 恢复车辆状态
+        await self._db.execute(text("""
+            UPDATE operational_v2.vehicles_v2
+            SET status = 'available',
+                current_location = NULL
+            WHERE status != 'available'
+        """))
+
+        # 11. 恢复装备状态
+        await self._db.execute(text("""
+            UPDATE operational_v2.team_equipment_v2
+            SET status = 'ready',
+                available_quantity = quantity,
+                current_location = NULL
+            WHERE status != 'ready' OR available_quantity != quantity
+        """))
+
+        await self._db.commit()
+
+        logger.info(
+            f"全局清除完成: events={result['deleted_events']}, tasks={result['deleted_tasks']}, "
+            f"schemes={result['deleted_schemes']}, entities={result['deleted_entities']}, "
+            f"risk_areas={result['deleted_risk_areas']}, ai_decisions={result['deleted_ai_decisions']}"
+        )
+
+        return result

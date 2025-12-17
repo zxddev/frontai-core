@@ -15,11 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_db
 from .service import ScenarioService
 from .schemas import (
-    ScenarioCreate, ScenarioUpdate, ScenarioResponse, 
+    ScenarioCreate, ScenarioUpdate, ScenarioResponse,
     ScenarioListResponse, ScenarioStatusUpdate,
     ScenarioResourcesConfig, ScenarioResourcesResponse,
     ScenarioEnvironmentConfig, ScenarioEnvironmentResponse,
     ScenarioResetRequest, ScenarioResetResponse,
+    ClearAllResponse,
 )
 
 
@@ -61,10 +62,44 @@ async def get_active_scenario(
 ) -> Optional[ScenarioResponse]:
     """
     获取当前活动的想定
-    
+
     同一时间只有一个活动想定
     """
     return await service.get_active()
+
+
+@router.post("/reset", response_model=ScenarioResetResponse)
+async def reset_active_scenario(
+    service: ScenarioService = Depends(get_service),
+) -> ScenarioResetResponse:
+    """
+    重置当前活动想定数据
+
+    自动获取当前 active 状态的想定，删除其所有关联数据。
+    不需要传参，默认删除所有事件、实体、风险区域、方案、任务等。
+    """
+    return await service.reset_active()
+
+
+@router.post("/clear-all", response_model=ClearAllResponse)
+async def clear_all_data(
+    service: ScenarioService = Depends(get_service),
+) -> ClearAllResponse:
+    """
+    全局清除所有演练数据
+
+    一键重置系统状态，执行以下操作：
+    1. 停止所有移动仿真任务
+    2. 清除 Redis 中的仿真数据
+    3. 清除数据库中的事件、任务、方案、实体等数据
+    4. 恢复救援队伍、车辆、装备状态为待命/可用
+
+    注意：此操作保留场景(scenarios)本身，只清除场景下的业务数据。
+    """
+    return await service.clear_all()
+
+
+# ==================== 动态路径路由（必须放在固定路径后面） ====================
 
 
 @router.get("/{scenario_id}", response_model=ScenarioResponse)
@@ -148,19 +183,6 @@ async def configure_environment(
     return await service.configure_environment(scenario_id, data)
 
 
-@router.post("/reset", response_model=ScenarioResetResponse)
-async def reset_active_scenario(
-    service: ScenarioService = Depends(get_service),
-) -> ScenarioResetResponse:
-    """
-    重置当前活动想定数据
-    
-    自动获取当前 active 状态的想定，删除其所有关联数据。
-    不需要传参，默认删除所有事件、实体、风险区域、方案、任务等。
-    """
-    return await service.reset_active()
-
-
 @router.post("/{scenario_id}/reset", response_model=ScenarioResetResponse)
 async def reset_scenario(
     scenario_id: UUID,
@@ -169,12 +191,12 @@ async def reset_scenario(
 ) -> ScenarioResetResponse:
     """
     重置指定想定数据
-    
+
     删除想定下的所有事件、实体、风险区域、方案、任务等数据，
     保留想定本身，方便重新开始仿真推演。
-    
+
     可选择性地保留某些数据类型（通过设置对应字段为false）。
-    
+
     示例：
     - 全部重置：POST /scenarios/{id}/reset （使用默认值，删除所有关联数据）
     - 只删除事件和实体：POST /scenarios/{id}/reset {"delete_schemes": false, "delete_tasks": false}

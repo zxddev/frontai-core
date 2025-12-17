@@ -16,11 +16,12 @@ from geoalchemy2.shape import to_shape
 from src.core.exceptions import NotFoundError, ConflictError
 from .repository import ScenarioRepository
 from .schemas import (
-    ScenarioCreate, ScenarioUpdate, ScenarioResponse, 
+    ScenarioCreate, ScenarioUpdate, ScenarioResponse,
     ScenarioListResponse, ScenarioStatus, ScenarioStatusUpdate, Location,
     ScenarioResourcesConfig, ScenarioResourcesResponse,
     ScenarioEnvironmentConfig, ScenarioEnvironmentResponse,
     ScenarioResetRequest, ScenarioResetResponse,
+    ClearAllResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -393,7 +394,7 @@ class ScenarioService:
                 location = Location(longitude=point.x, latitude=point.y)
             except Exception as e:
                 logger.warning(f"解析想定位置失败: scenario_id={scenario.id}, error={e}")
-        
+
         return ScenarioResponse(
             id=scenario.id,
             name=scenario.name,
@@ -409,4 +410,76 @@ class ScenarioService:
             created_by=scenario.created_by,
             created_at=scenario.created_at,
             updated_at=scenario.updated_at,
+        )
+
+    async def clear_all(self) -> ClearAllResponse:
+        """
+        全局清除所有演练数据
+
+        三步操作：
+        1. 停止所有移动仿真任务
+        2. 清除 Redis 中的仿真数据
+        3. 执行数据库清除 SQL
+        """
+        cancelled_simulations = 0
+        cleared_redis_keys = 0
+
+        # 1. 停止移动仿真
+        try:
+            from src.domains.movement_simulation.service import get_movement_manager
+            manager = await get_movement_manager()
+            sessions = await manager.get_active_sessions()
+            for session in sessions:
+                try:
+                    await manager.cancel_movement(session.session_id)
+                    cancelled_simulations += 1
+                except Exception as e:
+                    logger.warning(f"取消移动会话失败: {session.session_id}, error={e}")
+        except Exception as e:
+            logger.warning(f"获取移动仿真管理器失败: {e}")
+
+        # 2. 清除 Redis 中的仿真数据
+        try:
+            from src.core.redis import get_redis_client, redis_available
+            if await redis_available():
+                redis = await get_redis_client()
+                # 清除 movement:* 相关的所有键
+                keys = await redis.keys("movement:*")
+                if keys:
+                    await redis.delete(*keys)
+                    cleared_redis_keys = len(keys)
+                    logger.info(f"清除 Redis 移动仿真数据: {cleared_redis_keys} 个键")
+        except Exception as e:
+            logger.warning(f"清除 Redis 数据失败: {e}")
+
+        # 3. 执行数据库清除
+        db_result = await self._repo.clear_all_data()
+
+        total = (
+            db_result["deleted_events"] +
+            db_result["deleted_tasks"] +
+            db_result["deleted_schemes"] +
+            db_result["deleted_entities"] +
+            db_result["deleted_risk_areas"] +
+            db_result["deleted_ai_decisions"] +
+            cancelled_simulations +
+            cleared_redis_keys
+        )
+
+        logger.info(
+            f"全局清除完成: events={db_result['deleted_events']}, "
+            f"tasks={db_result['deleted_tasks']}, simulations={cancelled_simulations}, "
+            f"redis_keys={cleared_redis_keys}"
+        )
+
+        return ClearAllResponse(
+            deleted_events=db_result["deleted_events"],
+            deleted_tasks=db_result["deleted_tasks"],
+            deleted_schemes=db_result["deleted_schemes"],
+            deleted_entities=db_result["deleted_entities"],
+            deleted_risk_areas=db_result["deleted_risk_areas"],
+            deleted_ai_decisions=db_result["deleted_ai_decisions"],
+            cancelled_simulations=cancelled_simulations,
+            cleared_redis_keys=cleared_redis_keys,
+            message=f"全局清除完成，共清理 {total} 条数据/会话/键",
         )

@@ -193,3 +193,18 @@ class ScenarioResetResponse(BaseModel):
     deleted_messages: int
     deleted_ai_decisions: int
     message: str
+
+
+# ==================== 全局清除 ====================
+
+class ClearAllResponse(BaseModel):
+    """全局清除响应"""
+    deleted_events: int = Field(0, description="删除的事件数")
+    deleted_tasks: int = Field(0, description="删除的任务数")
+    deleted_schemes: int = Field(0, description="删除的方案数")
+    deleted_entities: int = Field(0, description="删除的实体数")
+    deleted_risk_areas: int = Field(0, description="删除的风险区域数")
+    deleted_ai_decisions: int = Field(0, description="删除的AI决策记录数")
+    cancelled_simulations: int = Field(0, description="取消的移动仿真数")
+    cleared_redis_keys: int = Field(0, description="清除的Redis键数")
+    message: str = Field("", description="操作结果信息")
