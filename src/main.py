@@ -1,6 +1,7 @@
 # 必须在所有import之前加载.env，否则配置会回退到默认值（localhost）
+from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
