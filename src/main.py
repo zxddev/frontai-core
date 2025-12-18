@@ -33,7 +33,6 @@ from src.agents import router as ai_router
 from src.domains.frontend_api import frontend_router
 from src.domains.frontend_api.websocket import frontend_ws_router
 from src.domains.voice import voice_router, tts_router
-from src.domains.chat import router as chat_router
 from src.core.stomp import stomp_router, stomp_broker
 
 
@@ -106,7 +105,6 @@ api_router_v2.include_router(routing_router)
 api_router_v2.include_router(audit_router)
 api_router_v2.include_router(ai_router)
 api_router_v2.include_router(tts_router)
-api_router_v2.include_router(chat_router)
 
 app.mount(settings.api_prefix, api_router_v2)
 # 添加 /web-api 前缀的挂载，适配前端代理
