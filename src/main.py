@@ -143,15 +143,12 @@ async def startup_event():
     await get_movement_manager()
     logger.info("Movement simulation manager started")
 
-    # 后台预热 Rust 离线路径规划（避免首次请求阻塞加载 DEM/路网）
-    try:
-        from src.domains.routing.service import warmup_rust_routing
-        import asyncio
-
-        asyncio.create_task(warmup_rust_routing())
-        logger.info("Rust routing warmup scheduled")
-    except Exception as exc:
-        logger.warning("Rust routing warmup skipped: %s", exc)
+    # Rust 离线路径规划必须在启动完成前就绪（避免首请求阻塞/避免业务回落到直线估算）
+    from src.domains.routing.service import warmup_rust_routing
+    ok = await warmup_rust_routing()
+    if not ok:
+        raise RuntimeError("Rust routing warmup failed; refusing to start")
+    logger.info("Rust routing warmup completed")
 
 
 @app.on_event("shutdown")
