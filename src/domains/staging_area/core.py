@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import math
 import time
-import os
 import asyncio
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Protocol
 from uuid import UUID
@@ -31,6 +30,7 @@ from src.domains.staging_area.schemas import (
     TargetPriority,
     TeamInfo,
 )
+from src.core.file_config import get_int as get_file_int
 from src.planning.algorithms.base import haversine_distance, Location
 from src.planning.algorithms.routing.db_route_engine import (
     VehicleCapability,
@@ -52,7 +52,7 @@ PRIORITY_WEIGHTS: Dict[TargetPriority, float] = {
     TargetPriority.LOW: 0.5,
 }
 
-STAGING_ROUTE_MAX_CONCURRENCY = int(os.environ.get("STAGING_ROUTE_MAX_CONCURRENCY", "8"))
+STAGING_ROUTE_MAX_CONCURRENCY = get_file_int("STAGING_ROUTE_MAX_CONCURRENCY", 8)
 
 
 class RouteEngine(Protocol):
