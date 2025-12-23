@@ -1,7 +1,7 @@
 """
 路径计算节点
 
-纯算法层，调用DatabaseRouteEngine或VehicleRoutingPlanner进行路径计算。
+纯算法层，调用Rust离线路径规划或VehicleRoutingPlanner进行路径计算。
 不涉及LLM，属于"双频架构"中的高频层。
 """
 from __future__ import annotations
@@ -14,14 +14,15 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domains.routing.service import RoutePlanningService
+from src.domains.routing.schemas import Point as ServicePoint
 from src.planning.algorithms.routing import (
-    DatabaseRouteEngine,
     VehicleRoutingPlanner,
     load_vehicle_capability,
     VehicleCapability,
 )
-from src.planning.algorithms.routing.types import Point as RoutingPoint, InfeasiblePathError
-from src.planning.algorithms.base import AlgorithmStatus
+from src.planning.algorithms.routing.types import InfeasiblePathError
+from src.planning.algorithms.base import haversine_distance, Location
 
 from ..state import (
     RoutePlanningState,
@@ -42,7 +43,7 @@ async def compute_route(
     路径计算节点
     
     根据规划类型调用相应算法：
-    - single: 调用DatabaseRouteEngine进行单车A*规划
+    - single: 调用Rust离线路径规划（路网优先 + 栅格fallback）
     - multi: 调用VehicleRoutingPlanner进行多车VRP规划
     - replan: 根据上一次结果调整参数重新规划
     
@@ -77,7 +78,7 @@ async def compute_route(
             return {
                 "route_result": result,
                 "multi_route_result": None,
-                "algorithm_used": "DatabaseRouteEngine",
+                "algorithm_used": "RustAstar",
                 "computation_time_ms": elapsed_ms,
                 "current_phase": "route_computed",
                 "trace": {
@@ -119,7 +120,7 @@ async def compute_route(
                 return {
                     "route_result": result,
                     "multi_route_result": None,
-                    "algorithm_used": "DatabaseRouteEngine",
+                    "algorithm_used": "RustAstar",
                     "computation_time_ms": elapsed_ms,
                     "current_phase": "route_computed",
                     "replan_count": replan_count + 1,
@@ -143,7 +144,7 @@ async def compute_route(
         return {
             "route_result": None,
             "multi_route_result": None,
-            "algorithm_used": "DatabaseRouteEngine" if request_type == "single" else "VehicleRoutingPlanner",
+            "algorithm_used": "RustAstar" if request_type == "single" else "VehicleRoutingPlanner",
             "computation_time_ms": int((time.perf_counter() - start_time) * 1000),
             "current_phase": "route_failed",
             "errors": state.get("errors", []) + [str(e)],
@@ -177,8 +178,8 @@ async def _compute_single_route(
         raise ValueError("单车规划必须指定起点和终点")
     
     # 转换坐标格式
-    start = RoutingPoint(lon=start_point["lon"], lat=start_point["lat"])
-    end = RoutingPoint(lon=end_point["lon"], lat=end_point["lat"])
+    origin = ServicePoint(lon=start_point["lon"], lat=start_point["lat"])
+    destination = ServicePoint(lon=end_point["lon"], lat=end_point["lat"])
     
     # 加载车辆能力（如果有db和vehicle_id）
     vehicle_capability: Optional[VehicleCapability] = None
@@ -214,77 +215,64 @@ async def _compute_single_route(
             total_weight_kg=10000,
         )
     
-    # 执行路径规划
-    if db:
-        engine = DatabaseRouteEngine(db)
-        search_radius = params.get("search_radius_km", 80.0)
-        route_result = await engine.plan_route(
-            start=start,
-            end=end,
-            vehicle=vehicle_capability,
-            scenario_id=UUID(scenario_id) if scenario_id else None,
-            search_radius_km=search_radius,
-        )
-        
-        # 转换为输出格式
-        path_points: list[Point] = [
-            {"lon": p.lon, "lat": p.lat} for p in route_result.path_points
-        ]
-        
-        # 简化分段信息（DatabaseRouteEngine返回的是点序列，需要构造分段）
-        segments: list[RouteSegment] = []
-        for i in range(len(path_points) - 1):
-            segments.append({
-                "segment_id": f"seg_{i}",
-                "from_point": path_points[i],
-                "to_point": path_points[i + 1],
-                "distance_m": route_result.distance_m / max(len(path_points) - 1, 1),
-                "duration_seconds": route_result.duration_seconds / max(len(path_points) - 1, 1),
-                "road_type": "unknown",
-                "terrain_type": "unknown",
-                "risk_level": "low",
-            })
-        
-        return SingleRouteResult(
-            route_id=str(uuid.uuid4()),
-            vehicle_id=vehicle_id or str(vehicle_capability.vehicle_id),
-            path_points=path_points,
-            segments=segments,
-            total_distance_m=route_result.distance_m,
-            total_duration_seconds=route_result.duration_seconds,
-            risk_score=0.3 if route_result.blocked_by_disaster else 0.1,
-            warnings=route_result.warnings,
-        )
-    else:
-        # 无数据库连接时，使用简化计算（仅返回直线距离估算）
-        from src.planning.algorithms.base import haversine_distance, Location
-        
-        start_loc = Location(start_point["lat"], start_point["lon"])
-        end_loc = Location(end_point["lat"], end_point["lon"])
-        distance_km = haversine_distance(start_loc, end_loc)
-        
-        speed_kmh = vehicle_capability.max_speed_kmh * params.get("speed_factor", 1.0)
-        duration_seconds = (distance_km / speed_kmh) * 3600
-        
-        return SingleRouteResult(
-            route_id=str(uuid.uuid4()),
-            vehicle_id=vehicle_id or str(vehicle_capability.vehicle_id),
-            path_points=[start_point, end_point],
-            segments=[{
-                "segment_id": "seg_0",
-                "from_point": start_point,
-                "to_point": end_point,
-                "distance_m": distance_km * 1000,
-                "duration_seconds": duration_seconds,
-                "road_type": "estimated",
-                "terrain_type": "unknown",
-                "risk_level": "unknown",
-            }],
-            total_distance_m=distance_km * 1000,
-            total_duration_seconds=duration_seconds,
-            risk_score=0.5,
-            warnings=["无路网数据，使用直线距离估算"],
-        )
+    # 执行路径规划（Rust离线优先）
+    routing_service = RoutePlanningService(db)
+    rust_result = await routing_service.plan_route(
+        origin=origin,
+        destination=destination,
+    )
+
+    if not rust_result.success:
+        raise InfeasiblePathError(rust_result.error_message or "Rust路径规划失败")
+
+    polyline = rust_result.polyline or [origin, destination]
+    path_points: list[Point] = [
+        {"lon": p.lon, "lat": p.lat} for p in polyline
+    ]
+
+    # 构造分段信息（按距离占比分配时间）
+    segments: list[RouteSegment] = []
+    segment_distances: list[float] = []
+    for i in range(len(path_points) - 1):
+        start_loc = Location(path_points[i]["lat"], path_points[i]["lon"])
+        end_loc = Location(path_points[i + 1]["lat"], path_points[i + 1]["lon"])
+        distance_m = haversine_distance(start_loc, end_loc) * 1000
+        segment_distances.append(distance_m)
+
+    distance_sum = sum(segment_distances)
+    total_distance_m = rust_result.total_distance_m or distance_sum
+    total_duration_s = rust_result.total_duration_s
+    for i, distance_m in enumerate(segment_distances):
+        duration_s = 0.0
+        if total_duration_s and total_distance_m > 0:
+            duration_s = total_duration_s * (distance_m / total_distance_m)
+        segments.append({
+            "segment_id": f"seg_{i}",
+            "from_point": path_points[i],
+            "to_point": path_points[i + 1],
+            "distance_m": distance_m,
+            "duration_seconds": duration_s,
+            "road_type": "unknown",
+            "terrain_type": "unknown",
+            "risk_level": "low",
+        })
+
+    warnings: list[str] = []
+    if rust_result.source != "internal":
+        warnings.append("Rust路径规划不可用，使用估算路径")
+
+    risk_score = 0.1 if rust_result.source == "internal" else 0.5
+
+    return SingleRouteResult(
+        route_id=str(uuid.uuid4()),
+        vehicle_id=vehicle_id or str(vehicle_capability.vehicle_id),
+        path_points=path_points,
+        segments=segments,
+        total_distance_m=total_distance_m,
+        total_duration_seconds=total_duration_s,
+        risk_score=risk_score,
+        warnings=warnings,
+    )
 
 
 def _compute_multi_route(

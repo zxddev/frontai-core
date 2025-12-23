@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from src.domains.staging_area.schemas import (
@@ -30,10 +30,10 @@ from src.domains.staging_area.schemas import (
     TeamInfo,
 )
 from src.planning.algorithms.routing.db_route_engine import (
-    DatabaseRouteEngine,
     VehicleCapability,
     Point,
     InfeasiblePathError,
+    RouteResult,
 )
 
 if TYPE_CHECKING:
@@ -48,6 +48,18 @@ PRIORITY_WEIGHTS: Dict[TargetPriority, float] = {
     TargetPriority.MEDIUM: 1.0,
     TargetPriority.LOW: 0.5,
 }
+
+
+class RouteEngine(Protocol):
+    async def plan_route(
+        self,
+        *,
+        start: Point,
+        end: Point,
+        vehicle: VehicleCapability,
+        scenario_id: Optional[UUID] = None,
+        search_radius_km: float = 100.0,
+    ) -> RouteResult: ...
 
 
 class StagingAreaCore:
@@ -69,7 +81,7 @@ class StagingAreaCore:
     def __init__(
         self,
         repository: "StagingAreaRepository",
-        route_engine: DatabaseRouteEngine,
+        route_engine: RouteEngine,
     ) -> None:
         """
         初始化核心算法

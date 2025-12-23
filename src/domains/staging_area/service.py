@@ -26,7 +26,7 @@ from src.domains.staging_area.schemas import (
     TargetPriority,
     TeamInfo,
 )
-from src.planning.algorithms.routing.db_route_engine import DatabaseRouteEngine
+from src.domains.routing.rust_route_engine import RustRouteEngine
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class StagingAreaService:
         """
         self._db = db
         self._repo = StagingAreaRepository(db)
-        self._route_engine = DatabaseRouteEngine(db)
+        self._route_engine = RustRouteEngine(db)
     
     async def recommend(
         self,

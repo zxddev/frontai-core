@@ -25,7 +25,7 @@ class UnifiedRoutePlanningService:
     
     根据设备的 env_type 字段分发到对应的路径规划器：
     - air: 空中直线飞行（AirRoutePlanningService）
-    - land: 陆地路径规划（RoutePlanningService，高德API + 内部引擎）
+    - land: 陆地路径规划（RoutePlanningService，Rust离线 + 内部引擎）
     - sea: 水上路径规划（暂未实现）
     """
     
@@ -121,7 +121,7 @@ class UnifiedRoutePlanningService:
         """
         陆地路径规划
         
-        调用现有 RoutePlanningService（高德API + DatabaseRouteEngine）
+        调用现有 RoutePlanningService（Rust离线 + DatabaseRouteEngine）
         """
         if avoid_areas:
             logger.info(f"陆地避障路径规划: 避让区域数={len(avoid_areas)}")

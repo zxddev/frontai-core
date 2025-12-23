@@ -1,28 +1,144 @@
 """
 路径规划服务
 
-封装高德API + 内部路径规划的fallback机制。
+封装 Rust 离线路径规划 + 内部路径规划的 fallback 机制。
 遵循架构规范：Agent Node → Service → Algorithm/External API
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+from pathlib import Path
+import threading
 from typing import List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .schemas import Point, RouteResult, RouteSegment, AvoidArea
-from src.infra.clients.amap.route_planning import (
-    amap_route_planning_async,
-    amap_route_planning_with_avoidance_async,
-)
+# NOTE: AMap routing is disabled by default, keep for reference.
+# from src.infra.clients.amap.route_planning import (
+#     amap_route_planning_async,
+#     amap_route_planning_with_avoidance_async,
+# )
 
 logger = logging.getLogger(__name__)
 
-# 是否优先使用内部路径规划（已废弃，改为高德优先 + 直线fallback）
-# 可通过环境变量 PREFER_INTERNAL_ROUTING=true 恢复内部路径规划
+# 是否优先使用内部路径规划（Rust失败时回落到数据库引擎）
+# 可通过环境变量 PREFER_INTERNAL_ROUTING=true 启用内部路径规划
 PREFER_INTERNAL_ROUTING = os.environ.get("PREFER_INTERNAL_ROUTING", "false").lower() == "true"
+
+RUST_ASTAR_DATA_DIR = os.environ.get("RUST_ASTAR_DATA_DIR")
+RUST_ASTAR_DEM_PATH = os.environ.get("RUST_ASTAR_DEM_PATH")
+RUST_ASTAR_ROAD_PATH = os.environ.get("RUST_ASTAR_ROAD_PATH")
+RUST_ASTAR_OBSTACLE_PATHS = os.environ.get("RUST_ASTAR_OBSTACLE_PATHS")
+RUST_ASTAR_ROAD_SEARCH_RADIUS_M = float(os.environ.get("RUST_ASTAR_ROAD_SEARCH_RADIUS_M", "5000"))
+RUST_ASTAR_MAX_SLOPE_DEG = float(os.environ.get("RUST_ASTAR_MAX_SLOPE_DEG", "30"))
+RUST_ASTAR_MAX_STEP_M = float(os.environ.get("RUST_ASTAR_MAX_STEP_M", "0"))
+
+_rust_astar = None
+_rust_astar_initialized = False
+_rust_astar_initializing = False
+_rust_init_lock = threading.Lock()
+
+
+def _default_rust_data_dir() -> Path:
+    repo_root = Path(__file__).resolve().parents[4]
+    # frontai/ 目录内同时包含 frontai-core/ 与 rust-astar/
+    return repo_root / "rust-astar" / "data"
+
+
+def _resolve_rust_paths() -> Tuple[str, str, List[str]]:
+    base_dir = Path(RUST_ASTAR_DATA_DIR) if RUST_ASTAR_DATA_DIR else _default_rust_data_dir()
+    dem_path = RUST_ASTAR_DEM_PATH or str(base_dir / "四川省.tif")
+    road_path = RUST_ASTAR_ROAD_PATH or str(base_dir / "sichuan-251120.osm.pbf")
+    if RUST_ASTAR_OBSTACLE_PATHS:
+        obstacle_paths = [p.strip() for p in RUST_ASTAR_OBSTACLE_PATHS.split(",") if p.strip()]
+    else:
+        obstacle_paths = [
+            str(base_dir / "roads" / "gis_osm_water_a_free_1.shp"),
+            str(base_dir / "roads" / "gis_osm_buildings_a_free_1.shp"),
+            str(base_dir / "roads" / "gis_osm_landuse_a_free_1.shp"),
+        ]
+    return dem_path, road_path, obstacle_paths
+
+
+def _init_rust_astar_blocking() -> Optional[object]:
+    """
+    阻塞式初始化 Rust 引擎（可能耗时很长：DEM/路网加载）。
+
+    注意：不要在请求链路中直接调用该函数；应通过 warmup/background 初始化。
+    """
+    global _rust_astar_initialized, _rust_astar, _rust_astar_initializing
+    if _rust_astar_initialized:
+        return _rust_astar
+
+    with _rust_init_lock:
+        if _rust_astar_initialized:
+            return _rust_astar
+        if _rust_astar_initializing:
+            return None
+        _rust_astar_initializing = True
+
+    try:
+        import rust_astar  # type: ignore
+
+        dem_path, road_path, obstacle_paths = _resolve_rust_paths()
+        rust_astar.init(
+            dem_path=dem_path,
+            road_path=road_path,
+            obstacle_paths=obstacle_paths,
+            resolution_m=55.5,
+        )
+        _rust_astar = rust_astar
+        _rust_astar_initialized = True
+        logger.info(
+            "Rust routing initialized: dem=%s road=%s obstacles=%d",
+            dem_path,
+            road_path,
+            len(obstacle_paths),
+        )
+        return _rust_astar
+    except Exception as exc:
+        logger.warning("Rust routing init failed: %s", exc)
+        _rust_astar_initialized = False
+        _rust_astar = None
+        return None
+    finally:
+        with _rust_init_lock:
+            _rust_astar_initializing = False
+
+
+def _ensure_rust_init_started() -> None:
+    """在事件循环中触发后台初始化（若尚未初始化且未在初始化中）。"""
+    global _rust_astar_initialized, _rust_astar_initializing
+    if _rust_astar_initialized or _rust_astar_initializing:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    # 双重检查 + 标记 inflight，避免并发触发多次初始化
+    with _rust_init_lock:
+        if _rust_astar_initialized or _rust_astar_initializing:
+            return
+        _rust_astar_initializing = True
+
+    async def _bg():
+        try:
+            await asyncio.to_thread(_init_rust_astar_blocking)
+        finally:
+            # _init_rust_astar_blocking 会在 finally 里清理标记；这里兜底
+            pass
+
+    loop.create_task(_bg())
+
+
+async def warmup_rust_routing() -> bool:
+    """启动时调用：阻塞等待 Rust 引擎初始化完成。"""
+    rust = await asyncio.to_thread(_init_rust_astar_blocking)
+    return rust is not None
 
 
 class RoutePlanningService:
@@ -30,8 +146,8 @@ class RoutePlanningService:
     路径规划服务
     
     提供统一的路径规划接口，内部实现：
-    1. 优先调用高德API
-    2. 高德失败时fallback到内部DatabaseRouteEngine
+    1. 优先调用 Rust 离线路径规划
+    2. Rust 失败时 fallback 到内部 DatabaseRouteEngine / 直线估算
     """
     
     def __init__(self, db: Optional[AsyncSession] = None):
@@ -56,6 +172,11 @@ class RoutePlanningService:
         """
         logger.info(f"路径规划: ({origin.lon},{origin.lat}) → ({destination.lon},{destination.lat})")
         
+        rust_result = await self._rust_route(origin, destination)
+        if rust_result.success:
+            return rust_result
+        logger.warning("Rust路径规划失败，尝试内部规划/直线回退")
+
         if PREFER_INTERNAL_ROUTING:
             # 内部路径规划模式（需设置环境变量 PREFER_INTERNAL_ROUTING=true）
             internal_result = await self._internal_route(origin, destination)
@@ -63,25 +184,23 @@ class RoutePlanningService:
                 return internal_result
             logger.warning("内部路径规划失败，fallback到直线估算")
             return self._fallback_straight_line(origin, destination)
-        
-        # 默认模式：优先高德API → 直线fallback
-        try:
-            result = await amap_route_planning_async(
-                origin_lon=origin.lon,
-                origin_lat=origin.lat,
-                dest_lon=destination.lon,
-                dest_lat=destination.lat,
-                strategy=strategy,
-            )
-            
-            if result.get("paths"):
-                return self._parse_amap_result(origin, destination, result, "amap")
-                
-        except Exception as e:
-            logger.warning(f"高德API失败: {e}")
-        
-        # Fallback: 直线距离 + 系数估算
-        logger.info("高德API无结果，使用直线距离估算")
+
+        # 默认模式：直线fallback（AMap 已禁用，保留代码以备后续启用）
+        # try:
+        #     result = await amap_route_planning_async(
+        #         origin_lon=origin.lon,
+        #         origin_lat=origin.lat,
+        #         dest_lon=destination.lon,
+        #         dest_lat=destination.lat,
+        #         strategy=strategy,
+        #     )
+        #
+        #     if result.get("paths"):
+        #         return self._parse_amap_result(origin, destination, result, "amap")
+        # except Exception as e:
+        #     logger.warning(f"高德API失败: {e}")
+
+        logger.info("使用直线距离估算")
         return self._fallback_straight_line(origin, destination)
     
     async def plan_route_with_avoidance(
@@ -111,6 +230,11 @@ class RoutePlanningService:
         # 无避让区域，使用普通规划
         if not avoid_areas:
             return await self.plan_route(origin, destination, strategy)
+
+        rust_result = await self._rust_route(origin, destination, avoid_areas)
+        if rust_result.success:
+            return rust_result
+        logger.warning("Rust避障路径规划失败，尝试内部规划/直线回退")
         
         # 转换避让区域为高德格式
         avoid_polygons = [
@@ -127,26 +251,24 @@ class RoutePlanningService:
             logger.warning("内部避障路径规划失败，fallback到直线估算")
             return self._fallback_straight_line(origin, destination)
         
-        # 默认模式：优先高德API → 直线fallback
-        if avoid_polygons:
-            try:
-                result = await amap_route_planning_with_avoidance_async(
-                    origin_lon=origin.lon,
-                    origin_lat=origin.lat,
-                    dest_lon=destination.lon,
-                    dest_lat=destination.lat,
-                    avoid_polygons=avoid_polygons,
-                    strategy=strategy,
-                )
-                
-                if result.get("paths"):
-                    return self._parse_amap_result(origin, destination, result, "amap")
-                    
-            except Exception as e:
-                logger.warning(f"高德避障API失败: {e}")
-        
-        # Fallback: 直线距离 + 系数估算
-        logger.info("高德避障API无结果，使用直线距离估算")
+        # 默认模式：直线fallback（AMap 已禁用，保留代码以备后续启用）
+        # if avoid_polygons:
+        #     try:
+        #         result = await amap_route_planning_with_avoidance_async(
+        #             origin_lon=origin.lon,
+        #             origin_lat=origin.lat,
+        #             dest_lon=destination.lon,
+        #             dest_lat=destination.lat,
+        #             avoid_polygons=avoid_polygons,
+        #             strategy=strategy,
+        #         )
+        #
+        #         if result.get("paths"):
+        #             return self._parse_amap_result(origin, destination, result, "amap")
+        #     except Exception as e:
+        #         logger.warning(f"高德避障API失败: {e}")
+
+        logger.info("使用直线距离估算")
         return self._fallback_straight_line(origin, destination)
     
     async def _internal_route(
@@ -334,6 +456,79 @@ class RoutePlanningService:
                 total_duration_s=0,
                 error_message=str(e),
             )
+
+    async def _rust_route(
+        self,
+        origin: Point,
+        destination: Point,
+        avoid_areas: Optional[List[AvoidArea]] = None,
+    ) -> RouteResult:
+        """Rust离线路径规划（road-first + grid fallback）。"""
+        rust = _rust_astar if _rust_astar_initialized else None
+        if rust is None:
+            _ensure_rust_init_started()
+            return RouteResult(
+                source="fallback",
+                success=False,
+                origin=origin,
+                destination=destination,
+                total_distance_m=0,
+                total_duration_s=0,
+                error_message="rust_astar not available (initializing or failed)",
+            )
+
+        obstacles = None
+        if avoid_areas:
+            polygons = []
+            for area in avoid_areas:
+                if area.severity != "hard":
+                    continue
+                polygons.append([(p.lon, p.lat) for p in area.polygon])
+            obstacles = {"polygons": polygons, "segments": []}
+
+        def _call():
+            return rust.plan_route_road_first(
+                start=(origin.lon, origin.lat),
+                goal=(destination.lon, destination.lat),
+                max_slope_deg=RUST_ASTAR_MAX_SLOPE_DEG,
+                max_step_m=RUST_ASTAR_MAX_STEP_M,
+                use_roadnet=True,
+                obstacles=obstacles,
+                road_search_radius_m=RUST_ASTAR_ROAD_SEARCH_RADIUS_M,
+            )
+
+        try:
+            result = await asyncio.to_thread(_call)
+        except Exception as exc:
+            return RouteResult(
+                source="fallback",
+                success=False,
+                origin=origin,
+                destination=destination,
+                total_distance_m=0,
+                total_duration_s=0,
+                error_message=str(exc),
+            )
+
+        distance_km = float(result.get("distance_km", 0.0))
+        duration_s = result.get("duration_s")
+        if duration_s is None:
+            avg_speed_kmh = 40.0
+            duration_s = (distance_km / max(avg_speed_kmh, 1.0)) * 3600.0
+
+        polyline = [
+            Point(lon=pt[0], lat=pt[1]) for pt in result.get("points", [])
+        ]
+
+        return RouteResult(
+            source="internal",
+            success=True,
+            origin=origin,
+            destination=destination,
+            total_distance_m=distance_km * 1000.0,
+            total_duration_s=float(duration_s),
+            polyline=polyline,
+        )
     
     def _parse_amap_result(
         self,
