@@ -360,15 +360,37 @@ class StagingAreaCore:
         team_point = Point(lon=team.base_lon, lat=team.base_lat)
 
         semaphore = asyncio.Semaphore(max(1, STAGING_ROUTE_MAX_CONCURRENCY))
+        # 单次推荐调用内的缓存：避免重复计算相同起终点
+        route_cache: dict[tuple[float, float, float, float], RouteResult] = {}
+
+        def _cache_key(a: Point, b: Point) -> tuple[float, float, float, float]:
+            return (
+                round(a.lon, 6),
+                round(a.lat, 6),
+                round(b.lon, 6),
+                round(b.lat, 6),
+            )
+
+        def _is_same_place(a_lon: float, a_lat: float, b_lon: float, b_lat: float, threshold_m: float = 30.0) -> bool:
+            return (
+                haversine_distance(Location(a_lat, a_lon), Location(b_lat, b_lon)) * 1000.0
+                <= threshold_m
+            )
 
         async def _plan(start: Point, end: Point) -> RouteResult:
+            key = _cache_key(start, end)
+            cached = route_cache.get(key)
+            if cached is not None:
+                return cached
             async with semaphore:
-                return await self._route_engine.plan_route(
+                result = await self._route_engine.plan_route(
                     start=start,
                     end=end,
                     vehicle=vehicle,
                     scenario_id=scenario_id,
                 )
+                route_cache[key] = result
+                return result
 
         async def _process_candidate(candidate: CandidateSite) -> Optional[CandidateWithRoutes]:
             candidate_point = Point(lon=candidate.longitude, lat=candidate.latitude)
@@ -384,6 +406,15 @@ class StagingAreaCore:
             async def _plan_to_target(target: RescueTarget) -> Optional[RouteToTarget]:
                 target_point = Point(lon=target.longitude, lat=target.latitude)
                 try:
+                    # 常见场景：只有一个救援目标，且目标=队伍驻地/震中（回程对称），可直接复用 route_to_site
+                    if _is_same_place(team.base_lon, team.base_lat, target.longitude, target.latitude):
+                        return RouteToTarget(
+                            target_id=target.id,
+                            target_name=target.name,
+                            distance_m=route_to_site.distance_m,
+                            duration_seconds=route_to_site.duration_seconds,
+                            priority=target.priority,
+                        )
                     route = await _plan(candidate_point, target_point)
                     return RouteToTarget(
                         target_id=target.id,
