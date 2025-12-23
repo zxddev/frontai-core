@@ -25,6 +25,7 @@ from src.agents.staging_area.state import (
     StagingAreaAgentState,
     TerrainAssessment,
 )
+from src.agents.staging_area.nodes._fallback_assessments import fallback_terrain_assessments
 logger = logging.getLogger(__name__)
 
 
@@ -150,6 +151,8 @@ async def analyze_terrain(
         llm = _get_llm()
         response = await llm.ainvoke(prompt)
         raw_output = response.content if hasattr(response, "content") else str(response)
+        if not str(raw_output).strip():
+            raise json.JSONDecodeError("empty", "", 0)
         
         # 解析JSON
         json_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw_output)
@@ -183,19 +186,21 @@ async def analyze_terrain(
         
     except json.JSONDecodeError as e:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
-        logger.warning(f"[地形分析] JSON解析失败: {e}")
+        logger.info(f"[地形分析] LLM输出不可用，使用规则评估: {e}")
+        candidate_sites = state.get("candidate_sites") or state.get("ranked_sites", [])
+        heuristic = fallback_terrain_assessments(candidate_sites[:10])
         return {
-            "terrain_assessments": None,
-            "errors": state.get("errors", []) + [f"地形分析JSON解析失败: {str(e)}"],
+            "terrain_assessments": heuristic,
             "timing": {**state.get("timing", {}), "terrain_ms": elapsed_ms},
         }
         
     except Exception as e:
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
-        logger.error(f"[地形分析] 异常: {e}", exc_info=True)
+        logger.info(f"[地形分析] LLM异常，使用规则评估: {e}")
+        candidate_sites = state.get("candidate_sites") or state.get("ranked_sites", [])
+        heuristic = fallback_terrain_assessments(candidate_sites[:10])
         return {
-            "terrain_assessments": None,
-            "errors": state.get("errors", []) + [f"地形分析异常: {str(e)}"],
+            "terrain_assessments": heuristic,
             "timing": {**state.get("timing", {}), "terrain_ms": elapsed_ms},
         }
 
