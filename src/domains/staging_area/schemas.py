@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -247,6 +247,10 @@ class RankedStagingSite(BaseModel):
     
     scores: Dict[str, float] = Field(default_factory=dict)
     total_score: float = 0.0
+    # 可解释性：用于前端展示“为何推荐”
+    explanation: Optional[str] = None
+    # 原始指标：用于前端展示/调试（不影响既有字段）
+    metrics: Dict[str, Any] = Field(default_factory=dict)
 
 
 class StagingRecommendation(BaseModel):

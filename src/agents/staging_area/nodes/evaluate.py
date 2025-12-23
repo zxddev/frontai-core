@@ -227,9 +227,13 @@ async def evaluate_candidates(
                 "route_from_base_distance_m": site.route_from_base_distance_m,
                 "route_from_base_duration_s": site.route_from_base_duration_s,
                 "avg_response_time_to_targets_s": site.avg_response_time_to_targets_s,
+                "distance_to_danger_m": site.distance_to_danger_m,
                 "has_water_supply": site.has_water_supply,
                 "has_power_supply": site.has_power_supply,
                 "can_helicopter_land": site.can_helicopter_land,
+                "network_type": site.network_type,
+                "explanation": getattr(site, "explanation", None),
+                "metrics": getattr(site, "metrics", None),
             }
             for site in (result.recommended_sites or [])
         ]

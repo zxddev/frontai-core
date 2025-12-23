@@ -492,7 +492,40 @@ class StagingAreaCore:
             )
             
             avg_response_s = self._calc_weighted_avg_response(c.routes_to_targets)
-            
+
+            # 构建可解释性说明（规则生成，避免依赖LLM）
+            dist_danger = c.site.distance_to_danger_m
+            epicenter_m = c.site.distance_to_epicenter_m
+            seismic = (c.site.seismic_zone or "none").lower()
+            safety_bits = []
+            if dist_danger is not None:
+                safety_bits.append(f"距危险区约{int(dist_danger)}m")
+            if epicenter_m is not None:
+                safety_bits.append(f"距震中约{epicenter_m/1000:.1f}km")
+            if seismic in ("orange", "yellow"):
+                safety_bits.append(f"位于烈度圈({seismic})，安全分已惩罚")
+            elif seismic == "none":
+                safety_bits.append("不在烈度圈内")
+
+            facility_bits = []
+            if c.site.has_water_supply:
+                facility_bits.append("有水源")
+            if c.site.has_power_supply:
+                facility_bits.append("有电源")
+            if c.site.can_helicopter_land:
+                facility_bits.append("可直升机起降")
+
+            explanation_parts = [
+                f"综合得分={round(total, 3)}",
+                f"响应(加权到目标)≈{avg_response_s/60:.1f}分钟",
+                "安全：" + "，".join(safety_bits) if safety_bits else "安全信息不足",
+            ]
+            if facility_bits:
+                explanation_parts.append("设施：" + "，".join(facility_bits))
+            explanation_parts.append(f"通信类型={c.site.primary_network_type.value}")
+
+            explanation = "；".join(explanation_parts)
+
             ranked.append(RankedStagingSite(
                 site_id=c.site.id,
                 site_code=c.site.site_code,
@@ -519,6 +552,24 @@ class StagingAreaCore:
                     "communication": round(scores.communication, 3),
                 },
                 total_score=round(total, 3),
+                explanation=explanation,
+                metrics={
+                    # 距离类
+                    "distance_to_danger_m": dist_danger,
+                    "distance_to_epicenter_m": epicenter_m,
+                    "seismic_zone": c.site.seismic_zone,
+                    # 路径类（注意：这里是“实际路由距离/时间”而不是直线距离）
+                    "route_from_base_distance_m": c.route_from_base_distance_m,
+                    "route_from_base_duration_s": c.route_from_base_duration_s,
+                    "avg_response_time_to_targets_s": avg_response_s,
+                    "reachable_target_count": len(c.routes_to_targets),
+                    # 权重（便于前端解释排序依据）
+                    "weight_response_time": weights.response_time,
+                    "weight_safety": weights.safety,
+                    "weight_logistics": weights.logistics,
+                    "weight_facility": weights.facility,
+                    "weight_communication": weights.communication,
+                },
             ))
         
         ranked.sort(key=lambda x: x.total_score, reverse=True)
