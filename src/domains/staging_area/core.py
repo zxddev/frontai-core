@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import math
 import time
+import os
+import asyncio
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING, Protocol
 from uuid import UUID
 
@@ -29,6 +31,7 @@ from src.domains.staging_area.schemas import (
     TargetPriority,
     TeamInfo,
 )
+from src.planning.algorithms.base import haversine_distance, Location
 from src.planning.algorithms.routing.db_route_engine import (
     VehicleCapability,
     Point,
@@ -48,6 +51,8 @@ PRIORITY_WEIGHTS: Dict[TargetPriority, float] = {
     TargetPriority.MEDIUM: 1.0,
     TargetPriority.LOW: 0.5,
 }
+
+STAGING_ROUTE_MAX_CONCURRENCY = int(os.environ.get("STAGING_ROUTE_MAX_CONCURRENCY", "8"))
 
 
 class RouteEngine(Protocol):
@@ -148,6 +153,21 @@ class StagingAreaCore:
                 )
             
             logger.info(f"[驻扎点选址] 候选点搜索完成: {len(candidates)} 个")
+
+            # 2.1 地震烈度圈过滤/标注（不依赖 PostGIS）
+            red_radius_km = self._estimate_intensity_radius(earthquake.magnitude, target_intensity=8)
+            orange_radius_km = self._estimate_intensity_radius(earthquake.magnitude, target_intensity=6)
+            yellow_radius_km = self._estimate_intensity_radius(earthquake.magnitude, target_intensity=4)
+
+            candidates = self._annotate_and_filter_by_seismic_zones(
+                candidates=candidates,
+                epicenter_lon=earthquake.epicenter_lon,
+                epicenter_lat=earthquake.epicenter_lat,
+                red_radius_km=red_radius_km,
+                orange_radius_km=orange_radius_km,
+                yellow_radius_km=yellow_radius_km,
+            )
+            logger.info(f"[驻扎点选址] 烈度圈过滤后候选点: {len(candidates)} 个")
             
             # 3. 批量验证路径可行性
             candidates_with_routes = await self._validate_routes_batch(
@@ -317,6 +337,9 @@ class StagingAreaCore:
         - 队伍驻地 → 候选点
         - 候选点 → 各救援目标
         """
+        if not candidates:
+            return []
+
         results: List[CandidateWithRoutes] = []
         
         # 构建车辆能力参数
@@ -335,56 +358,64 @@ class StagingAreaCore:
         )
         
         team_point = Point(lon=team.base_lon, lat=team.base_lat)
-        
-        for candidate in candidates:
-            candidate_point = Point(lon=candidate.longitude, lat=candidate.latitude)
-            
-            # 1. 规划：驻地 → 候选点
-            try:
-                route_to_site = await self._route_engine.plan_route(
-                    start=team_point,
-                    end=candidate_point,
+
+        semaphore = asyncio.Semaphore(max(1, STAGING_ROUTE_MAX_CONCURRENCY))
+
+        async def _plan(start: Point, end: Point) -> RouteResult:
+            async with semaphore:
+                return await self._route_engine.plan_route(
+                    start=start,
+                    end=end,
                     vehicle=vehicle,
                     scenario_id=scenario_id,
                 )
+
+        async def _process_candidate(candidate: CandidateSite) -> Optional[CandidateWithRoutes]:
+            candidate_point = Point(lon=candidate.longitude, lat=candidate.latitude)
+
+            try:
+                route_to_site = await _plan(team_point, candidate_point)
             except InfeasiblePathError:
-                logger.debug(f"[路径验证] 候选点 {candidate.name} 从驻地不可达")
-                continue
+                return None
             except Exception as e:
                 logger.warning(f"[路径验证] 规划到 {candidate.name} 失败: {e}")
-                continue
-            
-            # 2. 规划：候选点 → 各目标
-            routes_to_targets: List[RouteToTarget] = []
-            for target in targets:
+                return None
+
+            async def _plan_to_target(target: RescueTarget) -> Optional[RouteToTarget]:
                 target_point = Point(lon=target.longitude, lat=target.latitude)
                 try:
-                    route = await self._route_engine.plan_route(
-                        start=candidate_point,
-                        end=target_point,
-                        vehicle=vehicle,
-                        scenario_id=scenario_id,
-                    )
-                    routes_to_targets.append(RouteToTarget(
+                    route = await _plan(candidate_point, target_point)
+                    return RouteToTarget(
                         target_id=target.id,
                         target_name=target.name,
                         distance_m=route.distance_m,
                         duration_seconds=route.duration_seconds,
                         priority=target.priority,
-                    ))
-                except (InfeasiblePathError, Exception):
-                    pass
-            
-            # 至少能到达一个目标
-            if routes_to_targets:
-                results.append(CandidateWithRoutes(
-                    site=candidate,
-                    route_from_base_distance_m=route_to_site.distance_m,
-                    route_from_base_duration_s=route_to_site.duration_seconds,
-                    routes_to_targets=routes_to_targets,
-                    is_reachable=True,
-                ))
-        
+                    )
+                except Exception:
+                    return None
+
+            target_tasks = [asyncio.create_task(_plan_to_target(t)) for t in targets]
+            target_results = await asyncio.gather(*target_tasks, return_exceptions=False)
+            routes_to_targets = [r for r in target_results if r is not None]
+
+            if not routes_to_targets:
+                return None
+
+            return CandidateWithRoutes(
+                site=candidate,
+                route_from_base_distance_m=route_to_site.distance_m,
+                route_from_base_duration_s=route_to_site.duration_seconds,
+                routes_to_targets=routes_to_targets,
+                is_reachable=True,
+            )
+
+        tasks = [asyncio.create_task(_process_candidate(c)) for c in candidates]
+        processed = await asyncio.gather(*tasks, return_exceptions=False)
+        for item in processed:
+            if item is not None:
+                results.append(item)
+
         return results
     
     def _evaluate_and_rank(
@@ -476,9 +507,18 @@ class StagingAreaCore:
         avg_response = self._calc_weighted_avg_response(candidate.routes_to_targets)
         response_score = 1.0 - (avg_response / max_response_time) if max_response_time > 0 else 0
         
-        # 2. 安全性得分（距离危险区越远分数越高）
-        danger_dist = candidate.site.distance_to_danger_m or 0
-        safety_score = danger_dist / max_danger_dist if max_danger_dist > 0 else 0
+        # 2. 安全性得分（距离危险区越远分数越高；叠加地震烈度圈惩罚）
+        danger_dist = candidate.site.distance_to_danger_m
+        if danger_dist is None:
+            safety_score = 0.5
+        else:
+            safety_score = danger_dist / max_danger_dist if max_danger_dist > 0 else 0.5
+
+        seismic_zone = (candidate.site.seismic_zone or "none").lower()
+        if seismic_zone == "orange":
+            safety_score *= 0.25
+        elif seismic_zone == "yellow":
+            safety_score *= 0.7
         
         # 3. 后勤保障得分（到补给/医疗点越近分数越高）
         supply_dist = candidate.site.nearest_supply_depot_m or 0
@@ -499,6 +539,48 @@ class StagingAreaCore:
             facility=max(0, min(1, facility_score)),
             communication=max(0, min(1, comm_score)),
         )
+
+    @staticmethod
+    def _annotate_and_filter_by_seismic_zones(
+        *,
+        candidates: List[CandidateSite],
+        epicenter_lon: float,
+        epicenter_lat: float,
+        red_radius_km: float,
+        orange_radius_km: float,
+        yellow_radius_km: float,
+    ) -> List[CandidateSite]:
+        """
+        给候选点打上距离震中/烈度圈标签，并进行过滤。
+
+        规则：
+        - 永远剔除红圈（烈度>=8）内点位
+        - 尽量剔除橙圈（烈度>=6）内点位；如果剔除后候选点过少，则保留橙圈但在评分中强惩罚
+        """
+        annotated: List[CandidateSite] = []
+        for c in candidates:
+            dist_km = haversine_distance(
+                Location(epicenter_lat, epicenter_lon),
+                Location(c.latitude, c.longitude),
+            )
+            c.distance_to_epicenter_m = dist_km * 1000.0
+            if dist_km <= red_radius_km:
+                c.seismic_zone = "red"
+            elif dist_km <= orange_radius_km:
+                c.seismic_zone = "orange"
+            elif dist_km <= yellow_radius_km:
+                c.seismic_zone = "yellow"
+            else:
+                c.seismic_zone = "none"
+            annotated.append(c)
+
+        # always drop red
+        no_red = [c for c in annotated if (c.seismic_zone or "") != "red"]
+        # prefer drop orange if enough remain
+        no_orange = [c for c in no_red if (c.seismic_zone or "") != "orange"]
+        if len(no_orange) >= min(10, len(no_red)):
+            return no_orange
+        return no_red
     
     def _calc_weighted_avg_response(self, routes: List[RouteToTarget]) -> float:
         """计算加权平均响应时间"""

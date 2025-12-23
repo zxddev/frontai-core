@@ -184,6 +184,9 @@ class CandidateSite:
     nearest_medical_point_m: Optional[float] = None
     nearest_command_post_m: Optional[float] = None
     distance_to_danger_m: Optional[float] = None
+    # 地震相关的派生信息（Core 层计算，不强依赖数据库）
+    distance_to_epicenter_m: Optional[float] = None
+    seismic_zone: Optional[str] = None  # red/orange/yellow/none
     scenario_id: Optional[UUID] = None
 
 

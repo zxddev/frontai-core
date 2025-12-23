@@ -94,6 +94,7 @@ class POICollectionService:
         scenario_id: Optional[UUID] = None,
         min_candidates: int = 10,
         save_to_db: bool = True,
+        force_collect: bool = False,
     ) -> Tuple[List[Dict], int]:
         """
         采集POI并与数据库数据合并
@@ -133,8 +134,8 @@ class POICollectionService:
             f"阈值={min_candidates}, 搜索半径={search_radius_m}m"
         )
 
-        # 2. 如果数据库数据充足，直接返回
-        if db_count >= min_candidates:
+        # 2. 如果数据库数据充足，且不强制采集，直接返回
+        if (not force_collect) and db_count >= min_candidates:
             logger.info("[POI采集] 数据库数据充足，跳过POI采集")
             logger.debug(f"[POI采集] collect_and_merge 出口: 返回空列表, new_count=0")
             return [], 0
@@ -201,6 +202,33 @@ class POICollectionService:
 
         logger.debug(f"[POI采集] collect_and_merge 出口: 返回 {len(result)} 个候选点, new_count={len(new_candidates)}")
         return result, len(new_candidates)
+
+    async def clear_amap_pois_in_radius(
+        self,
+        *,
+        center_lon: float,
+        center_lat: float,
+        search_radius_m: float,
+    ) -> int:
+        """
+        清空指定范围内由高德采集写入的候选点（properties.source == 'amap_poi'）。
+        """
+        sql = text("""
+            DELETE FROM operational_v2.rescue_staging_sites_v2
+            WHERE (properties->>'source') = 'amap_poi'
+              AND ST_DWithin(
+                location,
+                ST_SetSRID(ST_Point(:center_lon, :center_lat), 4326)::geography,
+                :search_radius_m
+              )
+        """)
+        result = await self._db.execute(sql, {
+            "center_lon": center_lon,
+            "center_lat": center_lat,
+            "search_radius_m": search_radius_m,
+        })
+        await self._db.commit()
+        return int(getattr(result, "rowcount", 0) or 0)
 
     async def collect_from_amap(
         self,

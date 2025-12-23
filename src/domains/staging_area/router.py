@@ -9,9 +9,11 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, Field
 
 from src.core.database import get_db
 from src.domains.staging_area.service import StagingAreaService
+from src.domains.staging_area.poi_service import POICollectionService
 from src.domains.staging_area.schemas import (
     StagingRecommendation,
     StagingRecommendationRequest,
@@ -84,6 +86,42 @@ async def health_check() -> dict:
     健康检查端点
     """
     return {"status": "ok", "service": "staging-area"}
+
+
+class ClearPoiRequest(BaseModel):
+    center_lon: float = Field(..., description="中心点经度(WGS84)")
+    center_lat: float = Field(..., description="中心点纬度(WGS84)")
+    search_radius_m: float = Field(40000.0, ge=0, description="清理半径(米)")
+
+
+class ClearPoiResponse(BaseModel):
+    success: bool = True
+    deleted_count: int = 0
+
+
+@router.post(
+    "/poi/clear",
+    response_model=ClearPoiResponse,
+    summary="清空范围内POI候选点（高德采集）",
+)
+async def clear_poi_candidates(
+    request: ClearPoiRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ClearPoiResponse:
+    """
+    删除 operational_v2.rescue_staging_sites_v2 中 properties.source='amap_poi' 的点位（按范围）。
+    """
+    try:
+        service = POICollectionService(db)
+        deleted = await service.clear_amap_pois_in_radius(
+            center_lon=request.center_lon,
+            center_lat=request.center_lat,
+            search_radius_m=request.search_radius_m,
+        )
+        return ClearPoiResponse(success=True, deleted_count=deleted)
+    except Exception as e:
+        logger.error(f"[POI清理] 异常: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"POI清理失败: {str(e)}")
 
 
 @router.post(
